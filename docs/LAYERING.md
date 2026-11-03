@@ -10,7 +10,7 @@ A crate's layer is decided by its path in `sys/`:
 
 | Layer | Crates | `unsafe` | May depend on |
 |---|---|---|---|
-| **base** | `libkern`, `sys`, `mdi` | only `libkern` | base |
+| **base** | `libkern`, `sys`, `mdi` | only `libkern` (`mdi` may *declare* `unsafe trait`s) | base |
 | **md** | `arch/*` | yes | base, md |
 | **framework** | `framework` | yes | base, md |
 | **service** | everything else (`kern`, `vm`, `compat/*`, `fs/*`, `dev/*`, ...) | **forbidden** | `libkern`, `sys`, framework, service |
@@ -26,7 +26,7 @@ The **trusted base** (the framekernel's TCB) is `libkern`, `arch/*` and
 | **R1** | Dependencies only point to the layers in the table. In particular, only `framework` (and other MD crates) depend on `arch/*`, and `arch/*` never depends on the framework or on services. | checklayers |
 | **R2** | Services and `conf` do not depend on `mdi`; they use the framework's wrappers. | checklayers |
 | **R3** | `cfg(target_arch …)` appears only in `arch/*`, in `framework`, or in files under an `arch/` directory of a service (e.g. `compat/freebsd/arch/amd64.rs`). | checklayers |
-| **R4** | `unsafe` only in the trusted base. Every other crate root declares `#![forbid(unsafe_code)]` (`conf`: `#![deny(unsafe_code)]`). | checklayers + compiler |
+| **R4** | `unsafe` only in the trusted base. Every other crate root declares `#![forbid(unsafe_code)]`; `conf` and `mdi` declare `#![deny(unsafe_code)]` and opt in item by item (the entry macro; `unsafe trait` declarations). | checklayers + compiler |
 | **R5** | `asm!`, `global_asm!`, `naked_asm!` only in `arch/*`. | checklayers |
 | **R6** | No `static mut` anywhere. Shared state lives behind a lock, in an atomic, or in a `CpuLocal`. | checklayers |
 | **R7** | Intra-kernel dependencies are declared in `[workspace.dependencies]` and used with `workspace = true`. External crates are forbidden unless added to `ALLOWED_EXTERNAL` in `tools/checklayers/main.rs`, with a reason. | checklayers |

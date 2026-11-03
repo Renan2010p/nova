@@ -7,9 +7,9 @@ FreeBSD userland; real hardware comes after.
 | # | Milestone | Done when | Status |
 |---|---|---|---|
 | 0 | Workspace, framekernel layering, `checklayers`, pinned toolchain | `make check` passes | **done** |
-| 1 | Boot via FreeBSD `loader(8)`: `btext`, `hammer_time`, per-CPU area, COM1, preload metadata, memory map | banner and memory map printed under bhyve | **done** (to be validated under bhyve) |
-| 2 | GDT/IDT/TSS, traps; framework: `vm_phys` frame allocator, kernel heap, `VmSpace` over `pmap`; local APIC timer | a page fault is handled and `Box` works | |
-| 3 | Threads: context switch, kernel stacks, scheduler, sleep locks | two kernel threads alternate | |
+| 1 | Boot via FreeBSD `loader(8)`: `btext`, `hammer_time`, per-CPU area, COM1, preload metadata, memory map | banner and memory map printed under bhyve | **done** |
+| 2 | GDT/IDT/TSS, traps with FreeBSD's `trap_fatal`; kernel page tables and direct map; framework: `vm_phys`, `Frame`/`Segment`, kernel heap; x2APIC timer, `hardclock` | a page fault is caught and reported, `Box` works, the clock ticks | **done** (to be validated under bhyve) |
+| 3 | Threads: context switch, kernel stacks, scheduler, sleep locks; `VmSpace` over `pmap` (`pmap_enter`/`pmap_remove`) | two kernel threads alternate | |
 | 3b | **SMP**: AP start-up (`mp_machdep`, INIT-SIPI-SIPI), IPIs, TLB shootdown, per-CPU run queues | all CPUs run kernel threads; `CPUs: N running` | |
 | 3c | **Second architecture stub** (riscv64 or aarch64) that compiles | proves no MD code leaked into MI code | |
 | 4 | User mode; ELF loader; `compat/freebsd` `sysentvec`; `UserPtr`/`copyin`/`copyout` | a static FreeBSD binary does `write` + `exit` | |

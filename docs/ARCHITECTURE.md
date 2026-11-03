@@ -58,9 +58,12 @@ raw pointers. It owns the **mechanisms**:
 | Per-CPU variables | done (`framework::pcpu::CpuLocal`) |
 | Interrupt-safe spin mutexes | done (`framework::sync::MtxSpin`) |
 | Early console | done (`framework::cons`) |
-| Physical frames (`vm_phys`), kernel heap (`GlobalAlloc`) | milestone 2 |
-| Address spaces over the MD `pmap` | milestone 2 |
-| Traps, interrupts, IPIs | milestone 2–3 |
+| Physical pages: `vm_phys` buddy allocator, owned `Frame`/`Segment` | done (`framework::mm`) |
+| Kernel heap: Rust's `GlobalAlloc` (`Box`, `Vec`, ...) | done (`framework::mm::kmem`) |
+| Clock interrupt, interrupt upcall | done (`framework::clock`, `framework::intr`) |
+| Traps (MD: GDT/TSS/IDT, `trap_fatal`) and the direct map | done (`arch/amd64`) |
+| Address spaces over the MD `pmap` | milestone 3–4 |
+| IPIs | milestone 3b |
 | Threads: context switch, kernel stacks | milestone 3 |
 | User memory access (`UserPtr`, `copyin`/`copyout`) | milestone 4 |
 | Device access: `bus_space`, `bus_dma` (NetBSD style) | milestone 7 |
@@ -181,11 +184,55 @@ personality translates. That keeps the kernel free to evolve, and leaves
 room for other personalities next to FreeBSD's (a native Nova ABI, Linux).
 Only `conf` links personalities in (rule R9).
 
+## Memory
+
+```
+ physical memory (BootInfo::physavail)
+        │
+        ▼
+ framework::mm::vm_phys   buddy allocator (algorithm: libkern::buddy,
+        │                 links stored in the free pages via the DMAP)
+        ├──► Frame / Segment   owned pages: freed on drop, zeroed on alloc,
+        │                      contents copied in and out, never borrowed
+        └──► mm::kmem          #[global_allocator]: 16 B–2 KiB slab classes,
+                               larger requests as buddy blocks
+```
+
+The direct map (`DMAP_MIN_ADDRESS = 0xfffff80000000000`, FreeBSD's
+address) is built by the MD `pmap_bootstrap` and promised to the
+framework by the `unsafe trait mdi::DirectMap`. The framework's memory
+code is sound only because of that contract, which is why it is an
+`unsafe trait`.
+
+Frame contents are reached by copying (`read_bytes`/`write_bytes`), never
+through `&[u8]`, so that once frames can be mapped into user space, the
+kernel never holds Rust references into memory userland can change.
+
+## Traps and interrupts
+
+```
+ CPU ─► IDT gate ─► Xpage, Xtimerint, ... (arch/amd64/exception.rs)
+                       push error code (dummy if none) + FreeBSD T_* code
+                    ─► alltraps: save registers, call trap(&mut TrapFrame)
+                    ─► trap (arch/amd64/trap.rs)
+                         exception ─► trap_fatal: FreeBSD's report, panic
+                         interrupt ─► EOI, upcall __nova_intr(Interrupt)
+                                        ─► framework::intr ─► clock_intr
+                                             ─► kern_clock::hardclock
+```
+
+The trap numbers and the fatal trap report are FreeBSD's (`Fatal trap 12:
+page fault while in kernel mode`, `fault virtual address = ...`), so
+panics read the same. The GDT layout is FreeBSD's slot for slot: it is
+part of the userland ABI (selectors appear in signal contexts).
+
 ## Boot
 
 See [BOOT.md](BOOT.md). In short: FreeBSD's `loader(8)` loads the kernel
 ELF at physical 2 MiB and jumps to `btext` in long mode. `btext`
 (`arch/amd64/locore.rs`) switches to the boot stack and calls `hammer_time`
-(`arch/amd64/machdep.rs`). That sets up the per-CPU area and the early
-console, turns the loader's metadata into an MI `BootInfo`, and calls
-`mi_startup` (`kern/init_main.rs`).
+(`arch/amd64/machdep.rs`), which sets up the per-CPU area, the early
+console, the GDT/TSS/IDT, the kernel's page tables and direct map, and
+the local APIC, then turns the loader's metadata into an MI `BootInfo`.
+The framework initializes the page allocator from it, and `mi_startup`
+(`kern/init_main.rs`) runs.

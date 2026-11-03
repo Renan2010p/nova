@@ -52,9 +52,18 @@ Everything below was checked against the FreeBSD 15.1 sources
       `MODINFOMD_SMAP` (BIOS/userboot), sorted and coalesced
       (`sys::physmem::PhysMap`);
    6. calls `mi_startup` with an MI `BootInfo`.
-3. **`mi_startup`** (`kern/init_main.rs`): prints the copyright banner,
+   Before the memory map, it also loads the kernel's own GDT (FreeBSD's
+   layout), TSS (with IST stacks for double faults, NMIs and machine
+   checks) and IDT. After it, `pmap_bootstrap` replaces the loader's page
+   tables with the kernel's (KERNBASE plus the direct map), `phys_avail` is
+   computed, and the local APIC is switched to x2APIC mode.
+3. **The framework** builds the page allocator from `phys_avail`; from
+   here on the kernel heap works.
+4. **`mi_startup`** (`kern/init_main.rs`): prints the copyright banner,
    the memory map, the preloaded files, part of the environment (all of it
-   with `boot -v`) and the CPU count, then halts.
+   with `boot -v`), the available memory; checks the heap; starts the clock
+   at `kern.hz` (default 1000, or 100 under a hypervisor, as in FreeBSD) and
+   waits one second of ticks with interrupts on; then halts.
 
 ## Preload metadata
 
@@ -97,8 +106,9 @@ doas make bhyve      # or: doas sh tools/bhyve/run.sh sys/target/x86_64-unknown-
 
 `tools/bhyve/run.sh` builds a throw-away `/boot` (the host's
 `/boot/lua` and `/boot/defaults`, plus Nova as `/boot/kernel/kernel`), runs
-`bhyveload -h` on it, then `bhyve` with COM1 on your terminal. Expected
-output, after the loader's own messages:
+`bhyveload -h` on it, then `bhyve -x` with COM1 on your terminal. Nova
+needs x2APIC for now (`-x` offers it to the guest). Expected output,
+after the loader's own messages:
 
 ```
 Copyright (c) 2026 Renan Lucas Vieira Hilário.
@@ -107,10 +117,36 @@ Licensed under the Mozilla Public License, v. 2.0.
 Nova 0.1.0 amd64
 firmware: BIOS
 ...
+avail memory = ... MiB (... pages)
+kmem: Box and Vec work (2 pages kept by the heap's slabs)
+clock: hz = 100, 100 ticks counted with interrupts on
 CPUs: 1 running (boot CPU is cpu0), up to 256 supported
-mi_startup: nothing more to do yet (milestone 1)
+mi_startup: nothing more to do yet (milestone 2)
 The operating system has halted.
 run.sh: guest halted (expected for Nova today)
+```
+
+To check that faults are caught, boot with `SELFTEST=pf`:
+
+```sh
+doas make bhyve SELFTEST=pf
+```
+
+The kernel reads an unmapped address on purpose and must report it the
+way FreeBSD does, then panic and halt:
+
+```
+selftest: taking a page fault on purpose
+
+
+Fatal trap 12: page fault while in kernel mode
+cpuid = 0; apic id = 00
+fault virtual address	= 0xdeadbeef
+fault code		= supervisor read data, page not present
+instruction pointer	= 0x20:0xffffffff802...
+...
+trap number		= 12
+panic: page fault
 ```
 
 `boothowto` is `0x1000` (`RB_SERIAL`, from `console="comconsole"`). If
