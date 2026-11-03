@@ -40,12 +40,19 @@ then the userland.
    `sys/arch/amd64/machdep.rs`, ... Anyone who knows FreeBSD finds their
    way around Nova.
 
-## Status: milestone 1
+## Status: milestone 3
 
-The kernel is loaded by **FreeBSD's `loader(8)`**, takes over at `btext`,
-sets up the boot CPU's per-CPU area and the serial console (COM1), parses
-the loader's metadata (memory map, environment, preloaded files), prints
-it all, and halts.
+The kernel is loaded by **FreeBSD's `loader(8)`** and takes the machine
+over: its own GDT/IDT, page tables and direct map, a page allocator and
+heap, the local APIC clock, and preemptive kernel threads with a
+pluggable scheduler (4BSD), sleep mutexes and wait queues. Fatal traps and
+panics are reported exactly like FreeBSD reports them, with a symbolized
+backtrace. There is no userland yet, so the kernel halts where FreeBSD
+would start `init(8)`.
+
+The console reads like FreeBSD's: the same boot messages (`CPU:`,
+`Features=`, `real memory`, `avail memory`, `Event timer`...), the same
+panic report and the same halt and reboot prompts.
 
 ## Building and running
 
@@ -58,6 +65,8 @@ make              # check the layering rules, then build
 make check        # layering rules only (tools/checklayers)
 make test         # unit tests of the crates that run on the host
 doas make bhyve   # on FreeBSD, as root: boot it in bhyve with the system loader
+doas make bhyve VERBOSE=1        # boot -v: diagnostics and self-test results
+doas make bhyve SELFTEST=pf      # a fatal page fault on purpose (also: stack)
 ```
 
 See [docs/BOOT.md](docs/BOOT.md) for the boot protocol and testing.

@@ -47,6 +47,24 @@ and BSD license text below the MPL header (see [COPYRIGHT](../COPYRIGHT)).
   and values** (`MODINFO_*`, `RB_*`, `PSL_*`, `MSR_*`). Cite the FreeBSD
   header in the module doc.
 
+## Messages
+
+Nova must feel like FreeBSD to a Renux user, so:
+
+* **When Nova does something FreeBSD reports, it prints FreeBSD's
+  message**, with the same wording, spacing and number formats
+  (`real memory  = 536870912 (512 MB)`, two spaces included). Copy the
+  text from the FreeBSD sources (`/usr/src/sys/...`) and name the
+  function it comes from in a comment or doc.
+* **What FreeBSD only prints with `boot -v`, Nova only prints with
+  `boot -v`** (`RB_VERBOSE`, `boot_verbose="YES"`).
+* **Tunables keep FreeBSD's names and defaults** (`kern.hz`,
+  `kern.panic_reboot_wait_time`, `boot_verbose`...).
+* Nova-only messages say `Nova:` (or `selftest:`), so they are never
+  mistaken for FreeBSD ones.
+* Never print `FreeBSD` as the system's name: Nova is FreeBSD-compatible,
+  not FreeBSD (trademark).
+
 ## Comments and documentation
 
 * Every crate root has a `//!` block: what the crate is, its layer, and

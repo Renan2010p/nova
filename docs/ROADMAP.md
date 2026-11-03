@@ -9,10 +9,10 @@ FreeBSD userland; real hardware comes after.
 | 0 | Workspace, framekernel layering, `checklayers`, pinned toolchain | `make check` passes | **done** |
 | 1 | Boot via FreeBSD `loader(8)`: `btext`, `hammer_time`, per-CPU area, COM1, preload metadata, memory map | banner and memory map printed under bhyve | **done** |
 | 2 | GDT/IDT/TSS, traps with FreeBSD's `trap_fatal`; kernel page tables and direct map; framework: `vm_phys`, `Frame`/`Segment`, kernel heap; x2APIC timer, `hardclock` | a page fault is caught and reported, `Box` works, the clock ticks | **done** |
-| 3 | Threads: context switch, kernel stacks, scheduler, sleep locks; `VmSpace` over `pmap` (`pmap_enter`/`pmap_remove`) | two kernel threads alternate | |
+| 3 | Threads: context switch, kernel stacks with guard pages (`pmap_kenter`/`pmap_kremove`), injected scheduler (4BSD round robin), preemption, wait queues, sleep mutexes, `pause`; FreeBSD-style boot, panic and halt messages with symbolized backtraces | kernel threads take turns, a busy thread is preempted, mutex contention is correct | **done** (to be validated under bhyve) |
 | 3b | **SMP**: AP start-up (`mp_machdep`, INIT-SIPI-SIPI), IPIs, TLB shootdown, per-CPU run queues | all CPUs run kernel threads; `CPUs: N running` | |
 | 3c | **Second architecture stub** (riscv64 or aarch64) that compiles | proves no MD code leaked into MI code | |
-| 4 | User mode; ELF loader; `compat/freebsd` `sysentvec`; `UserPtr`/`copyin`/`copyout` | a static FreeBSD binary does `write` + `exit` | |
+| 4 | User address spaces (`VmSpace` over `pmap`); user mode; ELF loader; `compat/freebsd` `sysentvec`; `UserPtr`/`copyin`/`copyout` | a static FreeBSD binary does `write` + `exit` | |
 | 5 | VFS, devfs, tmpfs/`md_image` root; `fork`/`exec`/`wait`; signals | `/rescue/sh` runs | |
 | 6 | Full `mmap`; the sysctls libc needs; `ld-elf.so.1` | dynamic FreeBSD binaries run | |
 | 7 | `bus_space`/`bus_dma`, PCI, virtio-blk, UFS | boots to `init` from a FreeBSD disk | |

@@ -63,8 +63,10 @@ raw pointers. It owns the **mechanisms**:
 | Clock interrupt, interrupt upcall | done (`framework::clock`, `framework::intr`) |
 | Traps (MD: GDT/TSS/IDT, `trap_fatal`) and the direct map | done (`arch/amd64`) |
 | Address spaces over the MD `pmap` | milestone 3–4 |
-| IPIs | milestone 3b |
-| Threads: context switch, kernel stacks | milestone 3 |
+| Kernel threads: context switch, stacks with guard pages, preemption | done (`framework::task`, `framework::mm::kstack`) |
+| Sleep mutexes, wait queues, `OnceLock` | done (`framework::sync`) |
+| Pluggable scheduler (`Scheduler` trait, injected by a service) | done (`framework::task`) |
+| IPIs, AP start-up | milestone 3b |
 | User memory access (`UserPtr`, `copyin`/`copyout`) | milestone 4 |
 | Device access: `bus_space`, `bus_dma` (NetBSD style) | milestone 7 |
 
@@ -225,6 +227,58 @@ The trap numbers and the fatal trap report are FreeBSD's (`Fatal trap 12:
 page fault while in kernel mode`, `fault virtual address = ...`), so
 panics read the same. The GDT layout is FreeBSD's slot for slot: it is
 part of the userland ABI (selectors appear in signal contexts).
+
+## Threads and scheduling
+
+```
+ framework::task (mechanism, trusted)       kern::sched_4bsd (policy, safe)
+ ─────────────────────────────────────      ──────────────────────────────
+ Task: stack, saved context, state          impl Scheduler {
+ spawn / yield_now / exit / current             enqueue(task)   (sched_add)
+ reschedule: pick, switch, finish_switch        pick_next()     (sched_choose)
+ preempt_point at interrupt exit            }
+ WaitQueue, Mutex                           sched_clock: slice of hz/10 ticks,
+         ▲                                    then request_preempt()
+         └──────── inject_scheduler(&SCHED) ──┘
+```
+
+As in Asterinas, the framework does the switching and the service only
+decides who runs. FreeBSD's names are kept on both sides (`mi_switch`,
+`sched_add`, `sched_choose`, `sched_clock`, `kthread_add`, `pause`).
+
+The framework's rules, checked at run time where the compiler cannot:
+
+* **Every switch happens with exactly one interrupt guard held.** A thread
+  cannot switch away holding a spin lock (panic: "mi_switch: switch with
+  spin locks or critical sections held"), and a sleep mutex cannot be
+  taken holding one (panic: "acquiring blockable sleep lock with spinlock
+  or critical section held", as WITNESS says in FreeBSD).
+* **A context is never loaded before it is fully saved** (`on_cpu`), so a
+  thread woken on one CPU cannot start on another before the first has
+  switched away from it (SMP).
+* **A thread's stack is freed only when its last reference goes away**,
+  which is never before it has been switched away from for the last time.
+* **Kernel stacks have an unmapped guard page**: an overflow is a double
+  fault on its own IST stack, reported, not silent corruption.
+* **Preemption** happens at interrupt exit (`__nova_intr_exit`, FreeBSD's
+  `doreti` → `ast`), only when the interrupted code held no guard.
+
+## Console messages
+
+The kernel prints what FreeBSD prints, in the same format, wherever Nova
+does the same thing: the boot report (`CPU:`, `Origin=`, `Features=`,
+`Hypervisor:`, `real memory`, `avail memory`, `Event timer`,
+`Timecounters tick every`), fatal traps (`Fatal trap 12: page fault while
+in kernel mode`, `Fatal double fault`), panics (`panic:`, `cpuid =`,
+`time =`, `KDB: stack backtrace:` with `#n 0x... at function+0x...`,
+`Uptime:`, `Automatic reboot in 15 seconds - press a key on the console
+to abort`) and halts (`The operating system has halted.`, `Please press
+any key to reboot.`). The texts are copied from the FreeBSD 15.1 sources,
+not from memory; see the "Messages" rule in [STYLE.md](STYLE.md).
+
+Function names in backtraces come from the symbol table the loader
+preloads (`MODINFOMD_SSYM`/`ESYM`, read by `sys::elf::KSymTab`), and Rust
+names are demangled by `libkern::rust_demangle`.
 
 ## Boot
 
