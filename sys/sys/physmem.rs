@@ -96,6 +96,56 @@ impl<const N: usize> PhysMap<N> {
         true
     }
 
+    /// Removes `[start, end)` from the map, splitting ranges as needed.
+    /// Returns false, and remembers it, if a split did not fit.
+    pub fn remove(&mut self, start: u64, end: u64) -> bool {
+        if end <= start {
+            return true;
+        }
+        let mut i = 0;
+        while i < self.n {
+            let r = self.ranges[i];
+            if r.end <= start || r.start >= end {
+                i += 1;
+                continue;
+            }
+            let left = PhysRange {
+                start: r.start,
+                end: start,
+            };
+            let right = PhysRange {
+                start: end,
+                end: r.end,
+            };
+            match (left.start < left.end, right.start < right.end) {
+                (true, true) => {
+                    if self.n == N {
+                        self.overflowed = true;
+                        return false;
+                    }
+                    self.ranges.copy_within(i + 1..self.n, i + 2);
+                    self.ranges[i] = left;
+                    self.ranges[i + 1] = right;
+                    self.n += 1;
+                    i += 2;
+                }
+                (true, false) => {
+                    self.ranges[i] = left;
+                    i += 1;
+                }
+                (false, true) => {
+                    self.ranges[i] = right;
+                    i += 1;
+                }
+                (false, false) => {
+                    self.ranges.copy_within(i + 1..self.n, i);
+                    self.n -= 1;
+                }
+            }
+        }
+        true
+    }
+
     /// The ranges, sorted by address.
     pub fn as_slice(&self) -> &[PhysRange] {
         &self.ranges[..self.n]
@@ -153,6 +203,36 @@ mod tests {
         assert_eq!(m.as_slice().len(), 5);
         m.add(0x500, 0x10_0000);
         assert_eq!(m.as_slice(), [r(0, 0x10_0500)]);
+    }
+
+    #[test]
+    fn remove_splits_trims_and_drops() {
+        let mut m = PhysMap::<8>::new();
+        m.add(0, 0xa_0000);
+        m.add(0x10_0000, 0x1ff0_0000);
+        m.remove(0, 0x20_0000); // drops the first, trims the second
+        assert_eq!(m.as_slice(), [r(0x20_0000, 0x2000_0000)]);
+        m.remove(0x100_0000, 0x110_0000); // splits
+        assert_eq!(
+            m.as_slice(),
+            [r(0x20_0000, 0x100_0000), r(0x110_0000, 0x2000_0000)]
+        );
+        m.remove(0x1000_0000, u64::MAX); // clips the top
+        assert_eq!(
+            m.as_slice(),
+            [r(0x20_0000, 0x100_0000), r(0x110_0000, 0x1000_0000)]
+        );
+        m.remove(5, 5); // empty: no-op
+        assert_eq!(m.as_slice().len(), 2);
+    }
+
+    #[test]
+    fn remove_split_overflow_is_reported() {
+        let mut m = PhysMap::<1>::new();
+        m.add(0, 100);
+        assert!(!m.remove(10, 20));
+        assert!(m.overflowed());
+        assert_eq!(m.as_slice(), [r(0, 100)]);
     }
 
     #[test]
