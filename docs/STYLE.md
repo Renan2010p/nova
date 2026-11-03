@@ -1,0 +1,94 @@
+# Style
+
+## Language
+
+Everything in the Nova Project is written in **English**: code, comments,
+documentation, commit messages.
+
+## License header
+
+Every Rust source file starts with this header (rule R8, checked by
+`tools/checklayers`):
+
+```rust
+/*-
+ * SPDX-License-Identifier: MPL-2.0
+ *
+ * Copyright (c) 2026 Renan Lucas Vieira Hilário
+ *
+ * This file is part of the Nova Project, the kernel of the
+ * Renux "Nova" Project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+```
+
+Other files (`Cargo.toml`, `Makefile`, shell scripts, linker scripts)
+start with at least the `SPDX-License-Identifier`, copyright and project
+lines, in the comment syntax of the file.
+
+If a file adapts code from FreeBSD or NetBSD, keep their copyright notice
+and BSD license text below the MPL header (see [COPYRIGHT](../COPYRIGHT)).
+
+## Names
+
+* **Files and directories follow FreeBSD/NetBSD.** Before creating a
+  file, look up where FreeBSD keeps the equivalent and use that path and
+  name: `kern/kern_fork.rs`, `kern/subr_*.rs`, `vm/vm_map.rs`,
+  `arch/amd64/machdep.rs`. Prefixes: `init_`, `kern_`, `subr_`, `sys_`,
+  `vfs_`, `uipc_`, `sched_`, `vm_`.
+* **Functions keep FreeBSD's names when they do the same job**
+  (`mi_startup`, `hammer_time`, `cnputc`, `getmemsize`, `curcpu`), so the
+  FreeBSD sources work as a reference. Rust conventions apply otherwise
+  (`snake_case`, `CamelCase` types).
+* **Constants that are part of an interface keep FreeBSD's exact names
+  and values** (`MODINFO_*`, `RB_*`, `PSL_*`, `MSR_*`). Cite the FreeBSD
+  header in the module doc.
+
+## Comments and documentation
+
+* Every crate root has a `//!` block: what the crate is, its layer, and
+  its FreeBSD counterpart.
+* Every module has a `//!` line naming its FreeBSD counterpart, if any.
+* Public items have `///` docs (`missing_docs` warns).
+* Comments explain *why*. The code says *what*.
+* Planned work is written as `TODO(topic): ...`, e.g. `TODO(smp)`.
+
+## `unsafe`
+
+* Only in the trusted base (`libkern`, `arch/*`, `framework`): rule R4.
+* Every `unsafe` block has a `// SAFETY:` comment saying why each
+  requirement holds *here* (enforced by clippy).
+* Every `unsafe fn` has a `# Safety` section listing what the caller must
+  guarantee. Inside it, unsafe operations still need their own `unsafe {}`
+  block (`unsafe_op_in_unsafe_fn = "deny"`).
+* Prefer a safe wrapper with a narrow contract over spreading `unsafe`
+  around: `Ns8250::new` is `unsafe`, but `putc` is safe.
+* Parse firmware and loader data with bounds-checked reads
+  (`sys::bytes::read_u32`/`read_u64`) instead of casting pointers to
+  structs.
+
+## Formatting and checks
+
+```sh
+cargo fmt                # in sys/ and tools/
+make clippy              # must be clean
+make check               # layering rules
+make test                # host unit tests
+```
+
+The kernel is built with `overflow-checks = true` in release too: integer
+overflow is a panic, not silent wrap-around. Use `wrapping_*`,
+`checked_*` or `saturating_*` when wrap-around is intended.
+
+## Commits
+
+One logical change per commit, imperative subject line prefixed with the
+area, the way FreeBSD does it:
+
+```
+amd64: set up the per-CPU area before the early console
+kern: print the CPU count in mi_startup
+```
