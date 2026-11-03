@@ -37,6 +37,9 @@
 //! `boot -v` here too. There is no userland yet, so the kernel halts at
 //! the point where FreeBSD would start `init(8)`.
 
+use alloc::format;
+use alloc::string::String;
+
 use framework::{BootInfo, PAGE_SIZE};
 use sys::copyright::{COPYRIGHT, OSTYPE};
 use sys::reboot::{RB_HALT, RB_VERBOSE};
@@ -66,7 +69,10 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     }
     sched_4bsd::sched_init(param.hz);
     kern_clock::initclocks(param.hz);
+    mp_start();
+    kern_clock::inittimecounter();
     framework::cpu::intr_enable();
+    release_aps(bootverbose);
 
     subr_selftest::run(bootverbose, param.hz);
     subr_selftest::trap_selftest(&kenv);
@@ -121,6 +127,54 @@ fn cpu_startup(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
         }
     }
     printf!("avail memory = {} ({} MB)\n", free, free / 1_048_576);
+}
+
+/// Reports the CPUs the firmware lists (`madt_probe`, `mp_start`,
+/// `cpu_mp_announce`). The APs are started later, by `release_aps`.
+fn mp_start() {
+    if let Some(id) = framework::smp::acpi_madt_ident() {
+        let (oem, table) = (
+            String::from_utf8_lossy(&id[..6]),
+            String::from_utf8_lossy(&id[6..]),
+        );
+        printf!("ACPI APIC Table: <{} {}>\n", oem, table);
+    }
+    let ncpus = framework::smp::mp_ncpus_detected();
+    if ncpus < 2 {
+        return;
+    }
+    printf!("Nova/SMP: Multiprocessor System Detected: {} CPUs\n", ncpus);
+    let (packages, cores, threads) = framework::smp::cpu_topology();
+    let mut line = format!("Nova/SMP: {packages} package(s)");
+    if cores > 0 {
+        line += &format!(" x {cores} core(s)");
+    }
+    if threads > 1 {
+        line += &format!(" x {threads} hardware threads");
+    }
+    printf!("{}\n", line);
+}
+
+/// Starts the application processors (`release_aps`, with the messages
+/// of `init_secondary_tail`).
+fn release_aps(bootverbose: bool) {
+    let ncpus = framework::smp::mp_ncpus_detected();
+    for cpu in 1..ncpus {
+        if !framework::smp::start_ap(cpu) {
+            panic!(
+                "AP #{} (PHY# {}) failed!",
+                cpu,
+                framework::smp::cpu_apic_id(cpu)
+            );
+        }
+        if bootverbose {
+            printf!("SMP: AP CPU #{} Launched!\n", cpu);
+        } else {
+            let prefix = if cpu == 1 { "Launching APs: " } else { "" };
+            let suffix = if cpu == ncpus - 1 { "\n" } else { " " };
+            printf!("{}{}{}", prefix, cpu, suffix);
+        }
+    }
 }
 
 /// The files the loader preloaded (`linker_preload`, verbose only).

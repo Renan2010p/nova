@@ -198,6 +198,7 @@ pub fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> Option<Ar
     let sched = SCHEDULER.get().expect("spawn: no scheduler");
     let task = Arc::new(Task::new(name, Some(Box::new(f)), false)?);
     sched.enqueue(task.clone());
+    kick_idle_cpu();
     Some(task)
 }
 
@@ -246,6 +247,7 @@ pub(crate) fn unpark(task: Arc<Task>) {
         .is_ok();
     if let (true, Some(sched)) = (woken, SCHEDULER.get()) {
         sched.enqueue(task);
+        kick_idle_cpu();
     }
 }
 
@@ -330,12 +332,10 @@ pub(crate) fn reschedule(guard: &IntrGuard) {
 /// The second half of every switch, run by the thread switched to: lets
 /// the previous thread run elsewhere, and frees it if it exited.
 fn finish_switch(guard: &IntrGuard) {
-    let prev = PCPU
-        .get(guard)
-        .prev
-        .borrow_mut()
-        .take()
-        .expect("finish_switch: no previous thread");
+    // An AP's first switch (`ap_enter`) has no previous thread.
+    let Some(prev) = PCPU.get(guard).prev.borrow_mut().take() else {
+        return;
+    };
     prev.on_cpu.store(false, Ordering::Release);
     // Dropping the last reference to an exited thread frees its stack;
     // we are on another stack.
@@ -371,7 +371,53 @@ extern "C" fn task_entry() -> ! {
 /// runnable (`sched_idletd`).
 fn idle_loop() -> ! {
     loop {
+        IDLE.get_on(curcpu()).store(true, Ordering::Relaxed);
         cpu::cpu_idle();
+        IDLE.get_on(curcpu()).store(false, Ordering::Relaxed);
         yield_now();
     }
+}
+
+/// CPUs sleeping in their idle thread, which an IPI can wake.
+static IDLE: CpuLocal<AtomicBool> = CpuLocal::new([const { AtomicBool::new(false) }; MAXCPU]);
+
+/// Something became runnable: wake one idle CPU other than this one, so
+/// it does not wait for its next clock tick (FreeBSD's `sched_add` ->
+/// `ipi_cpu(IPI_AST)`).
+fn kick_idle_cpu() {
+    let me = curcpu();
+    if let Some(cpu) =
+        crate::smp::online_cpus().find(|&c| c != me && IDLE.get_on(c).load(Ordering::Relaxed))
+    {
+        crate::smp::ipi_cpu(cpu, mdi::Ipi::Ast);
+    }
+}
+
+/// Creates an idle thread (`idle: cpuN`) for an AP.
+pub(crate) fn new_idle(name: &'static str) -> Option<Arc<Task>> {
+    Task::new(name, None, true).map(Arc::new)
+}
+
+/// An AP's way into the scheduler: makes `idle` its current thread and
+/// switches to it, abandoning the boot stack (FreeBSD's `sched_throw`).
+pub(crate) fn ap_enter(idle: Arc<Task>) -> ! {
+    // The switch invariant: exactly one guard. It lives on the boot stack,
+    // which is never resumed; the idle thread takes over its count.
+    let g = intr_guard();
+    {
+        let p = PCPU.get(&g);
+        *p.idle.borrow_mut() = Some(idle.clone());
+        *p.current.borrow_mut() = Some(idle.clone());
+    }
+    idle.on_cpu.store(true, Ordering::Relaxed);
+    idle.state.store(RUNNING, Ordering::Relaxed);
+    let new = idle.pcb.get() as *const _;
+    drop(idle);
+    let mut boot = Md::PCB_INIT;
+    // SAFETY: interrupts are off; `boot` is a scratch PCB on this stack
+    // that nothing will ever resume; `new` was set up by `cpu_thread_init`
+    // and runs nowhere (the idle thread was just created for this CPU); the
+    // idle thread is kept alive by this CPU's `PCPU.idle`.
+    unsafe { Md::cpu_switch(&mut boot, new) };
+    unreachable!("ap_enter: the boot stack was resumed");
 }

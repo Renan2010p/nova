@@ -132,7 +132,8 @@ impl IstStack {
     }
 }
 
-// TODO(smp): the APs get their IST stacks from the page allocator.
+// The boot CPU's IST stacks; the APs get theirs from the framework
+// (`mdi::Smp::cpu_start_ap`).
 static BOOT_DBLFAULT_STACK: IstStack = IstStack::new();
 static BOOT_NMI_STACK: IstStack = IstStack::new();
 static BOOT_MCHK_STACK: IstStack = IstStack::new();
@@ -153,7 +154,7 @@ fn setidt(vec: u8, func: usize, ist: u8) {
 /// Fills the shared IDT. Boot CPU only, once, before interrupts are on.
 pub(crate) fn idt_init() {
     use crate::exception::*;
-    use crate::trap::{APIC_SPURIOUS_INT, APIC_TIMER_INT};
+    use crate::trap::{APIC_SPURIOUS_INT, APIC_TIMER_INT, IPI_BITMAP_VECTOR, IPI_STOP};
 
     let traps: [(u8, unsafe extern "C" fn(), u8); 20] = [
         (0, Xdiv, 0),
@@ -189,27 +190,38 @@ pub(crate) fn idt_init() {
         };
         setidt(vec, func as usize, 0);
     }
-    let intrs: [(u8, unsafe extern "C" fn()); 2] = [
+    let intrs: [(u8, unsafe extern "C" fn()); 4] = [
         (APIC_TIMER_INT, Xtimerint),
         (APIC_SPURIOUS_INT, Xspuriousint),
+        (IPI_BITMAP_VECTOR, Xipi_intr_bitmap_handler),
+        (IPI_STOP, Xcpustop),
     ];
     for (vec, func) in intrs {
         setidt(vec, func as usize, 0);
     }
 }
 
-/// Sets up and loads CPU `cpuid`'s GDT and TSS, reloads the segment
+/// The boot CPU's IST stack tops: double fault, NMI, machine check.
+pub(crate) fn boot_ist_tops() -> [u64; 3] {
+    [
+        BOOT_DBLFAULT_STACK.top(),
+        BOOT_NMI_STACK.top(),
+        BOOT_MCHK_STACK.top(),
+    ]
+}
+
+/// Sets up and loads CPU `cpuid`'s GDT and TSS, with `ist_tops` as its
+/// double fault, NMI and machine check stacks, reloads the segment
 /// registers, and loads the shared IDT. Each CPU calls it on itself.
-pub(crate) fn cpu_tables_init(cpuid: u32) {
+pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
     let id = cpuid as usize;
-    assert_eq!(id, 0, "TODO(smp): IST stacks for the APs");
     let tss = COMMON_TSS.0[id].get();
     let gdt = GDT.0[id].get();
 
     let mut ist = [0u64; 7];
-    ist[IST_DBLFAULT as usize - 1] = BOOT_DBLFAULT_STACK.top();
-    ist[IST_NMI as usize - 1] = BOOT_NMI_STACK.top();
-    ist[IST_MCHK as usize - 1] = BOOT_MCHK_STACK.top();
+    ist[IST_DBLFAULT as usize - 1] = ist_tops[0];
+    ist[IST_NMI as usize - 1] = ist_tops[1];
+    ist[IST_MCHK as usize - 1] = ist_tops[2];
     let [tss_lo, tss_hi] = tss_descriptor(tss as u64, size_of::<AmdTss>() as u64);
 
     // SAFETY: this CPU owns slot `id` (see `PerCpu`). The GDT entries are

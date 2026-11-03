@@ -43,8 +43,19 @@ pub fn cpu_initclocks(hz: u32, hardclock: fn()) {
         assert!(h.is_none(), "cpu_initclocks: clock already running");
         *h = Some(hardclock);
     }
-    // TODO(smp): each AP starts its own clock with the same handler.
+    HZ.store(hz, core::sync::atomic::Ordering::Relaxed);
     Md::cpu_initclocks(hz);
+}
+
+static HZ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Starts this AP's clock at the boot CPU's frequency, with the same
+/// handler, if the clock was started (`cpu_initclocks_ap`).
+pub(crate) fn cpu_initclocks_ap() {
+    let hz = HZ.load(core::sync::atomic::Ordering::Relaxed);
+    if hz != 0 {
+        Md::cpu_initclocks(hz);
+    }
 }
 
 /// A clock tick arrived (from `intr::__nova_intr`).

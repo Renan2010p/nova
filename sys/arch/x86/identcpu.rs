@@ -67,6 +67,28 @@ pub fn vm_guest() -> bool {
     cpu_feature2() & CPUID2_HV != 0
 }
 
+/// Bit positions of the SMT and core fields in x2APIC ids, from CPUID
+/// leaf 0xB (FreeBSD's `topo_probe_0xb`): `(smt_shift, core_shift)`, so
+/// that `id >> core_shift` is the package and `id >> smt_shift` the core.
+/// `None` if the leaf does not exist.
+pub fn topo_shifts() -> Option<(u32, u32)> {
+    if cpuid(0, 0)[0] < 0xb {
+        return None;
+    }
+    let (mut smt, mut core) = (None, None);
+    for level in 0..8 {
+        let [a, _, c, _] = cpuid(0xb, level);
+        match (c >> 8) & 0xff {
+            0 => break,
+            1 => smt = Some(a & 0x1f),
+            2 => core = Some(a & 0x1f),
+            _ => {}
+        }
+    }
+    let smt = smt.unwrap_or(0);
+    Some((smt, core.unwrap_or(smt)))
+}
+
 /// Twelve bytes of a CPUID vendor string, from three registers.
 fn vendor_string(regs: [u32; 3], buf: &mut [u8; 12]) -> &str {
     for (i, r) in regs.iter().enumerate() {

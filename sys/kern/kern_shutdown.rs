@@ -65,10 +65,10 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     let _intr = framework::cpu::intr_guard();
     if PANICKING.swap(true, Ordering::AcqRel) {
         // Another CPU is panicking, or printing is what failed: just stop.
-        // TODO(smp): the first panicking CPU stops the others with an IPI
-        // (FreeBSD's stop_cpus_hard).
         framework::cpu::cpu_halt();
     }
+    // The other CPUs stop where they are (`stop_cpus_hard`).
+    framework::smp::stop_cpus();
     vprintf_unlocked(format_args!("panic: {}\n", info.message()));
     if let Some(loc) = info.location() {
         vprintf_unlocked(format_args!("  at {}:{}\n", loc.file(), loc.line()));

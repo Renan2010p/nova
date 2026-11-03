@@ -44,6 +44,16 @@ impl CpuId {
     pub const fn as_u32(self) -> u32 {
         self.0
     }
+
+    /// The CPU with id `id`.
+    ///
+    /// # Panics
+    ///
+    /// If `id >= MAXCPU`.
+    pub const fn from_u32(id: u32) -> CpuId {
+        assert!((id as usize) < MAXCPU, "CpuId: out of range");
+        CpuId(id)
+    }
 }
 
 /// The CPU executing this code (`curcpu`).
@@ -63,6 +73,11 @@ static MP_NCPUS: AtomicU32 = AtomicU32::new(1);
 /// Number of CPUs running (`mp_ncpus`).
 pub fn mp_ncpus() -> u32 {
     MP_NCPUS.load(Ordering::Relaxed)
+}
+
+/// Counts one more CPU as running (an AP came up).
+pub(crate) fn mp_ncpus_inc() {
+    MP_NCPUS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Interrupt guards alive on each CPU. Only a CPU touches its own

@@ -71,6 +71,32 @@ const DMAP_MIN_SIZE: u64 = 4 * NBPDP;
 /// `pmap_bootstrap` has run.
 static DMAP_LIMIT: AtomicU64 = AtomicU64::new(0);
 
+/// Physical address of the kernel's PML4, shared by all CPUs.
+static KERNEL_PML4: AtomicU64 = AtomicU64::new(0);
+/// Physical address of the AP trampoline's PML4 (below 4 GiB): the
+/// kernel's mappings plus an identity map of the first 2 MiB, where the
+/// trampoline runs while it switches to long mode.
+static MPTRAMP_PML4: AtomicU64 = AtomicU64::new(0);
+
+/// The kernel's PML4.
+pub(crate) fn kernel_pml4() -> u64 {
+    KERNEL_PML4.load(Ordering::Relaxed)
+}
+
+/// The trampoline's PML4, with the kernel's top-level entries copied in
+/// afresh (the kernel map may have grown since boot).
+pub(crate) fn mptramp_pml4() -> u64 {
+    let tramp = MPTRAMP_PML4.load(Ordering::Relaxed);
+    let (src, dst) = (dmap_table(kernel_pml4()), dmap_table(tramp));
+    for i in NPTEPG as usize / 2..NPTEPG as usize {
+        // SAFETY: both are page-table pages reached through the direct map;
+        // the trampoline's is used by no CPU while it is being refreshed
+        // (APs are started one at a time).
+        unsafe { dst.add(i).write(src.add(i).read()) };
+    }
+    tramp
+}
+
 /// End of the direct map's physical range.
 pub(crate) fn dmap_limit() -> u64 {
     DMAP_LIMIT.load(Ordering::Relaxed)
@@ -162,11 +188,21 @@ pub(crate) fn pmap_bootstrap(physfree: &mut u64, physmem: &[PhysRange]) -> u64 {
         pml4[DMPML4I + i as usize] = (dmpdp_pa + i * PAGE_SIZE as u64) | PG_V | PG_RW;
     }
 
+    // The AP trampoline's tables: identity-map [0, 2 MiB) in the low half;
+    // the kernel half is copied in by `mptramp_pml4` at AP start.
+    let tramp = allocpages(physfree, 3);
+    let (tpdp, tpd) = (tramp + PAGE_SIZE as u64, tramp + 2 * PAGE_SIZE as u64);
+    table(tpd)[0] = PG_V | PG_RW | PG_PS;
+    table(tpdp)[0] = tpd | PG_V | PG_RW;
+    table(tramp)[0] = tpdp | PG_V | PG_RW;
+    MPTRAMP_PML4.store(tramp, Ordering::Relaxed);
+
     // SAFETY: the new tables map the kernel image, its stacks and the
     // loader's data at the same KERNBASE addresses as the loader's tables,
     // so execution continues unchanged; the page-table pages themselves
     // stay reachable through KERNBASE (they are below BOOT_MAPPED).
     unsafe { load_cr3(pml4_pa) };
+    KERNEL_PML4.store(pml4_pa, Ordering::Relaxed);
     DMAP_LIMIT.store(limit, Ordering::Relaxed);
     limit
 }

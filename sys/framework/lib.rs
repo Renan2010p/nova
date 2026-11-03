@@ -55,6 +55,7 @@ pub mod cpu;
 pub mod intr;
 pub mod mm;
 pub mod pcpu;
+pub mod smp;
 pub mod sync;
 pub mod task;
 
@@ -99,6 +100,7 @@ pub fn __init(boot: &BootInfo<'_>) {
     );
     mm::vm_phys::init(boot.physavail);
     task::init();
+    smp::init();
 }
 
 /// Binds the MI entry point that the MD bootstrap calls when it is done.

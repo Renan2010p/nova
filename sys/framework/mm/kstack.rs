@@ -18,6 +18,15 @@
 //! page and faults, instead of silently overwriting whatever lies below.
 //! (The fault cannot be handled on the overflowed stack, so it becomes a
 //! double fault, which runs on its own IST stack and is reported.)
+//!
+//! SMP: a freed stack's virtual addresses are never reused. Another CPU
+//! may still hold TLB entries for them, and reusing the addresses for new
+//! pages would let it write through a stale entry into a freed page.
+//! Never reusing them makes stale entries harmless (nothing touches those
+//! addresses again), without TLB shootdown IPIs. The kernel map has room
+//! for over 26 million stacks.
+//!
+//! TODO(smp): recycle addresses once TLB shootdown exists.
 
 use alloc::vec::Vec;
 
@@ -34,18 +43,13 @@ pub const KSTACK_GUARD_PAGES: usize = 1;
 
 const SLOT_SIZE: usize = (KSTACK_PAGES + KSTACK_GUARD_PAGES) * PAGE_SIZE;
 
-/// Kernel-map slots for stacks: a bump pointer plus recycled slots. The
-/// lock also serializes `pmap_kenter`/`pmap_kremove`, as `KernelMap`
-/// requires.
+/// Kernel-map slots for stacks: a bump pointer. The lock also serializes
+/// `pmap_kenter`/`pmap_kremove`, as `KernelMap` requires.
 struct KstackMap {
     next: usize,
-    free: Vec<usize>,
 }
 
-static KSTACK_MAP: MtxSpin<KstackMap> = MtxSpin::new(KstackMap {
-    next: Md::KVA_MIN,
-    free: Vec::new(),
-});
+static KSTACK_MAP: MtxSpin<KstackMap> = MtxSpin::new(KstackMap { next: Md::KVA_MIN });
 
 /// A mapped kernel stack. Its pages are owned by it and reached only
 /// through the mapping, by the thread that runs on it.
@@ -62,14 +66,11 @@ impl KernelStack {
             .map(|_| Frame::alloc())
             .collect::<Option<_>>()?;
         let mut map = KSTACK_MAP.lock();
-        let base = match map.free.pop() {
-            Some(b) => b,
-            None if map.next + SLOT_SIZE <= Md::KVA_MAX => {
-                map.next += SLOT_SIZE;
-                map.next - SLOT_SIZE
-            }
-            None => return None,
-        };
+        if map.next + SLOT_SIZE > Md::KVA_MAX {
+            return None;
+        }
+        let base = map.next;
+        map.next += SLOT_SIZE;
         let first = base + KSTACK_GUARD_PAGES * PAGE_SIZE;
         // Page-table pages are never freed: the kernel map only grows.
         let mut alloc_pt = || Segment::alloc(0).map(Segment::leak);
@@ -83,7 +84,6 @@ impl KernelStack {
                     // SAFETY: mapped just above, never used.
                     unsafe { Md::pmap_kremove(first + j * PAGE_SIZE) };
                 }
-                map.free.push(base);
                 return None;
             }
         }
@@ -98,16 +98,16 @@ impl KernelStack {
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        let mut map = KSTACK_MAP.lock();
+        // Held only to serialize `pmap_kremove`, as `KernelMap` requires.
+        let _map = KSTACK_MAP.lock();
         let first = self.base + KSTACK_GUARD_PAGES * PAGE_SIZE;
         for i in 0..self.frames.len() {
             // SAFETY: mapped by `new`; the stack is dropped only once its
-            // thread can never run again, so nothing uses the mapping.
-            // TODO(smp): shoot down the TLB entries on the other CPUs
-            // before the frames are freed.
+            // thread can never run again, so nothing uses the mapping. Other
+            // CPUs' stale TLB entries are harmless: the addresses are never
+            // reused (see the module doc).
             unsafe { Md::pmap_kremove(first + i * PAGE_SIZE) };
         }
-        map.free.push(self.base);
         // `frames` drop after this, returning the pages.
     }
 }

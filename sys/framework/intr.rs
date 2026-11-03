@@ -32,6 +32,8 @@ pub fn __nova_intr(intr: Interrupt) {
     let _intr = intr_guard();
     match intr {
         Interrupt::Clock => crate::clock::clock_intr(),
+        Interrupt::Ipi(mdi::Ipi::Ast) => crate::task::request_preempt(),
+        Interrupt::Ipi(mdi::Ipi::Stop) => crate::cpu::cpu_halt(),
         _ => panic!("__nova_intr: unhandled {intr:?}"),
     }
 }

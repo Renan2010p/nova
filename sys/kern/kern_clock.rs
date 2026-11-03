@@ -32,7 +32,11 @@ pub fn initclocks(hz: u32) {
         framework::clock::ET_QUALITY
     );
     framework::clock::cpu_initclocks(hz, hardclock);
-    let usec = 1_000_000 / hz;
+}
+
+/// Reports the tick length (`inittimecounter`).
+pub fn inittimecounter() {
+    let usec = 1_000_000 / hz();
     printf!(
         "Timecounters tick every {}.{:03} msec\n",
         usec / 1000,
@@ -41,12 +45,14 @@ pub fn initclocks(hz: u32) {
 }
 
 /// Called by the framework on every clock tick, in interrupt context.
+/// Every CPU's clock calls it; only the boot CPU advances `ticks` and
+/// wakes timed sleepers, as one CPU does in FreeBSD's `hardclock`.
 fn hardclock() {
-    // TODO(smp): with a clock on every CPU, only one of them advances
-    // `ticks`, as FreeBSD's hardclock does.
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    if framework::cpu::curcpu() == framework::cpu::CpuId::BSP {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        kern_synch::tick_wakeup();
+    }
     sched_4bsd::sched_clock();
-    kern_synch::tick_wakeup();
 }
 
 /// Clock ticks since `initclocks` (FreeBSD's `ticks`).

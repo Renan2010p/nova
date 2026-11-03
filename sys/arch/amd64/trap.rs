@@ -33,6 +33,11 @@ use crate::EARLY_CONS;
 pub const APIC_TIMER_INT: u8 = 0xef;
 /// Vector of spurious local APIC interrupts (`APIC_SPURIOUS_INT`).
 pub const APIC_SPURIOUS_INT: u8 = 0xff;
+/// Vector of the IPIs that carry a bitmap (`IPI_BITMAP_VECTOR`); Nova
+/// sends only `IPI_AST` on it.
+pub const IPI_BITMAP_VECTOR: u8 = 0xf8;
+/// Vector of `IPI_STOP`.
+pub const IPI_STOP: u8 = 0xf9;
 
 /// `tf_trapno` flag for interrupts: the low byte is the vector.
 pub(crate) const T_INTR: u64 = 0x100;
@@ -98,6 +103,19 @@ pub(crate) extern "C" fn trap(frame: &mut TrapFrame) {
                 // interrupted thread's stack, as the exit upcall requires.
                 unsafe {
                     __nova_intr(mdi::Interrupt::Clock);
+                    __nova_intr_exit();
+                }
+            }
+            IPI_BITMAP_VECTOR | IPI_STOP => {
+                lapic_eoi();
+                let ipi = if frame.tf_trapno as u8 == IPI_STOP {
+                    mdi::Ipi::Stop
+                } else {
+                    mdi::Ipi::Ast
+                };
+                // SAFETY: as for the clock interrupt above.
+                unsafe {
+                    __nova_intr(mdi::Interrupt::Ipi(ipi));
                     __nova_intr_exit();
                 }
             }

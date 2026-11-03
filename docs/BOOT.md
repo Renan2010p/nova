@@ -128,7 +128,11 @@ Hypervisor: Origin = "bhyve bhyve "
 real memory  = 536870912 (512 MB)
 avail memory = 533331968 (508 MB)
 Event timer "LAPIC" quality 600
+ACPI APIC Table: <BHYVE  BVMADT  >
+Nova/SMP: Multiprocessor System Detected: 2 CPUs
+Nova/SMP: 2 package(s) x 1 core(s)
 Timecounters tick every 10.000 msec
+Launching APs: 1
 Nova: no userland yet; halting.
 Uptime: 1s
 The operating system has halted.

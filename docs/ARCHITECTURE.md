@@ -66,7 +66,7 @@ raw pointers. It owns the **mechanisms**:
 | Kernel threads: context switch, stacks with guard pages, preemption | done (`framework::task`, `framework::mm::kstack`) |
 | Sleep mutexes, wait queues, `OnceLock` | done (`framework::sync`) |
 | Pluggable scheduler (`Scheduler` trait, injected by a service) | done (`framework::task`) |
-| IPIs, AP start-up | milestone 3b |
+| SMP: CPU discovery (ACPI MADT), AP start-up, IPIs, `stop_cpus` | done (`framework::smp`, `arch/amd64/mp_machdep.rs`) |
 | User memory access (`UserPtr`, `copyin`/`copyout`) | milestone 4 |
 | Device access: `bus_space`, `bus_dma` (NetBSD style) | milestone 7 |
 
@@ -157,13 +157,36 @@ Nova runs on one CPU today, but every API is designed for many:
   proves `PinnedToCpu`. Sleep locks come with the scheduler.
 * **No `static mut`**, anywhere (rule R6). Shared state lives behind a
   lock, in an atomic, or in a `CpuLocal`.
-* **Panic** is SMP-aware: one CPU wins the panic, the others stop. IPIs to
-  stop them come with the APIC.
+* **Panic** is SMP-aware: one CPU wins the panic and stops the others
+  with `IPI_STOP` (`stop_cpus_hard`).
 
-Planned SMP pieces: AP start-up (`arch/amd64/mp_machdep.rs`, INIT-SIPI-SIPI
-from the local APIC, an `mpboot` trampoline), IPIs, TLB shootdown in
-`pmap`, per-CPU run queues in the scheduler (`sched_ule`), per-CPU caches
-in `uma`.
+### Starting the other CPUs
+
+```
+ hammer_time (BSP)          sys::acpi: RSDP (kenv acpi.rsdp, or BIOS scan)
+   cpu_mp_setup ──────────►   -> XSDT -> MADT -> enabled local (x2)APICs
+ mi_startup                 cpu ids: BSP = 0, then MADT order (as FreeBSD)
+   release_aps
+     framework::smp::start_ap(n)   idle thread, boot stack, 3 IST stacks
+       amd64 cpu_start_ap          copy mpboot to 0x8000, INIT-SIPI-SIPI
+         AP: mpboot                real -> protected -> long mode
+         AP: init_secondary        kernel CR3, %gs, GDT/TSS/IST, x2APIC
+         AP: __nova_ap_startup     clock, online, ap_enter -> idle thread
+```
+
+The APs share the run queue; an AP's idle thread sleeps in `hlt`, and
+`sched_add`-style wakeups send it `IPI_AST`. The local APIC timer is
+calibrated once, on the boot CPU, and reused by the APs. Only the boot
+CPU's clock advances `ticks`.
+
+Kernel stack addresses are never reused, so other CPUs' stale TLB entries
+for a freed stack are harmless without TLB shootdown IPIs; see
+`framework/mm/kstack.rs`.
+
+Planned SMP pieces: TLB shootdown IPIs (to recycle kernel addresses and
+for user address spaces), stopping CPUs with an NMI, per-CPU run queues
+(`sched_ule`), per-CPU caches in `uma`, and xAPIC for CPUs without
+x2APIC.
 
 ## The FreeBSD personality
 

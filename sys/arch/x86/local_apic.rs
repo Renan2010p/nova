@@ -20,14 +20,18 @@
 //! TODO(xapic): CPUs (or hypervisors) without x2APIC need the MMIO xAPIC,
 //! mapped uncached; until then the kernel refuses to boot on them.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::cpufunc::{cpuid, ia32_pause, rdmsr, wrmsr};
 use crate::i8254::{self, TIMER_FREQ};
 use crate::identcpu::has_x2apic;
 use crate::specialreg::{APICBASE_ENABLED, APICBASE_X2APIC, MSR_APICBASE};
+use crate::tsc::delay;
 
 const MSR_APIC_ID: u32 = 0x802;
 const MSR_APIC_TPR: u32 = 0x808;
 const MSR_APIC_EOI: u32 = 0x80b;
+const MSR_APIC_ICR: u32 = 0x830;
 const MSR_APIC_SVR: u32 = 0x80f;
 const MSR_APIC_LVT_TIMER: u32 = 0x832;
 const MSR_APIC_ICR_TIMER: u32 = 0x838;
@@ -39,6 +43,16 @@ const APIC_LVT_M: u64 = 1 << 16;
 const APIC_LVTT_TM_PERIODIC: u64 = 1 << 17;
 /// Timer divide configuration: divide by 16.
 const APIC_TDCR_16: u64 = 0x3;
+
+// Interrupt command register (`APIC_DELMODE_*`, `APIC_LEVEL_*`).
+const APIC_DELMODE_FIXED: u32 = 0x000;
+const APIC_DELMODE_INIT: u32 = 0x500;
+const APIC_DELMODE_STARTUP: u32 = 0x600;
+const APIC_LEVEL_ASSERT: u32 = 0x4000;
+const APIC_TRIGMOD_LEVEL: u32 = 0x8000;
+
+/// Measured timer frequency, shared by all CPUs (same clock source).
+static LAPIC_TIMER_FREQ: AtomicU32 = AtomicU32::new(0);
 
 /// Length of the calibration window: 1/100 s.
 const CALIBRATE_DIV: u32 = 100;
@@ -92,9 +106,21 @@ pub fn lapic_eoi() {
     unsafe { wrmsr(MSR_APIC_EOI, 0) }
 }
 
-/// Measures the timer's input frequency (after the divide-by-16), in
-/// ticks per second, against the i8254.
+/// The timer's input frequency (after the divide-by-16), in ticks per
+/// second: measured against the i8254 the first time, then remembered, so
+/// the APs never touch the i8254 (FreeBSD calibrates once, too).
 pub fn lapic_calibrate_timer() -> Result<u32, LapicError> {
+    match LAPIC_TIMER_FREQ.load(Ordering::Relaxed) {
+        0 => {
+            let freq = lapic_measure_timer()?;
+            LAPIC_TIMER_FREQ.store(freq, Ordering::Relaxed);
+            Ok(freq)
+        }
+        freq => Ok(freq),
+    }
+}
+
+fn lapic_measure_timer() -> Result<u32, LapicError> {
     let count = (TIMER_FREQ / CALIBRATE_DIV) as u16;
     let elapsed;
     // SAFETY: x2APIC timer MSRs; the timer is masked, so counting down
@@ -130,5 +156,43 @@ pub fn lapic_timer_periodic(vector: u8, period: u32) {
             APIC_LVTT_TM_PERIODIC | u64::from(vector),
         );
         wrmsr(MSR_APIC_ICR_TIMER, u64::from(period.max(1)));
+    }
+}
+
+/// Writes the interrupt command register (`lapic_ipi_raw`). In x2APIC mode
+/// the write is the whole send: there is no delivery status to wait for.
+fn lapic_ipi_raw(icrlo: u32, apic_id: u32) {
+    // SAFETY: x2APIC mode (set by `lapic_init` on this CPU); sending an IPI
+    // touches no memory of this CPU.
+    unsafe { wrmsr(MSR_APIC_ICR, (u64::from(apic_id) << 32) | u64::from(icrlo)) }
+}
+
+/// Sends interrupt `vector` to the CPU with APIC id `apic_id`
+/// (`lapic_ipi_vectored`).
+pub fn lapic_ipi_vectored(vector: u8, apic_id: u32) {
+    lapic_ipi_raw(
+        APIC_DELMODE_FIXED | APIC_LEVEL_ASSERT | u32::from(vector),
+        apic_id,
+    );
+}
+
+/// Wakes an application processor with the INIT-SIPI-SIPI sequence, with
+/// the delays of FreeBSD's `ipi_startup` (Intel MP spec, section B.4). It
+/// starts executing in real mode at physical address `vector << 12`.
+///
+/// x2APIC has no "INIT level de-assert", so unlike xAPIC FreeBSD there is
+/// no second INIT.
+pub fn ipi_startup(apic_id: u32, vector: u8) {
+    lapic_ipi_raw(
+        APIC_TRIGMOD_LEVEL | APIC_LEVEL_ASSERT | APIC_DELMODE_INIT,
+        apic_id,
+    );
+    delay(10_000); // ~10 ms
+    for _ in 0..2 {
+        lapic_ipi_raw(
+            APIC_LEVEL_ASSERT | APIC_DELMODE_STARTUP | u32::from(vector),
+            apic_id,
+        );
+        delay(200); // ~200 us
     }
 }

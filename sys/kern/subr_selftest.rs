@@ -156,33 +156,39 @@ fn mutex(verbose: bool) {
     }
 }
 
-/// A thread that never yields must still be preempted by the clock.
+/// Threads that never yield must still be preempted by the clock. There
+/// is one spinner per CPU, so no CPU is left for this thread unless the
+/// clock takes one away from a spinner.
 fn preemption(verbose: bool, hz: u32) {
     let stop = Arc::new(AtomicBool::new(false));
     let spins = Arc::new(AtomicU64::new(0));
-    let spinner = {
-        let (stop, spins) = (stop.clone(), spins.clone());
-        spawn("spinner", move || {
-            while !stop.load(Ordering::Acquire) {
-                spins.fetch_add(1, Ordering::Relaxed);
-                core::hint::spin_loop();
-            }
+    let spinners: Vec<Arc<Task>> = (0..framework::cpu::mp_ncpus())
+        .map(|_| {
+            let (stop, spins) = (stop.clone(), spins.clone());
+            spawn("spinner", move || {
+                while !stop.load(Ordering::Acquire) {
+                    spins.fetch_add(1, Ordering::Relaxed);
+                    core::hint::spin_loop();
+                }
+            })
         })
-    };
+        .collect();
     let start = kern_clock::ticks();
-    // While this thread sleeps the spinner runs. Waking up only lets us
-    // run again if the clock preempts the spinner.
+    // While this thread sleeps the spinners take every CPU. Waking up only
+    // lets us run again if the clock preempts one of them.
     pause("preempt", 1);
     let back = kern_clock::ticks();
     stop.store(true, Ordering::Release);
-    join(&spinner);
+    spinners.iter().for_each(join);
     assert!(
         spins.load(Ordering::Relaxed) > 0,
         "selftest: preemption: the spinner never ran"
     );
     if verbose {
         printf!(
-            "selftest: preemption: a busy thread was preempted after {} ticks (quantum {})\n",
+            "selftest: preemption: {} busy thread(s) on {} CPU(s), one preempted after {} ticks (quantum {})\n",
+            spinners.len(),
+            framework::cpu::mp_ncpus(),
             back - start,
             (hz / 10).max(1)
         );

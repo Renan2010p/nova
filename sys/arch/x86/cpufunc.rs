@@ -271,3 +271,24 @@ pub fn invlpg(va: usize) {
     // tables again; it cannot make memory accessible that was not.
     unsafe { asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags)) }
 }
+
+/// Reads `%cr0`.
+#[inline(always)]
+pub fn rcr0() -> u64 {
+    let v: u64;
+    // SAFETY: reading a control register has no side effects.
+    unsafe { asm!("mov {}, cr0", out(reg) v, options(nomem, nostack, preserves_flags)) }
+    v
+}
+
+/// Loads `%cr0`.
+///
+/// # Safety
+///
+/// The new value must keep protected mode and paging on, and only change
+/// what the kernel is prepared for (caching, write protection).
+#[inline(always)]
+pub unsafe fn load_cr0(v: u64) {
+    // SAFETY: forwarded to the caller.
+    unsafe { asm!("mov cr0, {}", in(reg) v, options(nostack, preserves_flags)) }
+}

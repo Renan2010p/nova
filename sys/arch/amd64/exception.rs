@@ -112,6 +112,8 @@ global_asm!(
     idtvec!("Xxmm", "29"),         // T_XMMFLT
     idtvec!("Xtimerint", "0x1ef"),   // T_INTR | APIC_TIMER_INT
     idtvec!("Xspuriousint", "0x1ff"), // T_INTR | APIC_SPURIOUS_INT
+    idtvec!("Xipi_intr_bitmap_handler", "0x1f8"), // T_INTR | IPI_BITMAP_VECTOR
+    idtvec!("Xcpustop", "0x1f9"),     // T_INTR | IPI_STOP
     "",
     // Typed and sized, so that backtraces can name them.
     ".globl alltraps",
@@ -189,6 +191,8 @@ unsafe extern "C" {
     pub(crate) fn Xxmm();
     pub(crate) fn Xtimerint();
     pub(crate) fn Xspuriousint();
+    pub(crate) fn Xipi_intr_bitmap_handler();
+    pub(crate) fn Xcpustop();
     /// The return address of `call trap` in `calltrap`.
     pub(crate) fn calltrap_ret();
 }

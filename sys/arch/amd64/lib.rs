@@ -24,6 +24,8 @@
 //! | `swtch.rs`     | `amd64/cpu_switch.S`          | `cpu_switch`, `fork_trampoline` |
 //! | `db_trace.rs`  | `amd64/db_trace.c`            | frame-pointer stack traces      |
 //! | `vm_machdep.rs`| `x86/cpu_machdep.c`           | `cpu_reset`                     |
+//! | `mp_machdep.rs`| `amd64/mp_machdep.c`, `x86/acpica/madt.c` | CPUs, AP start-up    |
+//! | `mpboot.rs`    | `amd64/mpboot.S`              | AP real-mode trampoline         |
 //! | `metadata.rs`  | `x86/include/metadata.h`      | MD preload record types         |
 //! | `param.rs`     | `amd64/include/param.h`       | page size, machine names        |
 //! | `pcpu.rs`      | `amd64/include/pcpu.h`        | per-CPU area through `%gs`      |
@@ -41,6 +43,8 @@ mod exception;
 mod locore;
 mod machdep;
 pub mod metadata;
+mod mp_machdep;
+mod mpboot;
 pub mod param;
 mod pcpu;
 mod pmap;
@@ -53,7 +57,7 @@ pub mod vmparam;
 use core::fmt;
 
 use x86::cpufunc::{disable_intr, enable_intr, halt, ia32_pause, read_rflags, sti_hlt};
-use x86::local_apic::{lapic_calibrate_timer, lapic_timer_periodic};
+use x86::local_apic::{lapic_calibrate_timer, lapic_ipi_vectored, lapic_timer_periodic};
 use x86::ns8250::{COM1, Ns8250};
 use x86::psl::PSL_I;
 use x86::{identcpu, tsc};
@@ -212,6 +216,37 @@ impl mdi::Clock for Machine {
     fn cpu_initclocks(hz: u32) {
         let freq = lapic_calibrate_timer().unwrap_or_else(|e| panic!("local APIC timer: {e:?}"));
         lapic_timer_periodic(trap::APIC_TIMER_INT, freq / hz);
+    }
+}
+
+impl mdi::Smp for Machine {
+    fn cpu_mp_probe() -> u32 {
+        mp_machdep::cpu_mp_probe()
+    }
+
+    fn cpu_topology() -> (u32, u32, u32) {
+        mp_machdep::cpu_topology()
+    }
+
+    fn cpu_apic_id(cpuid: u32) -> u32 {
+        mp_machdep::cpu_apic_id(cpuid)
+    }
+
+    fn acpi_madt_ident() -> Option<[u8; 14]> {
+        mp_machdep::madt_ident()
+    }
+
+    unsafe fn cpu_start_ap(cpuid: u32, stack_top: usize, ist_tops: [usize; 3]) -> bool {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { mp_machdep::cpu_start_ap(cpuid, stack_top, ist_tops) }
+    }
+
+    fn ipi_send(cpuid: u32, ipi: mdi::Ipi) {
+        let vector = match ipi {
+            mdi::Ipi::Ast => trap::IPI_BITMAP_VECTOR,
+            mdi::Ipi::Stop => trap::IPI_STOP,
+        };
+        lapic_ipi_vectored(vector, mp_machdep::cpu_apic_id(cpuid));
     }
 }
 

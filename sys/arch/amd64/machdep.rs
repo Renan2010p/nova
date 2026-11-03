@@ -23,7 +23,8 @@
 //! 3. preload metadata and the firmware memory map;
 //! 4. the kernel's own page tables and the direct map (`pmap_bootstrap`);
 //! 5. `phys_avail`: the memory the page allocator may use;
-//! 6. the local APIC, in x2APIC mode.
+//! 6. the local APIC, in x2APIC mode;
+//! 7. the CPU list, from the ACPI MADT (`mp_machdep.rs`).
 //!
 //! The application processors will start in `mp_machdep.rs`
 //! (`init_secondary`), repeating steps 1, 2 and 6 for themselves.
@@ -41,9 +42,10 @@ use crate::metadata::{
     EFI_MD_TYPE, EFI_MD_TYPE_USABLE, EFI_PAGE_SIZE, MODINFOMD_EFI_MAP, MODINFOMD_SMAP, SMAP_BASE,
     SMAP_ENTRY_SIZE, SMAP_LENGTH, SMAP_TYPE, SMAP_TYPE_MEMORY,
 };
+use crate::mp_machdep::cpu_mp_setup;
 use crate::pcpu::pcpu_init;
 use crate::pmap::pmap_bootstrap;
-use crate::segments::{cpu_tables_init, idt_init};
+use crate::segments::{boot_ist_tops, cpu_tables_init, idt_init};
 use crate::trap::APIC_SPURIOUS_INT;
 use crate::vmparam::{BOOT_MAPPED, KERNBASE, KERNLOAD};
 
@@ -69,7 +71,7 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     EARLY_CONS.init();
     x86::tsc::tsc_calibrate();
     idt_init();
-    cpu_tables_init(0);
+    cpu_tables_init(0, boot_ist_tops());
 
     let preload = Preload::new(boot_data(modulep, kernend));
     let kmdp = preload.kernel();
@@ -102,6 +104,7 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     if let Err(e) = x86::local_apic::lapic_init(APIC_SPURIOUS_INT) {
         panic!("local APIC: {e:?} (TODO(xapic): only x2APIC is supported; under bhyve, use -x)");
     }
+    cpu_mp_setup(&sys::kenv::StaticEnv::new(envp), physmap.as_slice());
 
     // The symbol table, [SSYM, ESYM), for backtraces.
     let md = |t| kmdp.and_then(|k| k.md(t)).and_then(|r| r.as_u64());

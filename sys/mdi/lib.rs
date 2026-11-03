@@ -30,7 +30,8 @@
 //! * **Upcalls (MD → MI)**: when the MD bootstrap is done it calls
 //!   [`MiStartup`], bound by the kernel binary with
 //!   `framework::kernel_entry!`. Interrupts go to [`IntrUpcall`] and
-//!   [`IntrExitUpcall`], defined by the framework. Both are link-time symbols whose types are checked
+//!   [`IntrExitUpcall`], and each AP to [`ApStartupUpcall`], all defined
+//!   by the framework. Both are link-time symbols whose types are checked
 //!   against the aliases here, so MD code never imports MI code.
 //!
 //! Only the framework calls these traits; services never see them. Where
@@ -246,7 +247,59 @@ pub trait Clock {
 pub enum Interrupt {
     /// A tick of the per-CPU clock started by [`Clock::cpu_initclocks`].
     Clock,
+    /// An inter-processor interrupt sent with [`Smp::ipi_send`].
+    Ipi(Ipi),
 }
+
+/// Inter-processor interrupts (FreeBSD's `IPI_*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ipi {
+    /// Reschedule soon: something became runnable (`IPI_AST`).
+    Ast,
+    /// Stop for good: another CPU panicked (`IPI_STOP`).
+    Stop,
+}
+
+/// Multiprocessor support (FreeBSD's `cpu_mp_probe`, `cpu_mp_start`,
+/// `ipi_cpu`). CPU ids are dense, `0..cpu_mp_probe()`, the boot CPU being 0.
+#[allow(unsafe_code)]
+pub trait Smp {
+    /// Number of CPUs the firmware lists, the boot CPU included, capped at
+    /// `MAXCPU` (`cpu_mp_probe`). 1 if there is no table.
+    fn cpu_mp_probe() -> u32;
+
+    /// CPU topology: packages, cores per package, hardware threads per
+    /// core, as FreeBSD's `cpu_mp_announce` reports them.
+    fn cpu_topology() -> (u32, u32, u32);
+
+    /// The local APIC (or equivalent) id of CPU `cpuid`.
+    fn cpu_apic_id(cpuid: u32) -> u32;
+
+    /// OEM id (6 bytes) and OEM table id (8 bytes) of the ACPI MADT the
+    /// CPUs were found in, for FreeBSD's `ACPI APIC Table: <...>` line.
+    fn acpi_madt_ident() -> Option<[u8; 14]>;
+
+    /// Starts CPU `cpuid` (`start_ap`). It sets itself up (per-CPU area,
+    /// descriptor tables with the given IST stacks, interrupt controller)
+    /// on the stack ending at `stack_top`, then calls [`ApStartupUpcall`].
+    /// Returns false if it did not come up.
+    ///
+    /// # Safety
+    ///
+    /// `cpuid` must be in `1..cpu_mp_probe()` and not started yet; the
+    /// stacks must be 16-byte aligned tops of mapped, writable stacks that
+    /// stay valid forever and are used by nothing else. Calls must be
+    /// serialized.
+    unsafe fn cpu_start_ap(cpuid: u32, stack_top: usize, ist_tops: [usize; 3]) -> bool;
+
+    /// Sends `ipi` to CPU `cpuid` (`ipi_cpu`).
+    fn ipi_send(cpuid: u32, ipi: Ipi);
+}
+
+/// Signature of the AP start-up upcall, `framework::smp::__nova_ap_startup`.
+/// Each application processor calls it once set up, with interrupts
+/// disabled, on the stack given to [`Smp::cpu_start_ap`].
+pub type ApStartupUpcall = fn(cpuid: u32) -> !;
 
 /// Signature of the interrupt upcall, `framework::intr::__nova_intr`. The
 /// MD trap code calls it with interrupts disabled, after acknowledging the
@@ -271,7 +324,7 @@ pub trait EarlyCons {
 }
 
 /// Everything an architecture must provide.
-pub trait Machine: Cpu + EarlyCons + DirectMap + KernelMap + Clock + Context {
+pub trait Machine: Cpu + EarlyCons + DirectMap + KernelMap + Clock + Context + Smp {
     /// Machine name, `hw.machine` (e.g. `"amd64"`).
     const MACHINE: &'static str;
     /// Machine architecture, `hw.machine_arch` (e.g. `"amd64"`).
