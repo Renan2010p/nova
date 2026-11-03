@@ -1,0 +1,42 @@
+/*-
+ * SPDX-License-Identifier: MPL-2.0
+ *
+ * Copyright (c) 2026 Renan Lucas Vieira Hilário
+ *
+ * This file is part of the Nova Project, the kernel of the
+ * Renux "Nova" Project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+//! `kern`: the machine-independent kernel core (FreeBSD's `sys/kern`).
+//!
+//! Files keep FreeBSD's names and prefixes:
+//!
+//! | Prefix    | Meaning                                  | Examples (now and planned)        |
+//! |-----------|------------------------------------------|-----------------------------------|
+//! | `init_`   | system start-up                          | `init_main`                       |
+//! | `kern_`   | core facilities                          | `kern_cons`, `kern_shutdown`, `kern_fork`, `kern_exec`, `kern_sig` |
+//! | `subr_`   | support routines                         | `subr_prf`, `subr_module`         |
+//! | `sys_`    | generic syscall back-ends                | `sys_generic`, `sys_pipe`         |
+//! | `vfs_`    | virtual file system                      | `vfs_lookup`, `vfs_mount`         |
+//! | `uipc_`   | sockets and IPC                          | `uipc_socket`                     |
+//! | `sched_`  | schedulers                               | `sched_ule`                       |
+//!
+//! This crate is a framekernel *service*: 100% safe Rust, no
+//! `cfg(target_arch)`, no knowledge of any userland ABI. It reaches the
+//! hardware only through `framework`, and will reach userland only
+//! through the personalities in `sys/compat`. It must be correct on any
+//! number of CPUs: shared state lives behind framework locks or in
+//! `CpuLocal` variables, never in `static mut`.
+
+#![no_std]
+#![forbid(unsafe_code)]
+
+pub mod init_main;
+pub mod kern_cons;
+pub mod kern_environment;
+pub mod kern_shutdown;
+pub mod subr_prf;

@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# Copyright (c) 2026 Renan Lucas Vieira Hilário
+#
+# This file is part of the Nova Project, the kernel of the
+# Renux "Nova" Project.
+#
+# The kernel workspace. Every crate here is one BSD-style subsystem; the
+# layer each one belongs to (base, md, framework, service, conf) is decided
+# by its path and enforced by tools/checklayers. See docs/LAYERING.md.
+
+[workspace]
+resolver = "3"
+members = [
+    # base: usable by every layer
+    "libkern",
+    "sys",
+    "mdi",
+    # md: machine-dependent code
+    "arch/x86",
+    "arch/amd64",
+    # framework: the framekernel's trusted core, the only bridge to MD
+    "framework",
+    # services: machine-independent kernel, 100% safe Rust
+    "vm",
+    "kern",
+    "compat/freebsd",
+    # conf: the kernel binary
+    "conf",
+]
+default-members = ["conf"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Renan Lucas Vieira Hilário"]
+rust-version = "1.99"
+publish = false
+
+# All intra-kernel dependencies are declared here and referenced with
+# `workspace = true`; checklayers relies on that.
+[workspace.dependencies]
+libkern = { path = "libkern" }
+sys = { path = "sys" }
+mdi = { path = "mdi" }
+x86 = { path = "arch/x86" }
+amd64 = { path = "arch/amd64" }
+framework = { path = "framework" }
+vm = { path = "vm" }
+kern = { path = "kern" }
+compat_freebsd = { path = "compat/freebsd" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
+[profile.dev]
+panic = "abort"
+
+# Like Zig's ReleaseSafe: optimized, but integer overflow still panics.
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = true
+overflow-checks = true

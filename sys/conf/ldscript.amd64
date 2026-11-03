@@ -1,0 +1,66 @@
+/*-
+ * SPDX-License-Identifier: MPL-2.0
+ *
+ * Copyright (c) 2026 Renan Lucas Vieira Hilário
+ *
+ * This file is part of the Nova Project, the kernel of the
+ * Renux "Nova" Project.
+ *
+ * Linker script for the amd64 kernel (FreeBSD's sys/conf/ldscript.amd64).
+ *
+ * The FreeBSD loader(8) loads an ET_EXEC kernel at
+ *     physical = virtual - (e_entry & 0xffffffffff000000)
+ * i.e. at KERNBASE-relative addresses, and maps physical [0, 1 GiB) at
+ * KERNBASE. KERNBASE and KERNLOAD must match sys/arch/amd64/vmparam.rs.
+ * The loader only looks at p_vaddr and zero-fills .bss itself; p_paddr is
+ * set (AT) for the benefit of debuggers and other loaders.
+ */
+
+ENTRY(btext)
+
+KERNBASE = 0xffffffff80000000;
+KERNLOAD = 0x200000;
+
+PHDRS
+{
+	text	PT_LOAD FLAGS(5);	/* R E */
+	rodata	PT_LOAD FLAGS(4);	/* R   */
+	data	PT_LOAD FLAGS(6);	/* RW  */
+}
+
+SECTIONS
+{
+	. = KERNBASE + KERNLOAD;
+
+	.text : AT(ADDR(.text) - KERNBASE) {
+		*(.text.btext)		/* entry point first */
+		*(.text .text.*)
+	} :text
+	etext = .;
+
+	. = ALIGN(4096);
+	.rodata : AT(ADDR(.rodata) - KERNBASE) {
+		*(.rodata .rodata.*)
+	} :rodata
+
+	. = ALIGN(4096);
+	.data : AT(ADDR(.data) - KERNBASE) {
+		*(.data .data.*)
+		*(.got .got.*)
+	} :data
+	edata = .;
+
+	.bss : AT(ADDR(.bss) - KERNBASE) {
+		*(.bss .bss.*)
+		*(COMMON)
+	} :data
+
+	. = ALIGN(4096);
+	end = .;
+
+	/DISCARD/ : {
+		*(.eh_frame .eh_frame_hdr)
+		*(.note .note.*)
+		*(.comment)
+	}
+}

@@ -1,0 +1,25 @@
+[package]
+name = "kernel"
+description = "Nova: the kernel binary, built like FreeBSD's GENERIC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+# The output is named `kernel`, as /boot/kernel/kernel on FreeBSD.
+[[bin]]
+name = "kernel"
+path = "main.rs"
+test = false
+bench = false
+
+[dependencies]
+compat_freebsd = { workspace = true }
+framework = { workspace = true }
+kern = { workspace = true }
+
+[lints]
+workspace = true

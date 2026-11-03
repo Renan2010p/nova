@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# The Nova kernel builds with a pinned *stable* Rust. Upgrade deliberately,
+# in its own commit, never in the middle of a feature.
+
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-none"]

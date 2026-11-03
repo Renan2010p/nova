@@ -1,0 +1,46 @@
+Nova Project
+The kernel of the Renux "Nova" Project
+
+Copyright (c) 2026 Renan Lucas Vieira Hilário
+
+All source code of the Nova Project is licensed under the Mozilla Public
+License, version 2.0 (MPL-2.0). The full license text is in the LICENSE
+file at the root of this repository, and at https://mozilla.org/MPL/2.0/.
+
+The MPL-2.0 is a file-level copyleft: whoever distributes a modified
+version of a Nova file must make that file's source code available under
+the same license.
+
+Every source file starts with the header below (see docs/STYLE.md):
+
+    /*-
+     * SPDX-License-Identifier: MPL-2.0
+     *
+     * Copyright (c) 2026 Renan Lucas Vieira Hilário
+     *
+     * This file is part of the Nova Project, the kernel of the
+     * Renux "Nova" Project.
+     *
+     * This Source Code Form is subject to the terms of the Mozilla Public
+     * License, v. 2.0. If a copy of the MPL was not distributed with this
+     * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+     */
+
+Third-party code
+----------------
+
+Nova's directory layout and file names follow FreeBSD and NetBSD. The
+names of constants and the format of interface data (the loader(8) boot
+protocol, the syscall ABI) are FreeBSD's, so that Nova is compatible with
+it.
+
+If any code from FreeBSD or NetBSD (BSD licenses) is adapted into Nova,
+the corresponding file MUST keep the original copyright notice and BSD
+license in addition to the MPL-2.0 header.
+
+Trademarks
+----------
+
+FreeBSD is a registered trademark of The FreeBSD Foundation. NetBSD is a
+registered trademark of The NetBSD Foundation. The Nova Project is not
+affiliated with either. Nova is "FreeBSD-compatible"; it is not FreeBSD.

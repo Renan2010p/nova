@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# Kernel code generation. The amd64 kernel is a fixed-address (non-PIE)
+# ELF linked at KERNBASE + 2 MiB, exactly where the FreeBSD loader(8)
+# expects a kernel. The linker script is added by sys/conf/build.rs.
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "code-model=kernel",
+    "-C", "relocation-model=static",
+    "-C", "force-frame-pointers=yes",
+]

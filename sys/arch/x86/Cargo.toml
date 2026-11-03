@@ -1,0 +1,15 @@
+[package]
+name = "x86"
+description = "Nova: machine-dependent code shared by the x86 family (sys/x86)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[lints]
+workspace = true
