@@ -34,19 +34,22 @@ pub fn linker_init(boot: &BootInfo<'_>) {
 
 /// Writes `addr` as `function+0xoffset`, with Rust names demangled, or
 /// as `??` if unknown. Lock-free, so it can be used from `panic`.
-pub fn print_symbol(w: &mut dyn Write, addr: usize) -> fmt::Result {
-    // A return address may point just past the end of a call at the end
-    // of a function, so look up the byte before it.
+///
+/// A return address may point just past a call that ends its function,
+/// so for those (`is_return`) the byte before is looked up, as FreeBSD's
+/// `db_nextframe` does.
+pub fn print_symbol(w: &mut dyn Write, addr: usize, is_return: bool) -> fmt::Result {
+    let back = u64::from(is_return);
     let found = KSYMS
         .get()
-        .and_then(|t| t.lookup((addr as u64).wrapping_sub(1)));
+        .and_then(|t| t.lookup((addr as u64).wrapping_sub(back)));
     let Some((name, off)) = found else {
         return w.write_str("??");
     };
     if !libkern::rust_demangle::demangle(name, &mut WriteRef(w)) {
         w.write_str(name)?;
     }
-    write!(w, "+{:#x}", off + 1)
+    write!(w, "+{:#x}", off + back)
 }
 
 /// Adapts `&mut dyn Write` for APIs taking `impl Write`.

@@ -127,7 +127,7 @@ impl mdi::Cpu for Machine {
         vm_machdep::cpu_reset()
     }
 
-    fn stack_trace(f: &mut dyn FnMut(usize) -> bool) {
+    fn stack_trace(f: &mut dyn FnMut(mdi::StackFrame) -> bool) {
         db_trace::stack_trace(f);
     }
 

@@ -35,7 +35,7 @@ pub const APIC_TIMER_INT: u8 = 0xef;
 pub const APIC_SPURIOUS_INT: u8 = 0xff;
 
 /// `tf_trapno` flag for interrupts: the low byte is the vector.
-const T_INTR: u64 = 0x100;
+pub(crate) const T_INTR: u64 = 0x100;
 
 // FreeBSD's trap codes (`x86/include/trap.h`).
 const T_PAGEFLT: u64 = 12;

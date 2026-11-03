@@ -174,9 +174,9 @@ pub fn cpu_reset() -> ! {
     Md::cpu_reset()
 }
 
-/// Calls `f` with each return address on the caller's stack, innermost
-/// first, until it returns false (`stack_save`).
-pub fn stack_trace(f: &mut dyn FnMut(usize) -> bool) {
+/// Calls `f` with each frame of the caller's stack, innermost first,
+/// until it returns false, crossing trap frames (`db_backtrace`).
+pub fn stack_trace(f: &mut dyn FnMut(mdi::StackFrame) -> bool) {
     Md::stack_trace(f)
 }
 

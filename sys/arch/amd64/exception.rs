@@ -16,7 +16,8 @@
 //! Each `IDTVEC` stub makes the stack look the same, whatever the vector:
 //! it pushes a dummy error code when the CPU does not push one, then the
 //! trap number, and jumps to `alltraps`, which saves the general registers
-//! and calls `trap::trap` with a pointer to the resulting
+//! and falls into `calltrap`, which calls `trap::trap` with a pointer to
+//! the resulting
 //! [`TrapFrame`](crate::trap::TrapFrame).
 //!
 //! The trap numbers are FreeBSD's `T_*` codes, not vector numbers (a page
@@ -41,6 +42,9 @@ macro_rules! idtvec {
             ".globl ",
             $name,
             "\n",
+            ".type ",
+            $name,
+            ", @function\n",
             $name,
             ":\n",
             "    push 0\n",
@@ -48,6 +52,11 @@ macro_rules! idtvec {
             $trapno,
             "\n",
             "    jmp alltraps\n",
+            ".size ",
+            $name,
+            ", . - ",
+            $name,
+            "\n",
         )
     };
 }
@@ -60,12 +69,20 @@ macro_rules! idtvec_err {
             ".globl ",
             $name,
             "\n",
+            ".type ",
+            $name,
+            ", @function\n",
             $name,
             ":\n",
             "    push ",
             $trapno,
             "\n",
             "    jmp alltraps\n",
+            ".size ",
+            $name,
+            ", . - ",
+            $name,
+            "\n",
         )
     };
 }
@@ -96,6 +113,9 @@ global_asm!(
     idtvec!("Xtimerint", "0x1ef"),   // T_INTR | APIC_TIMER_INT
     idtvec!("Xspuriousint", "0x1ff"), // T_INTR | APIC_SPURIOUS_INT
     "",
+    // Typed and sized, so that backtraces can name them.
+    ".globl alltraps",
+    ".type alltraps, @function",
     "alltraps:",
     "    push r15",
     "    push r14",
@@ -112,9 +132,17 @@ global_asm!(
     "    push rcx",
     "    push rbx",
     "    push rax",
+    ".size alltraps, . - alltraps",
+    // As in FreeBSD, a return address in `calltrap` tells a backtrace
+    // that a trap frame lies just above `trap`'s frame.
+    ".globl calltrap",
+    ".type calltrap, @function",
+    "calltrap:",
     "    cld",
     "    mov rdi, rsp",
     "    call {trap}",
+    ".globl calltrap_ret",
+    "calltrap_ret:",
     "    pop rax",
     "    pop rbx",
     "    pop rcx",
@@ -132,6 +160,7 @@ global_asm!(
     "    pop r15",
     "    add rsp, 16", // trap number and error code
     "    iretq",
+    ".size calltrap, . - calltrap",
     trap = sym trap,
 );
 
@@ -160,4 +189,6 @@ unsafe extern "C" {
     pub(crate) fn Xxmm();
     pub(crate) fn Xtimerint();
     pub(crate) fn Xspuriousint();
+    /// The return address of `call trap` in `calltrap`.
+    pub(crate) fn calltrap_ret();
 }

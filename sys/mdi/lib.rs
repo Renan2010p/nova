@@ -97,14 +97,38 @@ pub trait Cpu {
     fn cpu_reset() -> !;
 
     /// Walks the caller's stack, innermost frame first, calling `f` with
-    /// each return address until it returns false or the chain ends
-    /// (`stack_save`). Must never fault, whatever the stack contains.
-    fn stack_trace(f: &mut dyn FnMut(usize) -> bool);
+    /// each frame until it returns false or the chain ends, crossing trap
+    /// frames into the interrupted code (`db_backtrace`). Must never
+    /// fault, whatever the stack contains.
+    fn stack_trace(f: &mut dyn FnMut(StackFrame) -> bool);
 
     /// Writes the boot CPU's identification, in FreeBSD's format
     /// (`printcpuinfo`: the `CPU:`, `Origin=` and `Features=` lines, and
     /// `Hypervisor:` when virtualized).
     fn cpu_print_info(w: &mut dyn fmt::Write) -> fmt::Result;
+}
+
+/// One step of a stack trace.
+#[derive(Clone, Copy, Debug)]
+pub enum StackFrame {
+    /// A return address: the call is just before it.
+    Return(usize),
+    /// A trap or interrupt frame: the code at `pc` was interrupted, with
+    /// stack pointer `sp` and frame pointer `fp`.
+    Trap {
+        /// An interrupt rather than an exception.
+        interrupt: bool,
+        /// FreeBSD's `T_*` trap code (exceptions only).
+        trapno: u64,
+        /// Interrupted instruction.
+        pc: usize,
+        /// Interrupted stack pointer.
+        sp: usize,
+        /// Interrupted frame pointer.
+        fp: usize,
+    },
+    /// The interrupted instruction itself (follows a `Trap`).
+    Pc(usize),
 }
 
 /// Kernel thread contexts (FreeBSD's `struct pcb`, `cpu_switch`).

@@ -64,7 +64,7 @@ mod sealed {
     pub trait Sealed {}
 }
 
-pub use mdi::{BootInfo, Firmware, MiStartup, PhysRange};
+pub use mdi::{BootInfo, Firmware, MiStartup, PhysRange, StackFrame};
 
 /// The implementation of the `mdi` contract for this build.
 type Md = md::Machine;

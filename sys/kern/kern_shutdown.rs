@@ -33,6 +33,7 @@ use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+use framework::StackFrame;
 use sys::reboot::RB_HALT;
 
 use crate::kern_clock;
@@ -83,15 +84,37 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     shutdown_reset()
 }
 
-/// Prints the stack of the caller (`kdb_backtrace`, `stack_print`).
+/// Prints the stack of the caller (`kdb_backtrace`), in the format of
+/// FreeBSD's `db_backtrace`: one `#n 0x... at function+0x...` line per
+/// frame, and `--- trap 0xc, rip = ..., rsp = ..., rbp = ... ---` where a
+/// trap or interrupt was taken.
 #[inline(never)]
 fn kdb_backtrace() {
     vprintf_unlocked(format_args!("KDB: stack backtrace:\n"));
     let mut frame = 0;
-    framework::cpu::stack_trace(&mut |pc| {
+    framework::cpu::stack_trace(&mut |f| {
         let mut w = ConsUnlocked;
+        let (pc, is_return) = match f {
+            StackFrame::Return(pc) => (pc, true),
+            StackFrame::Pc(pc) => (pc, false),
+            StackFrame::Trap {
+                interrupt,
+                trapno,
+                pc,
+                sp,
+                fp,
+            } => {
+                let _ = if interrupt {
+                    w.write_str("--- interrupt")
+                } else {
+                    write!(w, "--- trap {trapno:#x}")
+                };
+                let _ = writeln!(w, ", rip = {pc:#x}, rsp = {sp:#x}, rbp = {fp:#x} ---");
+                return true;
+            }
+        };
         let _ = write!(w, "#{frame} {pc:#x} at ");
-        let _ = print_symbol(&mut w, pc);
+        let _ = print_symbol(&mut w, pc, is_return);
         let _ = w.write_str("\n");
         frame += 1;
         frame < BACKTRACE_MAX
