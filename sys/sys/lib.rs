@@ -28,6 +28,7 @@
 
 pub mod bytes;
 pub mod copyright;
+pub mod elf;
 pub mod linker;
 pub mod physmem;
 pub mod reboot;
