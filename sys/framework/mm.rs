@@ -31,6 +31,7 @@
 
 pub mod frame;
 pub mod kmem;
+pub mod kstack;
 pub mod vm_phys;
 
 pub use frame::{Frame, Segment};

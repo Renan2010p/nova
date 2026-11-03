@@ -23,9 +23,23 @@ use crate::kern_cons::cnputs;
 /// Serializes whole messages so lines from different CPUs don't mix.
 static PRF_LOCK: MtxSpin<()> = MtxSpin::new(());
 
-struct Cons;
+/// The console as a `fmt::Write`, for code that formats piecewise (each
+/// piece is printed whole, but pieces from different CPUs may interleave).
+pub struct Cons;
 
 impl Write for Cons {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let _guard = PRF_LOCK.lock();
+        cnputs(s);
+        Ok(())
+    }
+}
+
+/// The console without the lock. Only for `panic`, which may have
+/// interrupted a CPU that holds it.
+pub(crate) struct ConsUnlocked;
+
+impl Write for ConsUnlocked {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         cnputs(s);
         Ok(())
@@ -36,13 +50,12 @@ impl Write for Cons {
 #[doc(hidden)]
 pub fn vprintf(args: fmt::Arguments<'_>) {
     let _guard = PRF_LOCK.lock();
-    let _ = Cons.write_fmt(args);
+    let _ = ConsUnlocked.write_fmt(args);
 }
 
-/// Prints without taking the console lock. Only for `panic`, which may
-/// have interrupted a CPU that holds it.
+/// Prints without taking the console lock. Only for `panic`.
 pub(crate) fn vprintf_unlocked(args: fmt::Arguments<'_>) {
-    let _ = Cons.write_fmt(args);
+    let _ = ConsUnlocked.write_fmt(args);
 }
 
 /// Prints to the kernel console, like `format!`.

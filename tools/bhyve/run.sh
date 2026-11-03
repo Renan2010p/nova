@@ -17,8 +17,12 @@
 #     doas sh tools/bhyve/run.sh sys/target/x86_64-unknown-none/release/kernel
 #
 # Environment: VM (default nova), MEM (default 512M), CPUS (default 2),
-# SELFTEST (e.g. "pf": take a kernel page fault on purpose, to check that
-# traps are caught and reported).
+# VERBOSE=1 (boot_verbose, like "boot -v": diagnostics and self-test
+# results), SELFTEST=pf|stack (a fatal kernel page fault or stack overflow
+# on purpose, to check that traps are caught and reported).
+#
+# Nova halts like FreeBSD: "Please press any key to reboot." Press a key
+# (or wait for the panic countdown) and bhyve exits.
 
 set -eu
 
@@ -27,6 +31,7 @@ VM=${VM:-nova}
 MEM=${MEM:-512M}
 CPUS=${CPUS:-2}
 SELFTEST=${SELFTEST:-}
+VERBOSE=${VERBOSE:-}
 
 if [ "$(uname -s)" != FreeBSD ]; then
 	echo "run.sh: bhyve needs a FreeBSD host" >&2
@@ -62,6 +67,9 @@ beastie_disable="YES"
 console="comconsole"
 boot_mute="NO"
 EOF
+if [ -n "$VERBOSE" ]; then
+	echo 'boot_verbose="YES"' >> "$ROOT/boot/loader.conf"
+fi
 if [ -n "$SELFTEST" ]; then
 	echo "debug.nova.selftest=\"$SELFTEST\"" >> "$ROOT/boot/loader.conf"
 fi
@@ -81,7 +89,7 @@ set -e
 case $rc in
 0) echo "run.sh: guest rebooted" ;;
 1) echo "run.sh: guest powered off" ;;
-2) echo "run.sh: guest halted (expected for Nova today)" ;;
+2) echo "run.sh: guest halted" ;;
 3) echo "run.sh: guest triple-faulted" ;;
 *) echo "run.sh: bhyve exited with error $rc" ;;
 esac

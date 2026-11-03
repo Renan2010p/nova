@@ -23,3 +23,8 @@ use crate::Md;
 pub fn early_putc(c: u8) {
     Md::putc(c)
 }
+
+/// A byte typed on the early console, if any (`cncheckc`).
+pub fn early_checkc() -> Option<u8> {
+    Md::checkc()
+}

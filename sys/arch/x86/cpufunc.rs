@@ -254,3 +254,20 @@ pub unsafe fn ltr(sel: u16) {
     // SAFETY: forwarded to the caller.
     unsafe { asm!("ltr {0:x}", in(reg) sel, options(nostack, preserves_flags)) }
 }
+
+/// `rdtsc`: reads the time-stamp counter.
+#[inline(always)]
+pub fn rdtsc() -> u64 {
+    let (lo, hi): (u32, u32);
+    // SAFETY: reads a counter; no side effects.
+    unsafe { asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)) }
+    (u64::from(hi) << 32) | u64::from(lo)
+}
+
+/// `invlpg`: flushes the TLB entry for `va` on this CPU.
+#[inline(always)]
+pub fn invlpg(va: usize) {
+    // SAFETY: dropping a TLB entry only makes the next access walk the page
+    // tables again; it cannot make memory accessible that was not.
+    unsafe { asm!("invlpg [{}]", in(reg) va, options(nostack, preserves_flags)) }
+}

@@ -64,6 +64,9 @@ pub struct BootInfo<'a> {
     /// ending with an empty string. May run past that terminator; the
     /// consumer (`kern::kern_environment`) finds it.
     pub envp: &'a [u8],
+    /// The kernel symbol table preloaded by the loader, `[SSYM, ESYM)`, in
+    /// the layout `sys::elf::KSymTab` reads; empty if absent.
+    pub ksyms: &'static [u8],
     /// Raw preload metadata, for MI consumers (preloaded modules,
     /// `md_image`, symbol table, ...).
     pub preload: Preload<'a>,

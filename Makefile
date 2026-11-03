@@ -31,9 +31,10 @@ clippy:
 	cd sys && ${CARGO} clippy --profile ${PROFILE}
 
 # FreeBSD host only, as root: boots the kernel with the system loader(8).
-# SELFTEST=pf takes a kernel page fault on purpose.
+# VERBOSE=1 boots verbose (boot -v); SELFTEST=pf|stack takes a fatal kernel
+# page fault or stack overflow on purpose.
 bhyve: kernel
-	SELFTEST="${SELFTEST}" sh tools/bhyve/run.sh ${KERNEL}
+	VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" sh tools/bhyve/run.sh ${KERNEL}
 
 clean:
 	cd sys && ${CARGO} clean

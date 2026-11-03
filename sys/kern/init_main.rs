@@ -15,179 +15,122 @@
 //!
 //! In FreeBSD, `mi_startup` walks the `SYSINIT` list: VM, malloc, proc0,
 //! devices, root mount, and finally `init(8)`. Nova runs the same kind of
-//! ordered steps; each one is a function below, in boot order. For now
-//! (milestone 2) the kernel reports what it was handed, checks that the
-//! heap and the clock work, and halts.
-
-use alloc::boxed::Box;
-use alloc::vec::Vec;
+//! ordered steps, one function each, below, and prints what FreeBSD
+//! prints at each of them, in the same format, so a Renux "Nova" console
+//! looks familiar:
+//!
+//! ```text
+//! Copyright (c) 2026 Renan Lucas Vieira Hilário.
+//! ...
+//! Nova 0.1.0-CURRENT main-n12-446bf2d3e1a2 GENERIC amd64
+//! rustc 1.99.1 (58cf8f9c3 2026-10-13)
+//! CPU: Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz (2208.00-MHz K8-class CPU)
+//!   Origin="GenuineIntel"  Id=0x906ea  Family=0x6  Model=0x9e  Stepping=10
+//!   ...
+//! real memory  = 536870912 (512 MB)
+//! avail memory = 533475328 (508 MB)
+//! Event timer "LAPIC" quality 600
+//! Timecounters tick every 10.000 msec
+//! ```
+//!
+//! Diagnostics FreeBSD only shows with `boot -v` are only shown with
+//! `boot -v` here too. There is no userland yet, so the kernel halts at
+//! the point where FreeBSD would start `init(8)`.
 
 use framework::{BootInfo, PAGE_SIZE};
 use sys::copyright::{COPYRIGHT, OSTYPE};
-use sys::physmem;
-use sys::reboot::RB_VERBOSE;
+use sys::reboot::{RB_HALT, RB_VERBOSE};
 
 use crate::kern_environment::StaticEnv;
-use crate::kern_shutdown::kern_halt;
-use crate::{kern_clock, printf, subr_param};
-
-const MIB: u64 = 1024 * 1024;
+use crate::subr_prf::Cons;
+use crate::vers::{COMPILER, KERN_IDENT, OSRELEASE, VCS};
+use crate::{
+    kern_clock, kern_linker, kern_shutdown, printf, sched_4bsd, subr_param, subr_selftest,
+};
 
 /// The MI entry point (`mdi::MiStartup`). Called once by the MD bootstrap
 /// on the boot CPU, with interrupts disabled; the framework (page
-/// allocator, heap) is already initialized.
+/// allocator, heap, thread 0) is already initialized.
 pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     let kenv = StaticEnv::new(boot.envp);
-    let verbose = boot.howto & RB_VERBOSE != 0;
-
-    print_banner();
-    print_boot_info(boot, &kenv, verbose);
-    vm_mem_init(boot, verbose);
-    kmem_selftest();
+    let bootverbose = boot.howto & RB_VERBOSE != 0;
     let param = subr_param::init_param1(&kenv);
-    clock_start(param.hz);
-    print_cpus();
-    selftest_trap(&kenv);
+    kern_shutdown::set_panic_reboot_wait_time(param.panic_reboot_wait_time);
+    kern_linker::linker_init(boot);
 
-    printf!("mi_startup: nothing more to do yet (milestone 2)\n");
-    kern_halt()
+    print_caddr_t();
+    identify_cpu();
+    cpu_startup(boot, &kenv, bootverbose);
+    if bootverbose {
+        linker_preload(boot);
+    }
+    sched_4bsd::sched_init(param.hz);
+    kern_clock::initclocks(param.hz);
+    framework::cpu::intr_enable();
+
+    subr_selftest::run(bootverbose, param.hz);
+    subr_selftest::trap_selftest(&kenv);
+
+    // This is where FreeBSD would start init(8).
+    printf!("Nova: no userland yet; halting.\n");
+    kern_shutdown::kern_reboot(RB_HALT)
 }
 
-/// The copyright notice and version (`print_caddr_t(copyright)`).
-fn print_banner() {
+/// The copyright notice and version (`print_caddr_t(copyright)`,
+/// `print_version`).
+fn print_caddr_t() {
     printf!("{}", COPYRIGHT);
     printf!(
-        "{} {} {}\n",
+        "{} {} {} {} {}\n",
         OSTYPE,
-        env!("CARGO_PKG_VERSION"),
+        OSRELEASE,
+        VCS,
+        KERN_IDENT,
         framework::MACHINE
     );
+    printf!("{}\n", COMPILER);
 }
 
-/// What the loader handed over.
-fn print_boot_info(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, verbose: bool) {
-    printf!("firmware: {}\n", boot.firmware.name());
-    printf!(
-        "kernel image + boot data: {:#x} - {:#x} ({} KiB)\n",
-        boot.kernel.start,
-        boot.kernel.end,
-        boot.kernel.len() / 1024
-    );
-    printf!("boothowto: {:#x}\n", boot.howto);
-
-    printf!("physical memory:\n");
-    for r in boot.physmem {
-        printf!(
-            "  {:#014x} - {:#014x} ({} KiB)\n",
-            r.start,
-            r.end,
-            r.len() / 1024
-        );
-    }
-    printf!(
-        "real memory  = {} MiB\n",
-        physmem::total(boot.physmem) / MIB
-    );
-
-    printf!("preloaded files:\n");
-    for m in boot.preload.modules() {
-        printf!(
-            "  {} ({}) at {:#x}, {} bytes\n",
-            m.name().unwrap_or("?"),
-            m.type_name().unwrap_or("?"),
-            m.addr().unwrap_or(0),
-            m.size().unwrap_or(0)
-        );
-    }
-
-    printf!("kernel environment: {} variables\n", kenv.len());
-    if verbose {
-        for (name, value) in kenv.iter() {
-            printf!("  {}={}\n", name, value);
-        }
-    } else {
-        for name in ["kernelname", "console", "smbios.system.product"] {
-            if let Some(value) = kenv.getenv(name) {
-                printf!("  {}={}\n", name, value);
-            }
-        }
-    }
+/// The CPU report (`printcpuinfo`).
+fn identify_cpu() {
+    let _ = framework::cpu::print_cpu_info(&mut Cons);
 }
 
-/// Reports the page allocator (`vm_mem_init`).
-fn vm_mem_init(boot: &BootInfo<'_>, verbose: bool) {
-    if verbose {
-        printf!("available physical memory:\n");
+/// Memory sizes, as amd64's `cpu_startup` reports them.
+fn cpu_startup(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
+    let free = framework::mm::vm_phys::free_count() * PAGE_SIZE as u64;
+    // SMBIOS knows the installed RAM; the firmware map only what is usable.
+    let maxmem = boot.physmem.last().map_or(0, |r| r.end);
+    let realmem = kenv
+        .getenv("smbios.memory.enabled")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|kib| kib << 10)
+        .filter(|&m| m >= free)
+        .unwrap_or(maxmem);
+    printf!("real memory  = {} ({} MB)\n", realmem, realmem >> 20);
+    if bootverbose {
+        printf!("Physical memory chunk(s):\n");
         for r in boot.physavail {
             printf!(
-                "  {:#014x} - {:#014x} ({} KiB)\n",
+                "0x{:016x} - 0x{:016x}, {} bytes ({} pages)\n",
                 r.start,
-                r.end,
-                r.len() / 1024
+                r.end - 1,
+                r.len(),
+                r.len() / PAGE_SIZE as u64
             );
         }
     }
-    let free = framework::mm::vm_phys::free_count();
-    printf!(
-        "avail memory = {} MiB ({} pages)\n",
-        free * PAGE_SIZE as u64 / MIB,
-        free
-    );
+    printf!("avail memory = {} ({} MB)\n", free, free / 1_048_576);
 }
 
-/// Checks the kernel heap end to end: slab objects, a large block, and
-/// that freed memory returns to the page allocator.
-fn kmem_selftest() {
-    let before = framework::mm::vm_phys::free_count();
-    {
-        let v: Vec<u64> = (1..=1000).collect();
-        let big: Box<[u8]> = alloc::vec![0xa5; 64 * 1024].into_boxed_slice();
-        let small: Vec<Box<u32>> = (0..256).map(Box::new).collect();
-        assert_eq!(v.iter().sum::<u64>(), 500_500, "kmem selftest: Vec");
-        assert!(big.iter().all(|&b| b == 0xa5), "kmem selftest: large block");
-        assert!(
-            small.iter().zip(0..).all(|(b, i)| **b == i),
-            "kmem selftest: slab"
+/// The files the loader preloaded (`linker_preload`, verbose only).
+fn linker_preload(boot: &BootInfo<'_>) {
+    for m in boot.preload.modules() {
+        printf!(
+            "Preloaded {} \"{}\" at {:#x}.\n",
+            m.type_name().unwrap_or("?"),
+            m.name().unwrap_or("?"),
+            m.addr().unwrap_or(0)
         );
-    }
-    let after = framework::mm::vm_phys::free_count();
-    // Slab pages stay with the heap; the large blocks went back.
-    printf!(
-        "kmem: Box and Vec work ({} pages kept by the heap's slabs)\n",
-        before.saturating_sub(after)
-    );
-}
-
-/// Starts the clock and checks that it ticks (`initclocks`).
-fn clock_start(hz: u32) {
-    kern_clock::initclocks(hz);
-    framework::cpu::intr_enable();
-    let start = kern_clock::ticks();
-    while kern_clock::ticks() < start + u64::from(hz) {
-        framework::cpu::cpu_idle();
-    }
-    printf!(
-        "clock: hz = {}, {} ticks counted with interrupts on\n",
-        hz,
-        kern_clock::ticks() - start
-    );
-}
-
-/// The CPUs (`cpu_mp_announce`).
-fn print_cpus() {
-    printf!(
-        "CPUs: {} running (boot CPU is cpu{}), up to {} supported\n",
-        framework::cpu::mp_ncpus(),
-        framework::cpu::curcpu().as_u32(),
-        framework::MAXCPU
-    );
-}
-
-/// `debug.nova.selftest=pf` in the loader: take a kernel page fault on
-/// purpose, to see that it is caught and reported.
-fn selftest_trap(kenv: &StaticEnv<'_>) {
-    if kenv.getenv("debug.nova.selftest") == Some("pf") {
-        printf!("selftest: taking a page fault on purpose\n");
-        framework::cpu::cpu_selftest_fault();
     }
 }

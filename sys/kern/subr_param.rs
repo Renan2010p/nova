@@ -18,6 +18,7 @@
 //! same thing under Nova.
 
 use crate::kern_environment::StaticEnv;
+use crate::kern_shutdown::PANIC_REBOOT_WAIT_TIME_DEFAULT;
 
 /// Default clock frequency on bare metal (FreeBSD's `HZ`).
 pub const HZ: u32 = 1000;
@@ -31,6 +32,9 @@ pub struct Param1 {
     /// Clock ticks per second: the `kern.hz` tunable, else `HZ`, or
     /// `HZ_VM` under a hypervisor.
     pub hz: u32,
+    /// `kern.panic_reboot_wait_time`: seconds before rebooting after a
+    /// panic (-1: wait for a key; 0: at once).
+    pub panic_reboot_wait_time: i32,
 }
 
 /// Computes the early parameters from the static environment.
@@ -44,5 +48,12 @@ pub fn init_param1(kenv: &StaticEnv<'_>) -> Param1 {
         .getenv_u32("kern.hz")
         .filter(|&hz| hz > 0)
         .unwrap_or(default_hz);
-    Param1 { hz }
+    let panic_reboot_wait_time = kenv
+        .getenv("kern.panic_reboot_wait_time")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(PANIC_REBOOT_WAIT_TIME_DEFAULT);
+    Param1 {
+        hz,
+        panic_reboot_wait_time,
+    }
 }

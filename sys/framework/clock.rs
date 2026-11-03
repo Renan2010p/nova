@@ -21,6 +21,11 @@ use mdi::Clock;
 use crate::Md;
 use crate::sync::MtxSpin;
 
+/// Name of the event timer driving the clock, as FreeBSD reports it.
+pub const ET_NAME: &str = <Md as Clock>::ET_NAME;
+/// Quality of that event timer, as FreeBSD reports it.
+pub const ET_QUALITY: i32 = <Md as Clock>::ET_QUALITY;
+
 /// The service's tick handler.
 static HARDCLOCK: MtxSpin<Option<fn()>> = MtxSpin::new(None);
 

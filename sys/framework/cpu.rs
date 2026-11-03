@@ -95,7 +95,22 @@ impl Drop for IntrGuard {
     }
 }
 
-fn assert_no_guard(what: &str) {
+/// Interrupt guards alive on this CPU.
+pub(crate) fn intr_depth() -> u32 {
+    INTR_DEPTH[curcpu().index()].load(Ordering::Relaxed)
+}
+
+/// A new thread's first code takes over the count of the guard that
+/// switched to it (alive on the previous thread's stack) and enables
+/// interrupts. See `task`'s switch invariant.
+pub(crate) fn switch_entry_release() {
+    let prev = INTR_DEPTH[curcpu().index()].fetch_sub(1, Ordering::Relaxed);
+    assert_eq!(prev, 1, "switch_entry_release: unbalanced interrupt guards");
+    Md::intr_enable();
+}
+
+/// Panics with `what` if an interrupt guard is held on this CPU.
+pub(crate) fn assert_no_guard(what: &str) {
     let depth = INTR_DEPTH[curcpu().index()].load(Ordering::Relaxed);
     assert!(
         depth == 0,
@@ -146,6 +161,29 @@ pub fn cpu_selftest_fault() -> ! {
 /// True when running under a hypervisor (FreeBSD's `vm_guest`).
 pub fn vm_guest() -> bool {
     <Md as mdi::Machine>::vm_guest()
+}
+
+/// Busy-waits at least `us` microseconds (`DELAY`), even with interrupts
+/// off.
+pub fn delay(us: u32) {
+    Md::delay(us)
+}
+
+/// Resets the machine (`cpu_reset`).
+pub fn cpu_reset() -> ! {
+    Md::cpu_reset()
+}
+
+/// Calls `f` with each return address on the caller's stack, innermost
+/// first, until it returns false (`stack_save`).
+pub fn stack_trace(f: &mut dyn FnMut(usize) -> bool) {
+    Md::stack_trace(f)
+}
+
+/// Writes the boot CPU's identification in FreeBSD's format
+/// (`printcpuinfo`).
+pub fn print_cpu_info(w: &mut dyn core::fmt::Write) -> core::fmt::Result {
+    Md::cpu_print_info(w)
 }
 
 /// Evidence that the current code cannot leave this CPU: interrupts are

@@ -36,6 +36,7 @@ const LCR_DLAB: u8 = 0x80;
 const LCR_8N1: u8 = 0x03;
 const FCR_ENABLE_CLEAR: u8 = 0x07;
 const MCR_DTR_RTS: u8 = 0x03;
+const LSR_RXRDY: u8 = 0x01;
 const LSR_THRE: u8 = 0x20;
 
 /// Divisor for 115200 baud with the standard 1.8432 MHz clock.
@@ -88,5 +89,13 @@ impl Ns8250 {
             }
             outb(b + REG_DATA, c);
         }
+    }
+
+    /// A received byte, if one is waiting (`cncheckc`).
+    pub fn getc(&self) -> Option<u8> {
+        let b = self.base;
+        // SAFETY: as in `init`. Reading LSR has no side effects; reading
+        // RBR consumes the byte, which is what the caller asks for.
+        unsafe { (inb(b + REG_LSR) & LSR_RXRDY != 0).then(|| inb(b + REG_DATA)) }
     }
 }

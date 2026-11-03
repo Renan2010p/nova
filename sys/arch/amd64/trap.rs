@@ -22,9 +22,10 @@
 
 use core::fmt::{self, Write};
 
-use x86::cpufunc::rcr2;
+use x86::cpufunc::{rcr2, rdmsr};
 use x86::local_apic::{lapic_eoi, lapic_id};
 use x86::psl::{PSL_I, PSL_RF, PSL_T};
+use x86::specialreg::{MSR_FSBASE, MSR_GSBASE, MSR_KGSBASE};
 
 use crate::EARLY_CONS;
 
@@ -38,6 +39,7 @@ const T_INTR: u64 = 0x100;
 
 // FreeBSD's trap codes (`x86/include/trap.h`).
 const T_PAGEFLT: u64 = 12;
+const T_DOUBLEFLT: u64 = 23;
 
 // Page fault error code bits (`PGEX_*`).
 const PGEX_P: u64 = 0x01;
@@ -80,6 +82,8 @@ pub struct TrapFrame {
 unsafe extern "Rust" {
     /// The framework's interrupt entry (`mdi::IntrUpcall`).
     fn __nova_intr(intr: mdi::Interrupt);
+    /// The framework's interrupt exit (`mdi::IntrExitUpcall`).
+    fn __nova_intr_exit();
 }
 
 /// Called by `alltraps` with interrupts disabled.
@@ -88,15 +92,23 @@ pub(crate) extern "C" fn trap(frame: &mut TrapFrame) {
         match frame.tf_trapno as u8 {
             APIC_TIMER_INT => {
                 lapic_eoi();
-                // SAFETY: defined once by the framework with the type of
-                // `mdi::IntrUpcall` (checked there); interrupts are off.
-                unsafe { __nova_intr(mdi::Interrupt::Clock) }
+                // SAFETY: both are defined once by the framework with the
+                // types of `mdi::IntrUpcall` and `mdi::IntrExitUpcall`
+                // (checked there); interrupts are off, and we are on the
+                // interrupted thread's stack, as the exit upcall requires.
+                unsafe {
+                    __nova_intr(mdi::Interrupt::Clock);
+                    __nova_intr_exit();
+                }
             }
             // Spurious interrupts must not be acknowledged.
             APIC_SPURIOUS_INT => {}
             _ => trap_fatal(frame),
         }
         return;
+    }
+    if frame.tf_trapno == T_DOUBLEFLT {
+        dblfault_handler(frame);
     }
     trap_fatal(frame)
 }
@@ -143,6 +155,59 @@ impl Write for Cons {
         }
         Ok(())
     }
+}
+
+/// A double fault: usually a kernel stack overflow (the page fault on the
+/// guard page could not be delivered on the same stack). It runs on its
+/// own IST stack; reported like FreeBSD's `dblfault_handler`.
+fn dblfault_handler(frame: &TrapFrame) -> ! {
+    let w = &mut Cons;
+    // SAFETY: these MSRs exist on every amd64 CPU; reading them has no
+    // side effects.
+    let (fsbase, gsbase, kgsbase) =
+        unsafe { (rdmsr(MSR_FSBASE), rdmsr(MSR_GSBASE), rdmsr(MSR_KGSBASE)) };
+    let _ = write!(
+        w,
+        "\nFatal double fault\n\
+         rip {:#x} rsp {:#x} rbp {:#x}\n\
+         rax {:#x} rdx {:#x} rbx {:#x}\n\
+         rcx {:#x} rsi {:#x} rdi {:#x}\n\
+         r8 {:#x} r9 {:#x} r10 {:#x}\n\
+         r11 {:#x} r12 {:#x} r13 {:#x}\n\
+         r14 {:#x} r15 {:#x} rflags {:#x}\n\
+         cs {:#x} ss {:#x}\n\
+         fsbase {:#x} gsbase {:#x} kgsbase {:#x}\n",
+        frame.tf_rip,
+        frame.tf_rsp,
+        frame.tf_rbp,
+        frame.tf_rax,
+        frame.tf_rdx,
+        frame.tf_rbx,
+        frame.tf_rcx,
+        frame.tf_rsi,
+        frame.tf_rdi,
+        frame.tf_r8,
+        frame.tf_r9,
+        frame.tf_r10,
+        frame.tf_r11,
+        frame.tf_r12,
+        frame.tf_r13,
+        frame.tf_r14,
+        frame.tf_r15,
+        frame.tf_rflags,
+        frame.tf_cs,
+        frame.tf_ss,
+        fsbase,
+        gsbase,
+        kgsbase,
+    );
+    let _ = writeln!(
+        w,
+        "cpuid = {}; apic id = {:02x}",
+        crate::pcpu::curcpu(),
+        lapic_id()
+    );
+    panic!("double fault");
 }
 
 /// Reports a fatal trap like FreeBSD's `trap_diag`, then panics with the

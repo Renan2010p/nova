@@ -33,3 +33,4 @@ pub mod ns8250;
 pub mod psl;
 pub mod segments;
 pub mod specialreg;
+pub mod tsc;

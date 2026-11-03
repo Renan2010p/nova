@@ -29,23 +29,28 @@
 //!   generics in MI code.
 //! * **Upcalls (MD → MI)**: when the MD bootstrap is done it calls
 //!   [`MiStartup`], bound by the kernel binary with
-//!   `framework::kernel_entry!`. Interrupts go to [`IntrUpcall`], defined
-//!   by the framework. Both are link-time symbols whose types are checked
+//!   `framework::kernel_entry!`. Interrupts go to [`IntrUpcall`] and
+//!   [`IntrExitUpcall`], defined by the framework. Both are link-time symbols whose types are checked
 //!   against the aliases here, so MD code never imports MI code.
 //!
-//! Only the framework calls these traits; services never see them. Traits
-//! whose misuse could break memory safety (page tables, context switch)
-//! will be `unsafe trait`s with documented contracts.
+//! Only the framework calls these traits; services never see them. Where
+//! a mistake could break memory safety, the contract is written down: an
+//! `unsafe trait` when the MD implementation must keep a promise
+//! (`DirectMap`, `KernelMap`), an `unsafe fn` when the caller must
+//! (`Context::cpu_switch`).
 //!
 //! Adding a method here forces every architecture to implement it. Keep
 //! the interface small and in MI terms; see docs/LAYERING.md.
 
 #![no_std]
-// `deny`, not `forbid`: declaring an `unsafe trait` (a contract the MD
-// side must uphold) counts as unsafe code, and is the one thing allowed.
+// `deny`, not `forbid`: declaring an `unsafe trait` or `unsafe fn` (a
+// contract one side must uphold) counts as unsafe code, and is the one
+// thing allowed here, item by item.
 #![deny(unsafe_code)]
 
 pub mod bootinfo;
+
+use core::fmt;
 
 pub use bootinfo::{BootInfo, Firmware};
 pub use sys::physmem::PhysRange;
@@ -83,6 +88,92 @@ pub trait Cpu {
     /// Deliberately takes a fatal kernel page fault (a read of an
     /// unmapped address), to exercise the trap path. Never returns.
     fn cpu_selftest_fault() -> !;
+
+    /// Busy-waits for at least `us` microseconds (`DELAY`). Works with
+    /// interrupts disabled.
+    fn delay(us: u32);
+
+    /// Resets the machine (`cpu_reset`).
+    fn cpu_reset() -> !;
+
+    /// Walks the caller's stack, innermost frame first, calling `f` with
+    /// each return address until it returns false or the chain ends
+    /// (`stack_save`). Must never fault, whatever the stack contains.
+    fn stack_trace(f: &mut dyn FnMut(usize) -> bool);
+
+    /// Writes the boot CPU's identification, in FreeBSD's format
+    /// (`printcpuinfo`: the `CPU:`, `Origin=` and `Features=` lines, and
+    /// `Hypervisor:` when virtualized).
+    fn cpu_print_info(w: &mut dyn fmt::Write) -> fmt::Result;
+}
+
+/// Kernel thread contexts (FreeBSD's `struct pcb`, `cpu_switch`).
+#[allow(unsafe_code)]
+pub trait Context {
+    /// The saved state of a thread that is not running.
+    type Pcb: Send;
+
+    /// A `Pcb` that has never run: only valid as the `old` side of the
+    /// first `cpu_switch` (the boot thread).
+    const PCB_INIT: Self::Pcb;
+
+    /// Prepares `pcb` so that switching to it calls `entry` on the stack
+    /// ending at `stack_top`, with interrupts disabled.
+    ///
+    /// # Safety
+    ///
+    /// `stack_top` must be the 16-byte aligned top of a mapped, writable
+    /// stack that stays valid for as long as the thread can run; `entry`
+    /// must never return.
+    unsafe fn cpu_thread_init(pcb: &mut Self::Pcb, stack_top: usize, entry: extern "C" fn() -> !);
+
+    /// Saves the running thread's state in `old` and resumes `new`
+    /// (`cpu_switch`). Returns when some CPU switches back to `old`.
+    ///
+    /// # Safety
+    ///
+    /// Interrupts must be disabled. `old` must stay valid until it is
+    /// resumed. `new` must come from `cpu_thread_init` or a previous
+    /// `cpu_switch`, and must not be running or being saved on any CPU.
+    unsafe fn cpu_switch(old: *mut Self::Pcb, new: *const Self::Pcb);
+}
+
+/// Mappings of single pages in the kernel's own address range (FreeBSD's
+/// `pmap_kenter`, `pmap_kremove`, `pmap_kextract`).
+///
+/// # Safety
+///
+/// Implementations must map exactly what is asked, visible to every CPU,
+/// only inside `[KVA_MIN, KVA_MAX)`, a range the MD layer uses for
+/// nothing else, and must never fault in `pmap_kextract`.
+#[allow(unsafe_code)]
+pub unsafe trait KernelMap {
+    /// Start of the range the framework manages.
+    const KVA_MIN: usize;
+    /// End of the range the framework manages.
+    const KVA_MAX: usize;
+
+    /// Maps the page at `va` to physical page `pa`, read-write, kernel
+    /// only. `alloc` must return zeroed pages for any page table needed.
+    /// Returns false if `alloc` failed.
+    ///
+    /// # Safety
+    ///
+    /// `va` must be page aligned, in `[KVA_MIN, KVA_MAX)` and unmapped;
+    /// `pa` must be a page the caller owns and lets no one else use while
+    /// mapped. Calls must be serialized.
+    unsafe fn pmap_kenter(va: usize, pa: u64, alloc: &mut dyn FnMut() -> Option<u64>) -> bool;
+
+    /// Unmaps the page at `va` and flushes it from the TLB.
+    ///
+    /// # Safety
+    ///
+    /// `va` must have been mapped with `pmap_kenter`, and nothing may use
+    /// the mapping anymore. Calls must be serialized.
+    unsafe fn pmap_kremove(va: usize);
+
+    /// The physical address `va` maps to in the kernel, if any.
+    fn pmap_kextract(va: usize) -> Option<u64>;
 }
 
 /// The direct map: all of physical memory, mapped at a fixed offset in
@@ -115,6 +206,11 @@ pub unsafe trait DirectMap {
 
 /// The per-CPU periodic clock (FreeBSD's event timer).
 pub trait Clock {
+    /// Event timer name, as FreeBSD reports it (`Event timer "LAPIC"`).
+    const ET_NAME: &'static str;
+    /// Event timer quality, as FreeBSD reports it.
+    const ET_QUALITY: i32;
+
     /// Starts the periodic clock interrupt on this CPU at `hz` ticks per
     /// second. Each tick is delivered as [`Interrupt::Clock`].
     fn cpu_initclocks(hz: u32);
@@ -133,15 +229,25 @@ pub enum Interrupt {
 /// interrupt controller.
 pub type IntrUpcall = fn(Interrupt);
 
+/// Signature of the interrupt exit upcall, `framework::intr::__nova_intr_exit`.
+/// The MD trap code calls it after [`IntrUpcall`] returns, still with
+/// interrupts disabled, on the interrupted thread's stack, right before
+/// returning to it: this is where the framework may preempt that thread
+/// (FreeBSD's `doreti` -> `ast`).
+pub type IntrExitUpcall = fn();
+
 /// Console available from the first instruction, before any driver is
 /// attached (FreeBSD's early `cninit` path). Output only.
 pub trait EarlyCons {
     /// Writes one byte, as is (no newline translation).
     fn putc(c: u8);
+
+    /// A byte typed on the console, if any (`cncheckc`). Never blocks.
+    fn checkc() -> Option<u8>;
 }
 
 /// Everything an architecture must provide.
-pub trait Machine: Cpu + EarlyCons + DirectMap + Clock {
+pub trait Machine: Cpu + EarlyCons + DirectMap + KernelMap + Clock + Context {
     /// Machine name, `hw.machine` (e.g. `"amd64"`).
     const MACHINE: &'static str;
     /// Machine architecture, `hw.machine_arch` (e.g. `"amd64"`).

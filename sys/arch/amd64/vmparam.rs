@@ -45,3 +45,9 @@ pub const NDMPML4E: usize = 8;
 pub const DMAP_MIN_ADDRESS: u64 = 0xffff_0000_0000_0000 | ((DMPML4I as u64) << 39);
 
 const _: () = assert!(DMAP_MIN_ADDRESS == 0xffff_f800_0000_0000);
+
+/// Start of the kernel map (`VM_MIN_KERNEL_ADDRESS`: PML4 slot 508,
+/// FreeBSD's `KPML4BASE`), where the framework maps kernel stacks.
+pub const VM_MIN_KERNEL_ADDRESS: usize = 0xffff_fe00_0000_0000;
+/// End of the part of the kernel map the framework manages (one PML4 slot).
+pub const VM_MAX_KERNEL_MAP: usize = VM_MIN_KERNEL_ADDRESS + (1 << 39);

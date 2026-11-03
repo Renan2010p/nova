@@ -37,3 +37,14 @@ pub fn __nova_intr(intr: Interrupt) {
 }
 
 const _: mdi::IntrUpcall = __nova_intr;
+
+/// The interrupt exit upcall (`mdi::IntrExitUpcall`): runs on the
+/// interrupted thread's stack, interrupts off, no guard held; switches
+/// threads if a preemption was requested. Not for services.
+#[doc(hidden)]
+#[unsafe(no_mangle)]
+pub fn __nova_intr_exit() {
+    crate::task::preempt_point();
+}
+
+const _: mdi::IntrExitUpcall = __nova_intr_exit;

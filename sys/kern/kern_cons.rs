@@ -13,9 +13,9 @@
 
 //! The MI console layer (FreeBSD's `kern/kern_cons.c`).
 //!
-//! For now every byte goes to the MD early console. Later this layer will
-//! keep a list of console drivers (UART, framebuffer, ...) attached from
-//! `sys/dev`, and switch from the early console to them.
+//! For now every byte goes to and comes from the MD early console. Later
+//! this layer will keep a list of console drivers (UART, framebuffer,
+//! keyboard...) attached from `sys/dev`, and switch to them.
 //!
 //! TODO(cons): honour `RB_MUTE` and `RB_MUTEMSGS` (`boot_mute` in
 //! loader.conf) like FreeBSD's `cn_mute`. Renux sets `boot_mute="YES"` by
@@ -33,4 +33,20 @@ pub fn cnputc(c: u8) {
 /// Writes a string to the console (`cnputs`).
 pub fn cnputs(s: &str) {
     s.bytes().for_each(cnputc);
+}
+
+/// A byte typed on the console, if any (`cncheckc`). Never blocks.
+pub fn cncheckc() -> Option<u8> {
+    framework::cons::early_checkc()
+}
+
+/// Waits for a byte from the console (`cngetc`), polling; works with
+/// interrupts off.
+pub fn cngetc() -> u8 {
+    loop {
+        if let Some(c) = cncheckc() {
+            return c;
+        }
+        framework::cpu::delay(10_000);
+    }
 }

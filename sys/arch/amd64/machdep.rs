@@ -17,7 +17,7 @@
 //! kernel can run in, then turns what the loader left behind into an MI
 //! [`BootInfo`] and hands it to `mi_startup`:
 //!
-//! 1. per-CPU area (`%gs`) and early console;
+//! 1. per-CPU area (`%gs`), early console, TSC frequency;
 //! 2. the kernel's own GDT, TSS and IDT: from here on, faults are caught
 //!    and reported instead of resetting the machine;
 //! 3. preload metadata and the firmware memory map;
@@ -30,7 +30,9 @@
 
 use mdi::{BootInfo, Firmware, PhysRange};
 use sys::bytes::{read_u32, read_u64};
-use sys::linker::{MODINFOMD_ENVP, MODINFOMD_HOWTO, Module, Preload};
+use sys::linker::{
+    MODINFOMD_ENVP, MODINFOMD_ESYM, MODINFOMD_HOWTO, MODINFOMD_SSYM, Module, Preload,
+};
 use sys::physmem::PhysMap;
 
 use crate::EARLY_CONS;
@@ -65,6 +67,7 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     // First, so that `curcpu()` works for everything that follows.
     pcpu_init(0);
     EARLY_CONS.init();
+    x86::tsc::tsc_calibrate();
     idt_init();
     cpu_tables_init(0);
 
@@ -100,6 +103,16 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
         panic!("local APIC: {e:?} (TODO(xapic): only x2APIC is supported; under bhyve, use -x)");
     }
 
+    // The symbol table, [SSYM, ESYM), for backtraces.
+    let md = |t| kmdp.and_then(|k| k.md(t)).and_then(|r| r.as_u64());
+    let ksyms = match (md(MODINFOMD_SSYM), md(MODINFOMD_ESYM)) {
+        (Some(ssym), Some(esym)) if esym > ssym => {
+            let area = boot_data(ssym, kernend);
+            &area[..area.len().min((esym - ssym) as usize)]
+        }
+        _ => &[],
+    };
+
     let boot = BootInfo {
         firmware,
         physmem: physmap.as_slice(),
@@ -110,6 +123,7 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
         },
         howto,
         envp,
+        ksyms,
         preload,
     };
 

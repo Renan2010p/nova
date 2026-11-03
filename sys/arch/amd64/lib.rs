@@ -21,6 +21,9 @@
 //! | `exception.rs` | `amd64/exception.S`           | vector stubs, `alltraps`        |
 //! | `trap.rs`      | `amd64/trap.c`                | `trap`, `trap_fatal`            |
 //! | `pmap.rs`      | `amd64/pmap.c`                | kernel page tables, direct map  |
+//! | `swtch.rs`     | `amd64/cpu_switch.S`          | `cpu_switch`, `fork_trampoline` |
+//! | `db_trace.rs`  | `amd64/db_trace.c`            | frame-pointer stack traces      |
+//! | `vm_machdep.rs`| `x86/cpu_machdep.c`           | `cpu_reset`                     |
 //! | `metadata.rs`  | `x86/include/metadata.h`      | MD preload record types         |
 //! | `param.rs`     | `amd64/include/param.h`       | page size, machine names        |
 //! | `pcpu.rs`      | `amd64/include/pcpu.h`        | per-CPU area through `%gs`      |
@@ -33,6 +36,7 @@
 
 #![no_std]
 
+mod db_trace;
 mod exception;
 mod locore;
 mod machdep;
@@ -41,14 +45,18 @@ pub mod param;
 mod pcpu;
 mod pmap;
 mod segments;
+mod swtch;
 mod trap;
+mod vm_machdep;
 pub mod vmparam;
 
+use core::fmt;
+
 use x86::cpufunc::{disable_intr, enable_intr, halt, ia32_pause, read_rflags, sti_hlt};
-use x86::identcpu;
 use x86::local_apic::{lapic_calibrate_timer, lapic_timer_periodic};
 use x86::ns8250::{COM1, Ns8250};
 use x86::psl::PSL_I;
+use x86::{identcpu, tsc};
 
 /// The early console on COM1, programmed by `hammer_time`.
 // SAFETY: COM1 is the PC's first serial port (or nothing). Only this
@@ -110,11 +118,69 @@ impl mdi::Cpu for Machine {
         }
         unreachable!("selftest fault returned")
     }
+
+    fn delay(us: u32) {
+        tsc::delay(us);
+    }
+
+    fn cpu_reset() -> ! {
+        vm_machdep::cpu_reset()
+    }
+
+    fn stack_trace(f: &mut dyn FnMut(usize) -> bool) {
+        db_trace::stack_trace(f);
+    }
+
+    fn cpu_print_info(w: &mut dyn fmt::Write) -> fmt::Result {
+        identcpu::print_cpu_info(w, tsc::tsc_freq())
+    }
+}
+
+impl mdi::Context for Machine {
+    type Pcb = swtch::Pcb;
+    const PCB_INIT: swtch::Pcb = swtch::Pcb::INIT;
+
+    unsafe fn cpu_thread_init(pcb: &mut swtch::Pcb, stack_top: usize, entry: extern "C" fn() -> !) {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { swtch::cpu_thread_init(pcb, stack_top, entry) }
+    }
+
+    unsafe fn cpu_switch(old: *mut swtch::Pcb, new: *const swtch::Pcb) {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { swtch::cpu_switch(old, new) }
+    }
+}
+
+// SAFETY: `pmap_kenter`/`pmap_kremove` touch only PML4 slot 508
+// (`VM_MIN_KERNEL_ADDRESS`), which nothing else in the MD layer uses, in
+// the page tables shared by all CPUs; `pmap_kextract` walks the tables
+// through the direct map and never dereferences `va` itself.
+unsafe impl mdi::KernelMap for Machine {
+    const KVA_MIN: usize = vmparam::VM_MIN_KERNEL_ADDRESS;
+    const KVA_MAX: usize = vmparam::VM_MAX_KERNEL_MAP;
+
+    unsafe fn pmap_kenter(va: usize, pa: u64, alloc: &mut dyn FnMut() -> Option<u64>) -> bool {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { pmap::pmap_kenter(va, pa, alloc) }
+    }
+
+    unsafe fn pmap_kremove(va: usize) {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { pmap::pmap_kremove(va) }
+    }
+
+    fn pmap_kextract(va: usize) -> Option<u64> {
+        pmap::pmap_kextract(va)
+    }
 }
 
 impl mdi::EarlyCons for Machine {
     fn putc(c: u8) {
         EARLY_CONS.putc(c);
+    }
+
+    fn checkc() -> Option<u8> {
+        EARLY_CONS.getc()
     }
 }
 
@@ -138,6 +204,11 @@ unsafe impl mdi::DirectMap for Machine {
 }
 
 impl mdi::Clock for Machine {
+    const ET_NAME: &'static str = "LAPIC";
+    // FreeBSD gives the LAPIC timer quality 600 (100 when it stops in
+    // deep C-states, which it does not in a VM or with ARAT).
+    const ET_QUALITY: i32 = 600;
+
     fn cpu_initclocks(hz: u32) {
         let freq = lapic_calibrate_timer().unwrap_or_else(|e| panic!("local APIC timer: {e:?}"));
         lapic_timer_periodic(trap::APIC_TIMER_INT, freq / hz);

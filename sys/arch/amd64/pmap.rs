@@ -27,17 +27,25 @@
 //! like FreeBSD's `allocpages`, and are written through the loader's
 //! `KERNBASE` mapping before the switch.
 //!
-//! TODO(vm): `pmap_enter`/`pmap_remove` for kernel and user address
-//! spaces, PG_G for kernel pages, NX, PCID, and TLB shootdown IPIs (smp).
+//! After the bootstrap, the framework maps single pages in the kernel's
+//! own range (`KVA_MIN..KVA_MAX`, FreeBSD's kernel map in PML4 slot
+//! `KPML4BASE`) with `pmap_kenter`/`pmap_kremove`; kernel stacks with their
+//! guard pages live there. Page tables are reached through the direct map.
+//!
+//! TODO(vm): user address spaces (`pmap_pinit`, `pmap_enter`), PG_G for
+//! kernel pages, NX, PCID, and TLB shootdown IPIs (smp).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use mdi::PhysRange;
-use x86::cpufunc::load_cr3;
+use x86::cpufunc::{invlpg, load_cr3, rcr3};
 use x86::identcpu::has_page1gb;
 
 use crate::param::PAGE_SIZE;
-use crate::vmparam::{BOOT_MAPPED, DMAP_MIN_ADDRESS, DMPML4I, KERNBASE, KPDPI, KPML4I, NDMPML4E};
+use crate::vmparam::{
+    BOOT_MAPPED, DMAP_MIN_ADDRESS, DMPML4I, KERNBASE, KPDPI, KPML4I, NDMPML4E, VM_MAX_KERNEL_MAP,
+    VM_MIN_KERNEL_ADDRESS,
+};
 
 /// Present.
 const PG_V: u64 = 0x001;
@@ -45,6 +53,8 @@ const PG_V: u64 = 0x001;
 const PG_RW: u64 = 0x002;
 /// Large page (2 MiB in a PD, 1 GiB in a PDP).
 const PG_PS: u64 = 0x080;
+/// Physical frame bits of an entry.
+const PG_FRAME: u64 = 0x000f_ffff_ffff_f000;
 
 /// Bytes mapped by one PD entry.
 const NBPDR: u64 = 1 << 21;
@@ -159,4 +169,96 @@ pub(crate) fn pmap_bootstrap(physfree: &mut u64, physmem: &[PhysRange]) -> u64 {
     unsafe { load_cr3(pml4_pa) };
     DMAP_LIMIT.store(limit, Ordering::Relaxed);
     limit
+}
+
+/// Index of `va` in the page table at `level` (3 = PML4, 0 = PT).
+fn pindex(va: usize, level: u32) -> usize {
+    (va >> (12 + 9 * level)) & 0x1ff
+}
+
+/// A page-table page, through the direct map.
+fn dmap_table(pa: u64) -> *mut u64 {
+    phys_to_dmap(pa & PG_FRAME) as *mut u64
+}
+
+/// `mdi::KernelMap::pmap_kenter`.
+///
+/// # Safety
+///
+/// See `mdi::KernelMap::pmap_kenter`.
+pub(crate) unsafe fn pmap_kenter(
+    va: usize,
+    pa: u64,
+    alloc: &mut dyn FnMut() -> Option<u64>,
+) -> bool {
+    assert!(
+        (VM_MIN_KERNEL_ADDRESS..VM_MAX_KERNEL_MAP).contains(&va) && va.is_multiple_of(PAGE_SIZE)
+    );
+    let mut table = dmap_table(rcr3());
+    for level in (1..=3).rev() {
+        // SAFETY: `table` is a live page-table page (the PML4, or one
+        // reached from it), mapped by the direct map; the caller serializes
+        // calls, so no one else modifies it.
+        let entry = unsafe { &mut *table.add(pindex(va, level)) };
+        if *entry & PG_V == 0 {
+            let Some(pt_pa) = alloc() else { return false };
+            *entry = pt_pa | PG_V | PG_RW;
+        }
+        assert!(
+            *entry & PG_PS == 0,
+            "pmap_kenter: large page in the kernel map"
+        );
+        table = dmap_table(*entry);
+    }
+    // SAFETY: as above, for the last-level table.
+    let pte = unsafe { &mut *table.add(pindex(va, 0)) };
+    assert!(*pte & PG_V == 0, "pmap_kenter: {va:#x} already mapped");
+    *pte = (pa & PG_FRAME) | PG_V | PG_RW;
+    true
+}
+
+/// `mdi::KernelMap::pmap_kremove`.
+///
+/// # Safety
+///
+/// See `mdi::KernelMap::pmap_kremove`.
+pub(crate) unsafe fn pmap_kremove(va: usize) {
+    let mut table = dmap_table(rcr3());
+    for level in (1..=3).rev() {
+        // SAFETY: as in `pmap_kenter`; the caller says `va` is mapped, so
+        // every level exists.
+        let entry = unsafe { *table.add(pindex(va, level)) };
+        assert!(
+            entry & PG_V != 0 && entry & PG_PS == 0,
+            "pmap_kremove: {va:#x} not mapped"
+        );
+        table = dmap_table(entry);
+    }
+    // SAFETY: as above.
+    unsafe { table.add(pindex(va, 0)).write(0) };
+    // TODO(smp): shoot the entry down on the other CPUs too.
+    invlpg(va);
+}
+
+/// `mdi::KernelMap::pmap_kextract`: walks the current page tables through
+/// the direct map, so it never faults.
+pub(crate) fn pmap_kextract(va: usize) -> Option<u64> {
+    if dmap_limit() == 0 {
+        return None; // still on the loader's tables
+    }
+    let mut table = dmap_table(rcr3());
+    for level in (0..=3).rev() {
+        // SAFETY: page-table pages are RAM, inside the direct map; reading
+        // an entry has no side effects.
+        let entry = unsafe { table.add(pindex(va, level)).read_volatile() };
+        if entry & PG_V == 0 {
+            return None;
+        }
+        if level == 0 || (level <= 2 && entry & PG_PS != 0) {
+            let page_mask = (1u64 << (12 + 9 * level)) - 1;
+            return Some((entry & PG_FRAME & !page_mask) | (va as u64 & page_mask));
+        }
+        table = dmap_table(entry);
+    }
+    None
 }

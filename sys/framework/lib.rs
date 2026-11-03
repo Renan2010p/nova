@@ -17,9 +17,10 @@
 //!
 //! * the **framework** (this crate, plus `sys/arch/*` and `sys/libkern`)
 //!   may use `unsafe`. It owns the *mechanisms*: CPUs, interrupts,
-//!   per-CPU data, spin locks, the clock interrupt, physical pages and the
-//!   kernel heap, and as the kernel grows page tables, context switching,
-//!   user memory access and device access (`bus_space`, `bus_dma`);
+//!   per-CPU data, locks and wait queues, the clock interrupt, physical
+//!   pages, the kernel heap, kernel stacks and thread switching, and as the
+//!   kernel grows user address spaces, user memory access and device
+//!   access (`bus_space`, `bus_dma`);
 //! * the **services** (`vm`, `kern`, `fs`, `dev`, `compat`, ...) implement
 //!   the *policies* on top of it in 100% safe Rust
 //!   (`#![forbid(unsafe_code)]`).
@@ -40,6 +41,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 #[cfg(target_arch = "x86_64")]
 use amd64 as md;
 
@@ -53,6 +56,7 @@ pub mod intr;
 pub mod mm;
 pub mod pcpu;
 pub mod sync;
+pub mod task;
 
 /// Seals the framework's marker traits (`PinnedToCpu`): services can use
 /// them as bounds but cannot implement them.
@@ -94,6 +98,7 @@ pub fn __init(boot: &BootInfo<'_>) {
         "framework initialized twice"
     );
     mm::vm_phys::init(boot.physavail);
+    task::init();
 }
 
 /// Binds the MI entry point that the MD bootstrap calls when it is done.
