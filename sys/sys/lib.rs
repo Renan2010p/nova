@@ -26,9 +26,11 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod acpi;
 pub mod bytes;
 pub mod copyright;
 pub mod elf;
+pub mod kenv;
 pub mod linker;
 pub mod physmem;
 pub mod reboot;
