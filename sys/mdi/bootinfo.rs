@@ -47,11 +47,16 @@ impl Firmware {
 pub struct BootInfo<'a> {
     /// Firmware the loader ran on.
     pub firmware: Firmware,
-    /// Usable RAM, sorted and coalesced. Includes the memory occupied by
-    /// the kernel and the loader's data; see `kernel`.
+    /// All usable RAM reported by the firmware, sorted and coalesced
+    /// (for reporting: "real memory").
     pub physmem: &'a [PhysRange],
-    /// Physical memory occupied by the kernel image, the modules and the
-    /// boot metadata. Must not be handed to the page allocator.
+    /// The part of `physmem` the page allocator may use (FreeBSD's
+    /// `phys_avail`): without the kernel, the loader's data, the early page
+    /// tables, memory the MD layer reserves (e.g. low memory for the AP
+    /// trampoline), and anything outside the direct map.
+    pub physavail: &'a [PhysRange],
+    /// Physical memory occupied by the kernel image, the modules, the boot
+    /// metadata and the early page tables.
     pub kernel: PhysRange,
     /// `boothowto` flags, see `sys::reboot`.
     pub howto: u32,

@@ -22,7 +22,8 @@
 //! * R3 `cfg(target_arch ...)` only in MD code, the framework, or files
 //!   under an `arch/` directory of a service;
 //! * R4 `unsafe` only in the trusted base: every other crate root must
-//!   carry `#![forbid(unsafe_code)]` (`#![deny(unsafe_code)]` for `conf`);
+//!   carry `#![forbid(unsafe_code)]` (`#![deny(unsafe_code)]` for `conf`,
+//!   whose entry macro opts in, and `mdi`, which declares `unsafe trait`s);
 //! * R5 `asm!` / `global_asm!` / `naked_asm!` only in MD code;
 //! * R6 no `static mut` anywhere (SMP: shared state needs a lock, an
 //!   atomic or `CpuLocal`);
@@ -250,9 +251,11 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
     collect_rs(&dir, &mut files)?;
     files.sort();
 
-    // R4: crate root attributes.
-    let (root_name, attr) = match c.layer {
-        Layer::Conf => ("main.rs", "#![deny(unsafe_code)]"),
+    // R4: crate root attributes. `conf` (the entry macro) and `mdi`
+    // (`unsafe trait` declarations) may only opt in item by item.
+    let (root_name, attr) = match (c.layer, c.name.as_str()) {
+        (Layer::Conf, _) => ("main.rs", "#![deny(unsafe_code)]"),
+        (_, "mdi") => ("lib.rs", "#![deny(unsafe_code)]"),
         _ => ("lib.rs", "#![forbid(unsafe_code)]"),
     };
     if !c.trusted {

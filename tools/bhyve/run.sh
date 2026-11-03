@@ -16,7 +16,9 @@
 #
 #     doas sh tools/bhyve/run.sh sys/target/x86_64-unknown-none/release/kernel
 #
-# Environment: VM (default nova), MEM (default 512M), CPUS (default 2).
+# Environment: VM (default nova), MEM (default 512M), CPUS (default 2),
+# SELFTEST (e.g. "pf": take a kernel page fault on purpose, to check that
+# traps are caught and reported).
 
 set -eu
 
@@ -24,6 +26,7 @@ KERNEL=${1:-sys/target/x86_64-unknown-none/release/kernel}
 VM=${VM:-nova}
 MEM=${MEM:-512M}
 CPUS=${CPUS:-2}
+SELFTEST=${SELFTEST:-}
 
 if [ "$(uname -s)" != FreeBSD ]; then
 	echo "run.sh: bhyve needs a FreeBSD host" >&2
@@ -59,12 +62,16 @@ beastie_disable="YES"
 console="comconsole"
 boot_mute="NO"
 EOF
+if [ -n "$SELFTEST" ]; then
+	echo "debug.nova.selftest=\"$SELFTEST\"" >> "$ROOT/boot/loader.conf"
+fi
 
 bhyvectl --destroy --vm="$VM" >/dev/null 2>&1 || true
 bhyveload -m "$MEM" -h "$ROOT" -c stdio "$VM"
 
 set +e
-bhyve -c "$CPUS" -m "$MEM" -H -P -A \
+# -x: offer x2APIC to the guest; Nova needs it (TODO(xapic)).
+bhyve -c "$CPUS" -m "$MEM" -H -P -A -x \
 	-s 0,hostbridge -s 31,lpc -l com1,stdio \
 	"$VM"
 rc=$?

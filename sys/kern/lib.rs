@@ -18,8 +18,8 @@
 //! | Prefix    | Meaning                                  | Examples (now and planned)        |
 //! |-----------|------------------------------------------|-----------------------------------|
 //! | `init_`   | system start-up                          | `init_main`                       |
-//! | `kern_`   | core facilities                          | `kern_cons`, `kern_shutdown`, `kern_fork`, `kern_exec`, `kern_sig` |
-//! | `subr_`   | support routines                         | `subr_prf`, `subr_module`         |
+//! | `kern_`   | core facilities                          | `kern_clock`, `kern_cons`, `kern_shutdown`, `kern_fork`, `kern_exec` |
+//! | `subr_`   | support routines                         | `subr_param`, `subr_prf`          |
 //! | `sys_`    | generic syscall back-ends                | `sys_generic`, `sys_pipe`         |
 //! | `vfs_`    | virtual file system                      | `vfs_lookup`, `vfs_mount`         |
 //! | `uipc_`   | sockets and IPC                          | `uipc_socket`                     |
@@ -35,8 +35,12 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 pub mod init_main;
+pub mod kern_clock;
 pub mod kern_cons;
 pub mod kern_environment;
 pub mod kern_shutdown;
+pub mod subr_param;
 pub mod subr_prf;

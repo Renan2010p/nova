@@ -13,9 +13,10 @@
 
 //! Kernel virtual memory layout (FreeBSD's `amd64/include/vmparam.h`).
 //!
-//! These values are fixed by the boot protocol: the FreeBSD loader maps
-//! physical memory starting at 0 to `KERNBASE` and loads the kernel at
-//! physical `KERNLOAD`. `sys/conf/ldscript.amd64` must agree with them.
+//! `KERNBASE` and `KERNLOAD` are fixed by the boot protocol: the FreeBSD
+//! loader maps physical memory starting at 0 to `KERNBASE` and loads the
+//! kernel at physical `KERNLOAD`. `sys/conf/ldscript.amd64` must agree with
+//! them. The direct map is placed where FreeBSD places it.
 
 /// Virtual address that maps physical address 0 at entry (the top 2 GiB).
 pub const KERNBASE: u64 = 0xffff_ffff_8000_0000;
@@ -30,3 +31,17 @@ pub const KERNSTART: u64 = KERNBASE + KERNLOAD;
 /// `KERNBASE`. Anything we touch before building our own page tables
 /// (kernel, modules, metadata) must lie below this.
 pub const BOOT_MAPPED: u64 = 1 << 30;
+
+/// PML4 slot of the kernel (`KPML4I`): the top 512 GiB.
+pub const KPML4I: usize = 511;
+/// PDP slot of `KERNBASE` within `KPML4I` (`KPDPI`): the top 2 GiB.
+pub const KPDPI: usize = 510;
+
+/// First PML4 slot of the direct map (`DMPML4I`).
+pub const DMPML4I: usize = 496;
+/// Number of PML4 slots reserved for the direct map (`NDMPML4E`): 4 TiB.
+pub const NDMPML4E: usize = 8;
+/// Start of the direct map (`DMAP_MIN_ADDRESS`).
+pub const DMAP_MIN_ADDRESS: u64 = 0xffff_0000_0000_0000 | ((DMPML4I as u64) << 39);
+
+const _: () = assert!(DMAP_MIN_ADDRESS == 0xffff_f800_0000_0000);

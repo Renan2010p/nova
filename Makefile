@@ -22,17 +22,18 @@ kernel: check
 check:
 	cd tools && ${CARGO} run -q -p checklayers -- ../sys
 
-# MI crates that are plain logic are unit-tested on the host.
+# Crates that are plain logic are unit-tested on the host.
 test:
 	cd sys && ${CARGO} test --target "$$(rustc -vV | sed -n 's/^host: //p')" \
-	    -p libkern -p sys
+	    -p libkern -p sys -p x86
 
 clippy:
 	cd sys && ${CARGO} clippy --profile ${PROFILE}
 
 # FreeBSD host only, as root: boots the kernel with the system loader(8).
+# SELFTEST=pf takes a kernel page fault on purpose.
 bhyve: kernel
-	sh tools/bhyve/run.sh ${KERNEL}
+	SELFTEST="${SELFTEST}" sh tools/bhyve/run.sh ${KERNEL}
 
 clean:
 	cd sys && ${CARGO} clean

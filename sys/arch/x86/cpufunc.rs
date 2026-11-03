@@ -124,3 +124,133 @@ pub unsafe fn outb(port: u16, v: u8) {
         asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack, preserves_flags))
     }
 }
+
+/// `sti; hlt`: enables interrupts and sleeps until the next one. The two
+/// instructions are adjacent, so an interrupt cannot slip in between and
+/// be missed (`sti` takes effect after the next instruction).
+#[inline(always)]
+pub fn sti_hlt() {
+    // SAFETY: as for `sti` and `hlt`.
+    unsafe { asm!("sti", "hlt", options(nomem, nostack, preserves_flags)) }
+}
+
+/// `cpuid`: returns `[eax, ebx, ecx, edx]` for `leaf`/`subleaf`.
+#[inline]
+pub fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
+    let (eax, ebx, ecx, edx): (u32, u64, u32, u32);
+    // SAFETY: cpuid only reads processor information. %rbx is reserved
+    // by LLVM, so it is saved in a scratch register around the instruction.
+    unsafe {
+        asm!(
+            "mov {tmp}, rbx",
+            "cpuid",
+            "xchg {tmp}, rbx",
+            tmp = out(reg) ebx,
+            inout("eax") leaf => eax,
+            inout("ecx") subleaf => ecx,
+            out("edx") edx,
+            options(nomem, nostack, preserves_flags),
+        )
+    }
+    [eax, ebx as u32, ecx, edx]
+}
+
+/// Reads `%cr2`, the faulting address of the last page fault.
+#[inline(always)]
+pub fn rcr2() -> u64 {
+    let v: u64;
+    // SAFETY: reading a control register has no side effects.
+    unsafe { asm!("mov {}, cr2", out(reg) v, options(nomem, nostack, preserves_flags)) }
+    v
+}
+
+/// Reads `%cr3`, the physical address of the current top-level page table.
+#[inline(always)]
+pub fn rcr3() -> u64 {
+    let v: u64;
+    // SAFETY: reading a control register has no side effects.
+    unsafe { asm!("mov {}, cr3", out(reg) v, options(nomem, nostack, preserves_flags)) }
+    v
+}
+
+/// Loads `%cr3`: switches to another set of page tables and flushes the
+/// non-global TLB entries.
+///
+/// # Safety
+///
+/// `pml4` must be the physical address of a valid top-level page table
+/// that maps the currently executing code, its stack and everything the
+/// kernel will touch, with the same meaning as before.
+#[inline(always)]
+pub unsafe fn load_cr3(pml4: u64) {
+    // SAFETY: forwarded to the caller. No `nomem`: this changes what every
+    // address means, so the compiler must not move memory accesses across.
+    unsafe { asm!("mov cr3, {}", in(reg) pml4, options(nostack, preserves_flags)) }
+}
+
+/// Reads `%cr4`.
+#[inline(always)]
+pub fn rcr4() -> u64 {
+    let v: u64;
+    // SAFETY: reading a control register has no side effects.
+    unsafe { asm!("mov {}, cr4", out(reg) v, options(nomem, nostack, preserves_flags)) }
+    v
+}
+
+/// Loads `%cr4`.
+///
+/// # Safety
+///
+/// The new value must only enable features the CPU supports and the
+/// kernel is prepared for.
+#[inline(always)]
+pub unsafe fn load_cr4(v: u64) {
+    // SAFETY: forwarded to the caller.
+    unsafe { asm!("mov cr4, {}", in(reg) v, options(nostack, preserves_flags)) }
+}
+
+/// Pointer operand of `lgdt`/`lidt` (FreeBSD's `struct region_descriptor`).
+#[repr(C, packed)]
+pub struct RegionDescriptor {
+    /// Size of the table in bytes, minus one.
+    pub limit: u16,
+    /// Linear address of the table.
+    pub base: u64,
+}
+
+/// `lgdt`: loads the global descriptor table register.
+///
+/// # Safety
+///
+/// The table must stay valid and unchanged in the entries in use for as
+/// long as it is loaded, and the caller must reload the segment registers
+/// it wants to take from it.
+#[inline(always)]
+pub unsafe fn lgdt(rd: &RegionDescriptor) {
+    // SAFETY: forwarded to the caller.
+    unsafe { asm!("lgdt [{}]", in(reg) rd, options(readonly, nostack, preserves_flags)) }
+}
+
+/// `lidt`: loads the interrupt descriptor table register.
+///
+/// # Safety
+///
+/// The table must stay valid for as long as it is loaded, and every
+/// present gate must point to a correct entry stub.
+#[inline(always)]
+pub unsafe fn lidt(rd: &RegionDescriptor) {
+    // SAFETY: forwarded to the caller.
+    unsafe { asm!("lidt [{}]", in(reg) rd, options(readonly, nostack, preserves_flags)) }
+}
+
+/// `ltr`: loads the task register.
+///
+/// # Safety
+///
+/// `sel` must select an available 64-bit TSS descriptor in the current
+/// GDT, describing a TSS that stays valid while loaded.
+#[inline(always)]
+pub unsafe fn ltr(sel: u16) {
+    // SAFETY: forwarded to the caller.
+    unsafe { asm!("ltr {0:x}", in(reg) sel, options(nostack, preserves_flags)) }
+}

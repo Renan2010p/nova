@@ -13,11 +13,20 @@
 
 //! Machine-dependent bootstrap (FreeBSD's `amd64/machdep.c`).
 //!
-//! `hammer_time` turns what the loader left behind into an MI
-//! [`BootInfo`] and hands it to `mi_startup`. Today it sets up the boot
-//! CPU's per-CPU area and the early console; GDT, IDT, TSS and the initial
-//! page tables will be added here as the kernel grows. The application
-//! processors will start in `mp_machdep.rs` (`init_secondary`).
+//! `hammer_time` brings the boot CPU from the loader's state to one the MI
+//! kernel can run in, then turns what the loader left behind into an MI
+//! [`BootInfo`] and hands it to `mi_startup`:
+//!
+//! 1. per-CPU area (`%gs`) and early console;
+//! 2. the kernel's own GDT, TSS and IDT: from here on, faults are caught
+//!    and reported instead of resetting the machine;
+//! 3. preload metadata and the firmware memory map;
+//! 4. the kernel's own page tables and the direct map (`pmap_bootstrap`);
+//! 5. `phys_avail`: the memory the page allocator may use;
+//! 6. the local APIC, in x2APIC mode.
+//!
+//! The application processors will start in `mp_machdep.rs`
+//! (`init_secondary`), repeating steps 1, 2 and 6 for themselves.
 
 use mdi::{BootInfo, Firmware, PhysRange};
 use sys::bytes::{read_u32, read_u64};
@@ -31,7 +40,14 @@ use crate::metadata::{
     SMAP_ENTRY_SIZE, SMAP_LENGTH, SMAP_TYPE, SMAP_TYPE_MEMORY,
 };
 use crate::pcpu::pcpu_init;
+use crate::pmap::pmap_bootstrap;
+use crate::segments::{cpu_tables_init, idt_init};
+use crate::trap::APIC_SPURIOUS_INT;
 use crate::vmparam::{BOOT_MAPPED, KERNBASE, KERNLOAD};
+
+/// Low memory kept out of the page allocator: real-mode IVT/BDA, EBDA and
+/// the future AP boot trampoline live below 1 MiB.
+const ISA_HOLE_END: u64 = 0x10_0000;
 
 /// Maximum number of distinct usable RAM ranges we keep.
 const PHYSMAP_SIZE: usize = 128;
@@ -49,6 +65,8 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     // First, so that `curcpu()` works for everything that follows.
     pcpu_init(0);
     EARLY_CONS.init();
+    idt_init();
+    cpu_tables_init(0);
 
     let preload = Preload::new(boot_data(modulep, kernend));
     let kmdp = preload.kernel();
@@ -69,12 +87,26 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     let mut physmap = PhysMap::<PHYSMAP_SIZE>::new();
     let firmware = kmdp.map_or(Firmware::Unknown, |k| getmemsize(k, &mut physmap));
 
+    let mut physfree = kernend;
+    let dmap_limit = pmap_bootstrap(&mut physfree, physmap.as_slice());
+
+    // phys_avail: RAM minus low memory, the kernel, the loader's data and
+    // the early page tables, and minus anything the direct map misses.
+    let mut physavail = physmap.clone();
+    physavail.remove(0, ISA_HOLE_END.max(physfree));
+    physavail.remove(dmap_limit, u64::MAX);
+
+    if let Err(e) = x86::local_apic::lapic_init(APIC_SPURIOUS_INT) {
+        panic!("local APIC: {e:?} (TODO(xapic): only x2APIC is supported; under bhyve, use -x)");
+    }
+
     let boot = BootInfo {
         firmware,
         physmem: physmap.as_slice(),
+        physavail: physavail.as_slice(),
         kernel: PhysRange {
             start: KERNLOAD,
-            end: kernend,
+            end: physfree,
         },
         howto,
         envp,
@@ -84,7 +116,8 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     // SAFETY: `__nova_mi_startup` is defined exactly once, by
     // `framework::kernel_entry!`, with this same signature (it coerces the
     // MI function to `mdi::MiStartup`). We are on the boot CPU with
-    // interrupts disabled and the early console ready, as it requires.
+    // interrupts disabled, the early console ready, traps handled and the
+    // direct map in place, as it requires.
     unsafe { __nova_mi_startup(&boot) }
 }
 

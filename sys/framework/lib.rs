@@ -17,9 +17,9 @@
 //!
 //! * the **framework** (this crate, plus `sys/arch/*` and `sys/libkern`)
 //!   may use `unsafe`. It owns the *mechanisms*: CPUs, interrupts,
-//!   per-CPU data, spin locks, and as the kernel grows physical frames,
-//!   page tables, context switching, user memory access and device
-//!   access (`bus_space`, `bus_dma`);
+//!   per-CPU data, spin locks, the clock interrupt, physical pages and the
+//!   kernel heap, and as the kernel grows page tables, context switching,
+//!   user memory access and device access (`bus_space`, `bus_dma`);
 //! * the **services** (`vm`, `kern`, `fs`, `dev`, `compat`, ...) implement
 //!   the *policies* on top of it in 100% safe Rust
 //!   (`#![forbid(unsafe_code)]`).
@@ -46,8 +46,11 @@ use amd64 as md;
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Nova: no sys/arch port for this target architecture");
 
+pub mod clock;
 pub mod cons;
 pub mod cpu;
+pub mod intr;
+pub mod mm;
 pub mod pcpu;
 pub mod sync;
 
@@ -74,6 +77,25 @@ pub const PAGE_SIZE: usize = <Md as mdi::Machine>::PAGE_SIZE;
 /// Maximum number of CPUs this build supports.
 pub const MAXCPU: usize = <Md as mdi::Machine>::MAXCPU;
 
+static INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Brings up the framework's own services (the page allocator, hence the
+/// heap) from the boot information. Called by [`kernel_entry!`] right
+/// before `mi_startup`; services never need to call it.
+///
+/// # Panics
+///
+/// If called more than once.
+#[doc(hidden)]
+pub fn __init(boot: &BootInfo<'_>) {
+    use core::sync::atomic::Ordering;
+    assert!(
+        !INITIALIZED.swap(true, Ordering::AcqRel),
+        "framework initialized twice"
+    );
+    mm::vm_phys::init(boot.physavail);
+}
+
 /// Binds the MI entry point that the MD bootstrap calls when it is done.
 ///
 /// Use it exactly once, in the kernel binary:
@@ -84,7 +106,8 @@ pub const MAXCPU: usize = <Md as mdi::Machine>::MAXCPU;
 ///
 /// The function must have the type [`MiStartup`]; anything else is a
 /// compile error here, so the `extern` declaration on the MD side can rely
-/// on it.
+/// on it. The framework initializes itself (page allocator, heap) before
+/// the function is called.
 #[macro_export]
 macro_rules! kernel_entry {
     ($mi_startup:path) => {
@@ -93,6 +116,7 @@ macro_rules! kernel_entry {
         #[unsafe(no_mangle)]
         pub fn __nova_mi_startup(boot: &$crate::BootInfo<'_>) -> ! {
             const MI_STARTUP: $crate::MiStartup = $mi_startup;
+            $crate::__init(boot);
             MI_STARTUP(boot)
         }
     };

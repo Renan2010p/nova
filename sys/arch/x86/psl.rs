@@ -17,10 +17,14 @@
 pub const PSL_C: u64 = 0x0000_0001;
 /// Reserved bit, always 1.
 pub const PSL_RESERVED_DEFAULT: u64 = 0x0000_0002;
+/// Trace (single-step) flag.
+pub const PSL_T: u64 = 0x0000_0100;
 /// Interrupt enable flag.
 pub const PSL_I: u64 = 0x0000_0200;
 /// Direction flag.
 pub const PSL_D: u64 = 0x0000_0400;
+/// Resume flag.
+pub const PSL_RF: u64 = 0x0001_0000;
 
 /// `%rflags` while running in the kernel: interrupts off, DF clear.
 pub const PSL_KERNEL: u64 = PSL_RESERVED_DEFAULT;

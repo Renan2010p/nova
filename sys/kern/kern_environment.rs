@@ -52,6 +52,16 @@ impl<'a> StaticEnv<'a> {
         self.iter().find(|&(n, _)| n == name).map(|(_, v)| v)
     }
 
+    /// The value of `name` as a number (`getenv_int`): decimal, or hex
+    /// with a `0x` prefix. `None` if unset or not a number.
+    pub fn getenv_u32(&self, name: &str) -> Option<u32> {
+        let v = self.getenv(name)?.trim();
+        match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => v.parse().ok(),
+        }
+    }
+
     /// Number of variables.
     pub fn len(&self) -> usize {
         self.iter().count()

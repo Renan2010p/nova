@@ -13,10 +13,11 @@
 
 //! CPU identity and interrupt control, SMP-aware from the start.
 //!
-//! Services never toggle interrupts directly: they hold an [`IntrGuard`],
-//! which restores the previous state when dropped. Because there is no
-//! raw "enable interrupts" call outside the framework, a live guard is a
-//! *proof* that this CPU cannot be interrupted or preempted, which is what
+//! Services disable interrupts only by holding an [`IntrGuard`], which
+//! restores the previous state when dropped. The framework counts the
+//! guards alive on each CPU, and [`intr_enable`] and [`cpu_idle`] refuse
+//! to enable interrupts while any is held. So a live guard is a *proof*
+//! that this CPU cannot be interrupted or preempted, which is what
 //! [`PinnedToCpu`] and [`crate::pcpu::CpuLocal`] rely on.
 
 use core::marker::PhantomData;
@@ -64,6 +65,10 @@ pub fn mp_ncpus() -> u32 {
     MP_NCPUS.load(Ordering::Relaxed)
 }
 
+/// Interrupt guards alive on each CPU. Only a CPU touches its own
+/// counter, always with interrupts disabled.
+static INTR_DEPTH: [AtomicU32; MAXCPU] = [const { AtomicU32::new(0) }; MAXCPU];
+
 /// Interrupts are disabled on this CPU while this guard lives. It is
 /// `!Send`: it describes the CPU it was created on.
 pub struct IntrGuard {
@@ -74,16 +79,51 @@ pub struct IntrGuard {
 /// Disables interrupts on this CPU until the guard is dropped
 /// (`intr_disable` / `intr_restore`). Guards nest.
 pub fn intr_guard() -> IntrGuard {
+    let saved = Md::intr_disable();
+    // Interrupts are off: this cannot migrate between the two lines.
+    INTR_DEPTH[curcpu().index()].fetch_add(1, Ordering::Relaxed);
     IntrGuard {
-        saved: Md::intr_disable(),
+        saved,
         _not_send: PhantomData,
     }
 }
 
 impl Drop for IntrGuard {
     fn drop(&mut self) {
+        INTR_DEPTH[curcpu().index()].fetch_sub(1, Ordering::Relaxed);
         Md::intr_restore(self.saved);
     }
+}
+
+fn assert_no_guard(what: &str) {
+    let depth = INTR_DEPTH[curcpu().index()].load(Ordering::Relaxed);
+    assert!(
+        depth == 0,
+        "{what}: called while {depth} interrupt guard(s) are held"
+    );
+}
+
+/// Enables interrupts on this CPU (`enable_intr`). Used once by the MI
+/// start-up code, when the kernel is ready to take interrupts.
+///
+/// # Panics
+///
+/// If an [`IntrGuard`] is alive on this CPU: enabling interrupts would
+/// break the guarantee the guard gives.
+pub fn intr_enable() {
+    assert_no_guard("intr_enable");
+    Md::intr_enable()
+}
+
+/// Enables interrupts and sleeps until the next one (`cpu_idle`). Returns
+/// with interrupts enabled.
+///
+/// # Panics
+///
+/// If an [`IntrGuard`] is alive on this CPU, as for [`intr_enable`].
+pub fn cpu_idle() {
+    assert_no_guard("cpu_idle");
+    Md::cpu_idle()
 }
 
 /// Spin-wait hint (`cpu_spinwait`).
@@ -95,6 +135,17 @@ pub fn cpu_spinwait() {
 /// Disables interrupts and stops this CPU for good.
 pub fn cpu_halt() -> ! {
     Md::cpu_halt()
+}
+
+/// Deliberately takes a fatal kernel page fault, to check that traps are
+/// caught and reported. Sound: the fault panics, nothing is corrupted.
+pub fn cpu_selftest_fault() -> ! {
+    Md::cpu_selftest_fault()
+}
+
+/// True when running under a hypervisor (FreeBSD's `vm_guest`).
+pub fn vm_guest() -> bool {
+    <Md as mdi::Machine>::vm_guest()
 }
 
 /// Evidence that the current code cannot leave this CPU: interrupts are
