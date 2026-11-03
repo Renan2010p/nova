@@ -1,0 +1,12 @@
+[package]
+name = "checklayers"
+description = "Nova: enforces the framekernel and MD/MI layering rules of sys/ (docs/LAYERING.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "checklayers"
+path = "main.rs"

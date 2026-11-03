@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# Copyright (c) 2026 Renan Lucas Vieira Hilário
+#
+# This file is part of the Nova Project, the kernel of the
+# Renux "Nova" Project.
+#
+# Host tools. A separate workspace from sys/, because sys/ builds for the
+# bare-metal target and these run on the build machine.
+
+[workspace]
+resolver = "3"
+members = ["checklayers"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Renan Lucas Vieira Hilário"]
+publish = false
