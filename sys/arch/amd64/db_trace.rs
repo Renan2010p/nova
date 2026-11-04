@@ -24,6 +24,7 @@
 //! Every word is checked to be mapped kernel memory before it is read,
 //! so a corrupt chain ends the trace instead of faulting inside a panic.
 
+use libkern::conv::u64_from_usize;
 use core::mem::{offset_of, size_of};
 
 use mdi::StackFrame;
@@ -46,14 +47,14 @@ fn readable(va: usize) -> bool {
 fn word(va: usize) -> usize {
     // SAFETY: callers only pass addresses `readable` accepted: aligned,
     // mapped kernel memory, read as a plain integer.
-    unsafe { (va as *const usize).read() }
+    unsafe { core::ptr::with_exposed_provenance::<usize>(va).read() }
 }
 
 /// `mdi::Cpu::stack_trace`.
 #[inline(never)]
 pub(crate) fn stack_trace(f: &mut dyn FnMut(StackFrame) -> bool) {
     let calltrap_ret: unsafe extern "C" fn() = calltrap_ret;
-    let calltrap_ret = calltrap_ret as usize;
+    let calltrap_ret = libkern::fn_addr!(calltrap_ret);
     let mut rbp: usize;
     // SAFETY: reads a register.
     unsafe {
@@ -81,7 +82,7 @@ pub(crate) fn stack_trace(f: &mut dyn FnMut(StackFrame) -> bool) {
         if !(readable(tf) && readable(tf + size_of::<TrapFrame>() - 8)) {
             break;
         }
-        let trapno = word(field(offset_of!(TrapFrame, tf_trapno))) as u64;
+        let trapno = u64_from_usize(word(field(offset_of!(TrapFrame, tf_trapno))));
         let pc = word(field(offset_of!(TrapFrame, tf_rip)));
         let sp = word(field(offset_of!(TrapFrame, tf_rsp)));
         let fp = word(field(offset_of!(TrapFrame, tf_rbp)));

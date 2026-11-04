@@ -11,5 +11,8 @@ publish.workspace = true
 [lib]
 path = "lib.rs"
 
+[dependencies]
+libkern = { workspace = true }
+
 [lints]
 workspace = true

@@ -55,8 +55,15 @@ test:
 	cd sys && ${CARGO} test --target "$$(rustc -vV | sed -n 's/^host: //p')" \
 	    -p libkern -p sys -p x86
 
+# Lints, including the explicitness ones (no `as`, no `unwrap`): for the
+# kernel, every other port, and the host unit tests.
 clippy:
 	cd sys && ${CARGO} clippy --profile ${PROFILE}
+	@cd sys && for t in ${PORTS}; do \
+	    ${CARGO} clippy -q --profile ${PROFILE} -p kernel --target $$t -- -D warnings || exit 1; \
+	done
+	cd sys && ${CARGO} clippy -q --target "$$(rustc -vV | sed -n 's/^host: //p')" --tests \
+	    -p libkern -p sys -p x86 -- -D warnings
 
 # Formal verification, phase 1 (docs/VERIFICATION.md). Neither builds the
 # kernel: they check its trusted building blocks on the host.
@@ -88,8 +95,16 @@ bhyve:
 	VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" \
 	    sh tools/bhyve/run.sh ${KERNEL}
 
+# Boots the kernel under QEMU as a real PC (BIOS, gptboot, the host's
+# loader(8) from a UFS disk image); no root needed. Same options as bhyve,
+# plus TIMEOUT=secs.
+qemu:
+	@test -f ${KERNEL} || { echo "qemu: ${KERNEL} not found; run make first" >&2; exit 1; }
+	CPUS="${CPUS}" VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" TIMEOUT="${TIMEOUT}" \
+	    sh tools/qemu/run.sh ${KERNEL}
+
 clean:
 	cd sys && ${CARGO} clean
 	cd tools && ${CARGO} clean
 
-.PHONY: all kernel userland sysent check test clippy miri kani bhyve clean
+.PHONY: all kernel userland sysent check test clippy miri kani bhyve qemu clean

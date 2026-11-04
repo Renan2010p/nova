@@ -20,19 +20,20 @@
 //! which starts its clock and enters the scheduler through its idle thread.
 //! From then on it runs threads from the shared run queue.
 
-use alloc::boxed::Box;
-use alloc::format;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use libkern::conv::usize_from_u32;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use mdi::{Ipi, Smp};
 
 use crate::cpu::{CpuId, curcpu, intr_guard, mp_ncpus_inc};
+use crate::mm::KArc;
 use crate::mm::kstack::KernelStack;
 use crate::sync::MtxSpin;
 use crate::task::{self, Task};
 use crate::{MAXCPU, Md};
+
+/// Exception stacks each AP needs, from the machine.
+const NEXCSTACKS: usize = <Md as Smp>::AP_EXCEPTION_STACKS;
 
 /// CPUs that are running (FreeBSD's `all_cpus` once started).
 static ONLINE: [AtomicBool; MAXCPU] = [const { AtomicBool::new(false) }; MAXCPU];
@@ -40,7 +41,7 @@ static ONLINE: [AtomicBool; MAXCPU] = [const { AtomicBool::new(false) }; MAXCPU]
 static STARTED: [AtomicBool; MAXCPU] = [const { AtomicBool::new(false) }; MAXCPU];
 
 /// The idle thread of the AP being started, handed over to it.
-static AP_IDLE: MtxSpin<Option<Arc<Task>>> = MtxSpin::new(None);
+static AP_IDLE: MtxSpin<Option<KArc<Task>>> = MtxSpin::new(None);
 
 /// Marks the boot CPU online. Called by `framework::__init`.
 pub(crate) fn init() {
@@ -72,7 +73,7 @@ pub fn cpu_mp_print_probe(w: &mut dyn core::fmt::Write) -> core::fmt::Result {
 /// The CPUs that are running.
 pub fn online_cpus() -> impl Iterator<Item = CpuId> {
     (0..Md::cpu_mp_probe())
-        .filter(|&c| ONLINE[c as usize].load(Ordering::Acquire))
+        .filter(|&c| ONLINE[usize_from_u32(c)].load(Ordering::Acquire))
         .map(CpuId::from_u32)
 }
 
@@ -89,17 +90,19 @@ pub fn start_ap(cpu: u32) -> bool {
         "start_ap: no CPU {cpu}"
     );
     assert!(
-        !STARTED[cpu as usize].swap(true, Ordering::AcqRel),
+        !STARTED[usize_from_u32(cpu)].swap(true, Ordering::AcqRel),
         "start_ap: CPU {cpu} already started"
     );
 
-    let name: &'static str = Box::leak(format!("idle: cpu{cpu}").into_boxed_str());
-    let idle = task::new_idle(name).expect("start_ap: no memory for the idle thread");
+    let idle = task::new_idle(cpu).expect("start_ap: no memory for the idle thread");
     let boot = KernelStack::new().expect("start_ap: no memory for the boot stack");
-    let exception_stacks: Vec<KernelStack> = (0..Md::AP_EXCEPTION_STACKS)
-        .map(|_| KernelStack::new().expect("start_ap: no memory for exception stacks"))
-        .collect();
-    let exception_tops: Vec<usize> = exception_stacks.iter().map(KernelStack::top).collect();
+    let mut exception_stacks: [Option<KernelStack>; NEXCSTACKS] = [const { None }; NEXCSTACKS];
+    let mut exception_tops = [0usize; NEXCSTACKS];
+    for (stack, top) in exception_stacks.iter_mut().zip(&mut exception_tops) {
+        let s = KernelStack::new().expect("start_ap: no memory for exception stacks");
+        *top = s.top();
+        *stack = Some(s);
+    }
     *AP_IDLE.lock() = Some(idle);
 
     let up = {
@@ -115,13 +118,15 @@ pub fn start_ap(cpu: u32) -> bool {
     };
     // Whether or not it answered, the AP may run on these stacks one day.
     core::mem::forget(boot);
-    core::mem::forget(exception_stacks);
+    for stack in exception_stacks {
+        core::mem::forget(stack);
+    }
     if !up {
         AP_IDLE.lock().take();
         return false;
     }
     // Wait until it is in the scheduler.
-    while !ONLINE[cpu as usize].load(Ordering::Acquire) {
+    while !ONLINE[usize_from_u32(cpu)].load(Ordering::Acquire) {
         crate::cpu::cpu_spinwait();
     }
     true
@@ -143,7 +148,7 @@ pub fn __nova_ap_startup(cpuid: u32) -> ! {
     );
     crate::clock::cpu_initclocks_ap();
     mp_ncpus_inc();
-    ONLINE[cpuid as usize].store(true, Ordering::Release);
+    ONLINE[usize_from_u32(cpuid)].store(true, Ordering::Release);
     task::ap_enter(idle)
 }
 

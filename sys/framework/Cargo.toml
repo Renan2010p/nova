@@ -14,6 +14,7 @@ path = "lib.rs"
 [dependencies]
 libkern = { workspace = true }
 mdi = { workspace = true }
+sys = { workspace = true }
 
 # One line per supported architecture. This is the only place in the
 # kernel where an architecture is selected.

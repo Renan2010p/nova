@@ -25,6 +25,7 @@
 //! layer provides, so this module is plain, safe parsing, unit-tested on
 //! the host.
 
+use libkern::conv::{u64_from_usize, usize_from_u32};
 use crate::bytes::{read_u32, read_u64};
 
 /// RSDP signature.
@@ -61,7 +62,7 @@ pub fn parse_rsdp(b: &[u8]) -> Option<Rsdp> {
     let revision = *b.get(15)?;
     let rsdt = read_u32(b, 16)?;
     let xsdt = if revision >= 2 {
-        let len = read_u32(b, 20)? as usize;
+        let len = usize_from_u32(read_u32(b, 20)?);
         if !checksum_ok(b.get(..len)?) {
             return None;
         }
@@ -82,12 +83,12 @@ pub fn find_rsdp(area: &[u8], base: u64) -> Option<u64> {
     (0..area.len().saturating_sub(RSDP_V1_LEN))
         .step_by(16)
         .find(|&off| parse_rsdp(&area[off..]).is_some())
-        .map(|off| base + off as u64)
+        .map(|off| base + u64_from_usize(off))
 }
 
 /// Reads a whole table at `pa`, checking its length and checksum.
 fn read_table<'a>(pa: u64, read: PhysRead<'a>) -> Option<&'a [u8]> {
-    let len = read_u32(read(pa, SDT_HEADER_LEN)?, 4)? as usize;
+    let len = usize_from_u32(read_u32(read(pa, SDT_HEADER_LEN)?, 4)?);
     if len < SDT_HEADER_LEN {
         return None;
     }
@@ -120,6 +121,7 @@ pub fn find_table<'a>(rsdp: &Rsdp, sig: &[u8; 4], read: PhysRead<'a>) -> Option<
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

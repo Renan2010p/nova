@@ -22,6 +22,7 @@
 //! SMP: every CPU has its own GDT and TSS (the TSS holds per-CPU stacks).
 //! The IDT is shared by all CPUs, as in FreeBSD.
 
+use libkern::conv::{u64_from_usize, usize_from_u32, trunc_u16};
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 
@@ -93,7 +94,7 @@ impl AmdTss {
         _rsvd2: 0,
         _rsvd3: 0,
         // No I/O permission bitmap: user mode never gets port access.
-        iobase: size_of::<AmdTss>() as u16,
+        iobase: trunc_u16(u64_from_usize(size_of::<AmdTss>())), // 104
     };
 }
 
@@ -130,7 +131,7 @@ impl IstStack {
     }
 
     fn top(&self) -> u64 {
-        self.0.get() as u64 + IST_STACK_SIZE as u64
+        u64_from_usize(self.0.get().addr()) + u64_from_usize(IST_STACK_SIZE)
     }
 }
 
@@ -143,14 +144,14 @@ static BOOT_MCHK_STACK: IstStack = IstStack::new();
 /// Installs gate `vec` (FreeBSD's `setidt`).
 fn setidt(vec: u8, func: usize, ist: u8) {
     let gate = gate_descriptor(
-        func as u64,
+        u64_from_usize(func),
         gsel(GCODE_SEL, SEL_KPL),
         ist,
         SDT_SYSIGT,
         SEL_KPL,
     );
     // SAFETY: only called from `idt_init`, see `Idt`'s Sync impl.
-    unsafe { (*IDT.0.get())[vec as usize] = gate };
+    unsafe { (*IDT.0.get())[usize::from(vec)] = gate };
 }
 
 /// Fills the shared IDT. Boot CPU only, once, before interrupts are on.
@@ -181,7 +182,7 @@ pub(crate) fn idt_init() {
         (19, Xxmm, 0),
     ];
     for (vec, func, ist) in traps {
-        setidt(vec, func as usize, ist);
+        setidt(vec, libkern::fn_addr!(func), ist);
     }
     // Reserved exceptions; 21 (#CP), 29 (#VC) and 30 (#SX) push an error.
     for vec in 20..32 {
@@ -190,7 +191,7 @@ pub(crate) fn idt_init() {
         } else {
             Xrsvd
         };
-        setidt(vec, func as usize, 0);
+        setidt(vec, libkern::fn_addr!(func), 0);
     }
     let intrs: [(u8, unsafe extern "C" fn()); 4] = [
         (APIC_TIMER_INT, Xtimerint),
@@ -199,7 +200,7 @@ pub(crate) fn idt_init() {
         (IPI_STOP, Xcpustop),
     ];
     for (vec, func) in intrs {
-        setidt(vec, func as usize, 0);
+        setidt(vec, libkern::fn_addr!(func), 0);
     }
 }
 
@@ -217,15 +218,15 @@ pub(crate) fn boot_ist_tops() -> [u64; 3] {
 /// registers, loads the shared IDT and sets up `syscall`. Each CPU calls
 /// it on itself.
 pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
-    let id = cpuid as usize;
+    let id = usize_from_u32(cpuid);
     let tss = COMMON_TSS.0[id].get();
     let gdt = GDT.0[id].get();
 
     let mut ist = [0u64; 7];
-    ist[IST_DBLFAULT as usize - 1] = ist_tops[0];
-    ist[IST_NMI as usize - 1] = ist_tops[1];
-    ist[IST_MCHK as usize - 1] = ist_tops[2];
-    let [tss_lo, tss_hi] = tss_descriptor(tss as u64, size_of::<AmdTss>() as u64);
+    ist[usize::from(IST_DBLFAULT) - 1] = ist_tops[0];
+    ist[usize::from(IST_NMI) - 1] = ist_tops[1];
+    ist[usize::from(IST_MCHK) - 1] = ist_tops[2];
+    let [tss_lo, tss_hi] = tss_descriptor(u64_from_usize(tss.addr()), u64_from_usize(size_of::<AmdTss>()));
 
     // SAFETY: this CPU owns slot `id` (see `PerCpu`). The GDT entries are
     // FreeBSD's layout; the TSS descriptor points at this CPU's TSS. After
@@ -253,8 +254,8 @@ pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
         g[GUSERLDT_SEL + 1] = 0;
 
         lgdt(&RegionDescriptor {
-            limit: (size_of::<[u64; NGDT]>() - 1) as u16,
-            base: gdt as u64,
+            limit: u16::try_from(size_of::<[u64; NGDT]>() - 1).expect("the GDT limit fits 16 bits"),
+            base: u64_from_usize(gdt.addr()),
         });
         core::arch::asm!(
             "push {cs}",
@@ -272,11 +273,11 @@ pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
         );
         ltr(gsel(GPROC0_SEL, SEL_KPL));
         lidt(&RegionDescriptor {
-            limit: (size_of::<[[u64; 2]; 256]>() - 1) as u16,
-            base: IDT.0.get() as u64,
+            limit: u16::try_from(size_of::<[[u64; 2]; 256]>() - 1).expect("the IDT limit fits 16 bits"),
+            base: u64_from_usize(IDT.0.get().addr()),
         });
     }
     // `TSS.rsp0` follows the 32-bit reserved word at the start of the TSS.
-    pcpu_set_tss_rsp0(cpuid, tss as u64 + 4);
+    pcpu_set_tss_rsp0(cpuid, u64_from_usize(tss.addr()) + 4);
     syscall_init();
 }

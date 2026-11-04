@@ -19,6 +19,7 @@
 //! pages when dropped. Contents are always zeroed on allocation, so no
 //! handle ever exposes another owner's old data.
 
+use libkern::conv::u64_from_usize;
 use mdi::DirectMap;
 
 use super::vm_phys;
@@ -50,7 +51,7 @@ impl Segment {
 
     /// Physical address of the first byte.
     pub fn paddr(&self) -> u64 {
-        self.pfn * PAGE_SIZE as u64
+        self.pfn * u64_from_usize(PAGE_SIZE)
     }
 
     /// Size in bytes.
@@ -64,7 +65,7 @@ impl Segment {
     }
 
     fn va(&self) -> *mut u8 {
-        Md::phys_to_dmap(self.paddr()) as *mut u8
+        core::ptr::with_exposed_provenance_mut::<u8>(Md::phys_to_dmap(self.paddr()))
     }
 
     /// Copies `buf.len()` bytes at `offset` into `buf`.
@@ -116,7 +117,7 @@ impl Segment {
     /// anymore, and each leaked segment may be re-taken only once.
     pub(crate) unsafe fn from_leaked(pa: u64, order: usize) -> Self {
         Self {
-            pfn: pa / PAGE_SIZE as u64,
+            pfn: pa / u64_from_usize(PAGE_SIZE),
             order,
         }
     }

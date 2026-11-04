@@ -169,6 +169,7 @@ pub fn total(ranges: &[PhysRange]) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
 

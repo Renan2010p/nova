@@ -18,10 +18,9 @@
 //!
 //! TODO(proc): process table, fork, wait, credentials, descriptor table.
 
-use alloc::string::String;
-use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use framework::mm::KArc;
 use framework::user::VmSpace;
 
 use crate::kern_abi::SysEntVec;
@@ -35,25 +34,43 @@ static NEXT_PID: AtomicU32 = AtomicU32::new(PID_INIT);
 pub struct Proc {
     /// Process id (`p_pid`).
     pub pid: u32,
-    /// Command name (`p_comm`): the last component of the path executed.
-    pub comm: String,
+    /// Command name (`p_comm`): the last component of the path executed,
+    /// at most [`MAXCOMLEN`] bytes, in a fixed buffer as in FreeBSD.
+    comm: [u8; MAXCOMLEN],
+    comm_len: usize,
     /// User id (`cr_uid`).
     pub uid: u32,
     /// Jail id (`pr_id`): 0, the host.
     pub jid: u32,
     /// The address space (`p_vmspace`).
-    pub vm: Arc<VmSpace>,
+    pub vm: KArc<VmSpace>,
     /// The ABI the image runs under (`p_sysent`).
     pub abi: &'static dyn SysEntVec,
 }
 
 impl Proc {
+    /// Command name (`p_comm`).
+    pub fn comm(&self) -> &str {
+        let bytes = self.comm.get(..self.comm_len).unwrap_or(&[]);
+        core::str::from_utf8(bytes).unwrap_or("?")
+    }
+
     /// A new process for an image just executed, with the next pid.
-    pub fn new(path: &str, vm: Arc<VmSpace>, abi: &'static dyn SysEntVec) -> Self {
-        let comm = path.rsplit('/').next().unwrap_or(path);
+    pub fn new(path: &str, vm: KArc<VmSpace>, abi: &'static dyn SysEntVec) -> Self {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        // Truncated at a character boundary, so `comm()` is valid UTF-8.
+        let mut comm_len = name.len().min(MAXCOMLEN);
+        while !name.is_char_boundary(comm_len) {
+            comm_len -= 1;
+        }
+        let mut comm = [0u8; MAXCOMLEN];
+        if let (Some(dst), Some(src)) = (comm.get_mut(..comm_len), name.as_bytes().get(..comm_len)) {
+            dst.copy_from_slice(src);
+        }
         Self {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
-            comm: comm.chars().take(MAXCOMLEN).collect(),
+            comm,
+            comm_len,
             uid: 0,
             jid: 0,
             vm,
@@ -63,4 +80,4 @@ impl Proc {
 }
 
 /// Longest command name (`MAXCOMLEN`).
-pub const MAXCOMLEN: usize = 19;
+pub const MAXCOMLEN: usize = framework::task::MAXCOMLEN;

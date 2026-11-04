@@ -11,8 +11,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! The kernel heap: Rust's global allocator (the role of FreeBSD's
-//! `malloc(9)` on top of UMA).
+//! The kernel heap: the back end of [`super::malloc`] (the role of UMA
+//! under FreeBSD's `malloc(9)`). It is not Rust's global allocator: the
+//! kernel has none.
 //!
 //! * Requests up to 2 KiB are rounded up to a power of two (16 bytes to
 //!   2 KiB) and served from per-size free lists. Each list is refilled by
@@ -23,11 +24,11 @@
 //! class is a pure function of its `Layout`, `dealloc` finds the right
 //! list or block order without any header.
 //!
-//! TODO(uma): per-CPU caches (smp), giving empty slab pages back, and
-//! statistics per malloc type (`vmstat -m`).
+//! TODO(uma): per-CPU caches (smp), giving empty slab pages back.
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::ptr;
+use libkern::conv::usize_from_u32;
+use core::alloc::Layout;
+use core::ptr::NonNull;
 
 use mdi::DirectMap;
 
@@ -41,7 +42,7 @@ const KMEM_MIN: usize = 16;
 /// Largest object served from a slab.
 const KMEM_MAX: usize = 2048;
 /// Number of size classes: 16, 32, ..., 2048.
-const NCLASSES: usize = (KMEM_MAX / KMEM_MIN).trailing_zeros() as usize + 1;
+const NCLASSES: usize = usize_from_u32((KMEM_MAX / KMEM_MIN).trailing_zeros()) + 1;
 
 /// How a layout is served.
 enum Class {
@@ -58,14 +59,14 @@ fn classify(layout: Layout) -> Option<Class> {
         .max(KMEM_MIN)
         .next_power_of_two();
     if size <= KMEM_MAX {
-        return Some(Class::Small((size / KMEM_MIN).trailing_zeros() as usize));
+        return Some(Class::Small(usize_from_u32((size / KMEM_MIN).trailing_zeros())));
     }
     // A buddy block of 2^order pages is aligned to its size, so an order
     // large enough for the size is large enough for the alignment.
-    let order = size
+    let order = usize_from_u32(size
         .div_ceil(PAGE_SIZE)
         .next_power_of_two()
-        .trailing_zeros() as usize;
+        .trailing_zeros());
     (order < VM_NFREEORDER).then_some(Class::Large(order))
 }
 
@@ -73,56 +74,58 @@ fn classify(layout: Layout) -> Option<Class> {
 /// Each free object holds the address of the next one.
 static FREELISTS: MtxSpin<[usize; NCLASSES]> = MtxSpin::new([0; NCLASSES]);
 
-/// The kernel's global allocator.
-struct Kmem;
-
-#[global_allocator]
-static KMEM: Kmem = Kmem;
-
-// SAFETY: every block returned is either a slab object of at least the
-// layout's size and alignment (objects of size `s` sit at multiples of `s`
-// inside page-aligned slabs), or a buddy block, which is aligned to its own
-// size; both are owned by the heap alone until freed. `dealloc` receives
-// the same layout, hence the same class, so blocks return where they came
-// from. All lists are protected by an interrupt-safe lock.
-unsafe impl GlobalAlloc for Kmem {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        match classify(layout) {
-            Some(Class::Small(c)) => {
-                let mut lists = FREELISTS.lock();
-                if lists[c] == 0 && !refill(&mut lists[c], KMEM_MIN << c) {
-                    return ptr::null_mut();
-                }
-                let obj = lists[c];
-                // SAFETY: `obj` is a free object on list `c`, owned by the
-                // heap; its first word is the link to the next one.
-                lists[c] = unsafe { (obj as *const usize).read() };
-                obj as *mut u8
+/// A block of at least `layout.size()` bytes aligned to `layout.align()`
+/// (a non-zero size), owned by the caller until [`kmem_free`]; `None` if
+/// memory is exhausted or the layout too large.
+///
+/// Every block is either a slab object, which sits at a multiple of its
+/// size inside a page-aligned slab, or a buddy block, aligned to its own
+/// size; so both satisfy the alignment.
+pub(crate) fn kmem_alloc(layout: Layout) -> Option<NonNull<u8>> {
+    match classify(layout)? {
+        Class::Small(c) => {
+            let mut lists = FREELISTS.lock();
+            let head = lists.get_mut(c)?;
+            if *head == 0 && !refill(head, KMEM_MIN << c) {
+                return None;
             }
-            Some(Class::Large(order)) => match Segment::alloc(order) {
-                Some(seg) => Md::phys_to_dmap(seg.leak()) as *mut u8,
-                None => ptr::null_mut(),
-            },
-            None => ptr::null_mut(),
+            let obj = *head;
+            // SAFETY: `obj` is a free object on this list, owned by the heap;
+            // its first word is the link to the next one.
+            *head = unsafe { core::ptr::with_exposed_provenance::<usize>(obj).read() };
+            NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(obj))
+        }
+        Class::Large(order) => {
+            let seg = Segment::alloc(order)?;
+            NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(Md::phys_to_dmap(seg.leak())))
         }
     }
+}
 
-    unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
-        match classify(layout) {
-            Some(Class::Small(c)) => {
-                let mut lists = FREELISTS.lock();
-                // SAFETY: the caller returns an object this allocator gave
-                // out for `layout`, now unused; it becomes the list head.
-                unsafe { (p as *mut usize).write(lists[c]) };
-                lists[c] = p as usize;
-            }
-            Some(Class::Large(order)) => {
-                // SAFETY: `p` came from `Segment::leak` in `alloc` with this
-                // order, and the caller gives it back exactly once.
-                drop(unsafe { Segment::from_leaked(Md::dmap_to_phys(p as usize), order) });
-            }
-            None => unreachable!("kmem: dealloc of a layout alloc never served"),
+/// Gives back a block from [`kmem_alloc`].
+///
+/// # Safety
+///
+/// `p` must come from `kmem_alloc(layout)` with this same layout, be
+/// unused, and be freed only once.
+pub(crate) unsafe fn kmem_free(p: NonNull<u8>, layout: Layout) {
+    match classify(layout) {
+        Some(Class::Small(c)) => {
+            let mut lists = FREELISTS.lock();
+            let Some(head) = lists.get_mut(c) else {
+                unreachable!("kmem_free: no size class {c}");
+            };
+            // SAFETY: the caller returns an object this heap gave out for
+            // `layout`, now unused; it becomes the list head.
+            unsafe { p.cast::<usize>().write(*head) };
+            *head = p.as_ptr().expose_provenance();
         }
+        Some(Class::Large(order)) => {
+            // SAFETY: `p` came from `Segment::leak` in `kmem_alloc` with this
+            // order, and the caller gives it back exactly once.
+            drop(unsafe { Segment::from_leaked(Md::dmap_to_phys(p.as_ptr().expose_provenance()), order) });
+        }
+        None => unreachable!("kmem_free: a layout kmem_alloc never served"),
     }
 }
 
@@ -136,7 +139,7 @@ fn refill(head: &mut usize, size: usize) -> bool {
     for obj in (base..base + PAGE_SIZE).step_by(size).rev() {
         // SAFETY: the page was just leaked to the heap, so it owns it; each
         // object is in bounds and aligned to `size` >= 8.
-        unsafe { (obj as *mut usize).write(*head) };
+        unsafe { core::ptr::with_exposed_provenance_mut::<usize>(obj).write(*head) };
         *head = obj;
     }
     true

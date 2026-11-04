@@ -61,6 +61,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+# Explicitness, as in Zig: no silent `as` conversion (libkern::conv names
+# them), and no unexplained panic (`expect("why")` instead of `unwrap()`).
+# Host unit tests may unwrap (clippy.toml).
+as_conversions = "deny"
+unwrap_used = "deny"
 
 [profile.dev]
 panic = "abort"

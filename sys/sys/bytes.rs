@@ -39,6 +39,7 @@ pub const fn roundup2(v: usize, align: usize) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
 

@@ -29,7 +29,7 @@ pub(crate) fn cpu_set_syscall_retval(regs: &mut UserRegs, result: Result<[u64; 2
             regs.rflags &= !PSL_C;
         }
         Err(errno) => {
-            regs.rax = errno as u64;
+            regs.rax = u64::from(errno.unsigned_abs());
             regs.rflags |= PSL_C;
         }
     }

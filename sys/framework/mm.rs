@@ -17,8 +17,11 @@
 //!   a buddy allocator over `BootInfo::physavail`;
 //! * [`Frame`] and [`Segment`]: owned physical pages. A page belongs to
 //!   exactly one handle, and goes back to the allocator when it is dropped;
-//! * [`kmem`]: the kernel heap behind Rust's `alloc` (`Box`, `Vec`, ...),
-//!   the role of FreeBSD's `malloc(9)` and UMA.
+//! * [`malloc`]: explicit allocation, FreeBSD's `malloc(9)`: every
+//!   allocation names its [`MallocType`] and flags and returns a `Result`;
+//!   [`KBox`], [`KVec`], [`KArc`] and [`KFnOnce`] own what it returns. The
+//!   kernel has no global allocator and does not use Rust's `alloc`;
+//! * [`kmem`]: the heap under it (slabs and buddy blocks), FreeBSD's UMA.
 //!
 //! Soundness rests on ownership: the allocator hands out each page once,
 //! and frame contents are reached only through their owner, by copying
@@ -31,8 +34,10 @@
 //! TODO(vm): the `vm_page` array, NUMA domains, and per-CPU page caches (smp).
 
 pub mod frame;
-pub mod kmem;
+pub(crate) mod kmem;
 pub mod kstack;
+pub mod malloc;
 pub mod vm_phys;
 
 pub use frame::{Frame, Segment};
+pub use malloc::{AllocError, KArc, KBox, KFnOnce, KVec, M_NOWAIT, M_WAITOK, M_ZERO, MFlags, MallocType};

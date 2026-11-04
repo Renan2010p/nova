@@ -18,6 +18,8 @@
 //! kernel at physical `KERNLOAD`. `sys/conf/ldscript.amd64` must agree with
 //! them. The direct map is placed where FreeBSD places it.
 
+use libkern::conv::u64_from_usize;
+
 /// Virtual address that maps physical address 0 at entry (the top 2 GiB).
 pub const KERNBASE: u64 = 0xffff_ffff_8000_0000;
 
@@ -42,7 +44,7 @@ pub const DMPML4I: usize = 496;
 /// Number of PML4 slots reserved for the direct map (`NDMPML4E`): 4 TiB.
 pub const NDMPML4E: usize = 8;
 /// Start of the direct map (`DMAP_MIN_ADDRESS`).
-pub const DMAP_MIN_ADDRESS: u64 = 0xffff_0000_0000_0000 | ((DMPML4I as u64) << 39);
+pub const DMAP_MIN_ADDRESS: u64 = 0xffff_0000_0000_0000 | (u64_from_usize(DMPML4I) << 39);
 
 const _: () = assert!(DMAP_MIN_ADDRESS == 0xffff_f800_0000_0000);
 

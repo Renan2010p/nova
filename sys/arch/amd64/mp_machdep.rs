@@ -23,6 +23,7 @@
 //!   what `hammer_time` did for the boot CPU (page tables, per-CPU area,
 //!   descriptor tables, local APIC), then hands over to the framework.
 
+use libkern::conv::{u64_from_usize, usize_from_u64, usize_from_u32};
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -75,14 +76,14 @@ const BIOS_ROM: PhysRange = PhysRange {
 
 /// A physical-memory reader for `sys::acpi`, through the direct map.
 fn phys_read(pa: u64, len: usize) -> Option<&'static [u8]> {
-    let end = pa.checked_add(len as u64)?;
+    let end = pa.checked_add(u64_from_usize(len))?;
     if end > crate::pmap::dmap_limit() {
         return None;
     }
     // SAFETY: the range is inside the direct map (checked), which maps all
     // of it read-write for the life of the kernel. ACPI tables are firmware
     // data nobody writes; the slice is only read.
-    Some(unsafe { core::slice::from_raw_parts(phys_to_dmap(pa) as *const u8, len) })
+    Some(unsafe { core::slice::from_raw_parts(core::ptr::with_exposed_provenance::<u8>(phys_to_dmap(pa)), len) })
 }
 
 fn find_rsdp(kenv: &StaticEnv<'_>) -> Option<Rsdp> {
@@ -93,7 +94,7 @@ fn find_rsdp(kenv: &StaticEnv<'_>) -> Option<Rsdp> {
     let areas = ebda
         .map(|e| (e, 1024))
         .into_iter()
-        .chain([(BIOS_ROM.start, BIOS_ROM.len() as usize)]);
+        .chain([(BIOS_ROM.start, usize_from_u64(BIOS_ROM.len()))]);
     for (base, len) in areas {
         if let Some(pa) = phys_read(base, len).and_then(|a| acpi::find_rsdp(a, base)) {
             return phys_read(pa, 36).and_then(acpi::parse_rsdp);
@@ -113,7 +114,7 @@ pub(crate) fn cpu_mp_setup(kenv: &StaticEnv<'_>, physmem: &[PhysRange]) {
 
     let tramp_ok = physmem
         .iter()
-        .any(|r| r.start <= MPTRAMP_ADDR && MPTRAMP_ADDR + PAGE_SIZE as u64 <= r.end);
+        .any(|r| r.start <= MPTRAMP_ADDR && MPTRAMP_ADDR + u64_from_usize(PAGE_SIZE) <= r.end);
     let Some(madt) = find_rsdp(kenv).and_then(|rsdp| acpi::find_table(&rsdp, MADT_SIG, &phys_read))
     else {
         return;
@@ -135,7 +136,7 @@ pub(crate) fn cpu_mp_setup(kenv: &StaticEnv<'_>, physmem: &[PhysRange]) {
         CPU_APIC_ID[n].store(cpu.apic_id, Ordering::Relaxed);
         n += 1;
     }
-    MP_NCPUS.store(n as u32, Ordering::Relaxed);
+    MP_NCPUS.store(u32::try_from(n).expect("at most MAXCPU CPUs"), Ordering::Relaxed);
 }
 
 /// `mdi::Smp::cpu_mp_probe`.
@@ -145,7 +146,7 @@ pub(crate) fn cpu_mp_probe() -> u32 {
 
 /// The APIC id of CPU `cpuid` (`mdi::Smp::cpu_hwid`).
 pub(crate) fn cpu_apic_id(cpuid: u32) -> u32 {
-    CPU_APIC_ID[cpuid as usize].load(Ordering::Relaxed)
+    CPU_APIC_ID[usize_from_u32(cpuid)].load(Ordering::Relaxed)
 }
 
 /// `mdi::Smp::cpu_mp_print_probe`: FreeBSD's `madt_probe` banner,
@@ -167,7 +168,7 @@ pub(crate) fn print_madt(w: &mut dyn fmt::Write) -> fmt::Result {
 fn print_field(w: &mut dyn fmt::Write, field: &[u8]) -> fmt::Result {
     for &c in field.iter().take_while(|&&c| c != 0) {
         w.write_char(if c.is_ascii_graphic() || c == b' ' {
-            c as char
+            char::from(c)
         } else {
             '?'
         })?;
@@ -178,9 +179,10 @@ fn print_field(w: &mut dyn fmt::Write, field: &[u8]) -> fmt::Result {
 /// `mdi::Smp::cpu_topology`: packages, cores per package, threads per
 /// core, from the APIC ids and CPUID leaf 0xB.
 pub(crate) fn cpu_topology() -> (u32, u32, u32) {
-    let n = cpu_mp_probe() as usize;
+    let ncpus = cpu_mp_probe();
+    let n = usize_from_u32(ncpus);
     let Some((smt, core)) = topo_shifts() else {
-        return (1, n as u32, 1);
+        return (1, ncpus, 1);
     };
     let ids = || (0..n).map(|i| CPU_APIC_ID[i].load(Ordering::Relaxed));
     let distinct = |shift: u32| {
@@ -194,17 +196,17 @@ pub(crate) fn cpu_topology() -> (u32, u32, u32) {
     };
     let packages = distinct(core).max(1);
     let cores = distinct(smt).max(1);
-    (packages, cores / packages, (n as u32 / cores).max(1))
+    (packages, cores / packages, (ncpus / cores).max(1))
 }
 
 /// Writes a word of the trampoline copy at the offset `field` has in the
 /// original.
 fn mptramp_set(field: *const u8, value: u64) {
-    let off = field as usize - &raw const mptramp_start as usize;
+    let off = field.addr() - (&raw const mptramp_start).addr();
     // SAFETY: the trampoline page is RAM reserved for it (outside
     // phys_avail), reached through the direct map; `off` is inside the
     // copied trampoline and 8-byte aligned (`.balign 8` in mpboot.rs).
-    unsafe { (phys_to_dmap(MPTRAMP_ADDR + off as u64) as *mut u64).write_volatile(value) };
+    unsafe { core::ptr::with_exposed_provenance_mut::<u64>(phys_to_dmap(MPTRAMP_ADDR + u64_from_usize(off))).write_volatile(value) };
 }
 
 /// `mdi::Smp::cpu_start_ap` (`start_ap`).
@@ -214,23 +216,23 @@ fn mptramp_set(field: *const u8, value: u64) {
 /// See `mdi::Smp::cpu_start_ap`.
 pub(crate) unsafe fn cpu_start_ap(cpuid: u32, stack_top: usize, ist_tops: [usize; 3]) -> bool {
     for (slot, top) in AP_IST.iter().zip(ist_tops) {
-        slot.store(top as u64, Ordering::Relaxed);
+        slot.store(u64_from_usize(top), Ordering::Relaxed);
     }
     let start = &raw const mptramp_start;
-    let len = &raw const mptramp_end as usize - start as usize;
+    let len = (&raw const mptramp_end).addr() - start.addr();
     assert!(len <= PAGE_SIZE, "mpboot: trampoline larger than a page");
     // SAFETY: copies the trampoline (kernel rodata) to its reserved page,
     // through the direct map; no AP runs it while the previous one is
     // already in the kernel (starts are serialized).
-    unsafe { core::ptr::copy_nonoverlapping(start, phys_to_dmap(MPTRAMP_ADDR) as *mut u8, len) };
+    unsafe { core::ptr::copy_nonoverlapping(start, core::ptr::with_exposed_provenance_mut::<u8>(phys_to_dmap(MPTRAMP_ADDR)), len) };
     mptramp_set(&raw const mpt_cr3, mptramp_pml4());
-    mptramp_set(&raw const mpt_stack, stack_top as u64);
+    mptramp_set(&raw const mpt_stack, u64_from_usize(stack_top));
     let entry: extern "C" fn(u64) -> ! = init_secondary;
-    mptramp_set(&raw const mpt_entry, entry as usize as u64);
+    mptramp_set(&raw const mpt_entry, u64_from_usize(libkern::fn_addr!(entry)));
     mptramp_set(&raw const mpt_cpuid, u64::from(cpuid));
 
     AP_STARTED.store(0, Ordering::Release);
-    ipi_startup(cpu_apic_id(cpuid), (MPTRAMP_ADDR >> 12) as u8);
+    ipi_startup(cpu_apic_id(cpuid), u8::try_from(MPTRAMP_ADDR >> 12).expect("the trampoline is below 1 MiB"));
     for _ in 0..AP_START_TIMEOUT_MS {
         if AP_STARTED.load(Ordering::Acquire) == cpuid {
             return true;
@@ -249,7 +251,7 @@ unsafe extern "Rust" {
 /// on the trampoline's page tables, with interrupts disabled
 /// (`init_secondary`).
 extern "C" fn init_secondary(cpuid: u64) -> ! {
-    let cpuid = cpuid as u32;
+    let cpuid = u32::try_from(cpuid).expect("cpu_start_ap passes a u32 cpuid");
     // SAFETY: the kernel's page tables map everything the trampoline's do
     // in the kernel half, which is where we run; %cr0/%cr4 become the boot
     // CPU's, which the kernel is built for.

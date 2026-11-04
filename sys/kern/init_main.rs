@@ -37,9 +37,7 @@
 //! `boot -v` here too. There is no userland yet, so the kernel halts at
 //! the point where FreeBSD would start `init(8)`.
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec;
+use libkern::conv::u64_from_usize;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use framework::{BootInfo, PAGE_SIZE};
@@ -112,18 +110,19 @@ fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
         let Some(file) = kern_linker::preload_file(boot, path) else {
             continue; // ENOENT
         };
-        let mut argv = vec![path];
-        if boot.howto & RB_SINGLE != 0 {
-            argv.push("-s");
-        }
-        match kern_exec::kern_execve(file, path, &argv, &[]) {
+        // `init` gets its path and, in single-user mode, `-s`.
+        let args = [path, "-s"];
+        let argc = if boot.howto & RB_SINGLE != 0 { 2 } else { 1 };
+        let argv = args.get(..argc).unwrap_or(&args);
+        match kern_exec::kern_execve(file, path, argv, &[]) {
             Ok(image) => {
-                let path = String::from(path);
-                let td = kern_kthread::kthread_add("init", move || {
-                    let p = Proc::new(&path, image.vm, image.abi);
-                    subr_trap::userret_loop(&p, image.regs);
-                });
-                assert!(td.is_some(), "start_init: no memory for init");
+                let p = Proc::new(path, image.vm, image.abi);
+                let regs = image.regs;
+                if let Err(e) = kern_kthread::kthread_add("init", move || {
+                    subr_trap::userret_loop(&p, regs);
+                }) {
+                    panic!("start_init: cannot create init: {e:?}");
+                }
                 return;
             }
             // The kernel has no error numbers; the ABI that would have
@@ -164,7 +163,7 @@ fn identify_cpu() {
 
 /// Memory sizes, as FreeBSD's `cpu_startup` reports them.
 fn cpu_startup(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
-    let free = framework::mm::vm_phys::free_count() * PAGE_SIZE as u64;
+    let free = framework::mm::vm_phys::free_count() * u64_from_usize(PAGE_SIZE);
     // SMBIOS knows the installed RAM; the firmware map only what is usable.
     let maxmem = boot.physmem.last().map_or(0, |r| r.end);
     let realmem = kenv
@@ -182,7 +181,7 @@ fn cpu_startup(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
                 r.start,
                 r.end - 1,
                 r.len(),
-                r.len() / PAGE_SIZE as u64
+                r.len() / u64_from_usize(PAGE_SIZE)
             );
         }
     }
@@ -200,18 +199,27 @@ fn mp_start() {
     }
     printf!("Nova/SMP: Multiprocessor System Detected: {} CPUs\n", ncpus);
     let (packages, cores, threads) = framework::smp::cpu_topology();
-    let mut line = format!("Nova/SMP: {packages} package(s)");
-    if cores > 0 {
-        line += &format!(" x {cores} core(s)");
-    }
-    if threads > 1 {
-        line += &format!(" x {threads} hardware threads");
-    }
-    printf!("{}\n", line);
+    // One line, built in place: printf! takes the console lock per call,
+    // so the pieces are formatted together.
+    printf!(
+        "Nova/SMP: {} package(s){}{}\n",
+        packages,
+        Optional(cores > 0, format_args!(" x {cores} core(s)")),
+        Optional(threads > 1, format_args!(" x {threads} hardware threads"))
+    );
 }
 
 /// Starts the application processors (`release_aps`, with the messages
 /// of `init_secondary_tail`).
+/// Formats its arguments only if the flag is set.
+struct Optional<'a>(bool, core::fmt::Arguments<'a>);
+
+impl core::fmt::Display for Optional<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 { f.write_fmt(self.1) } else { Ok(()) }
+    }
+}
+
 fn release_aps(bootverbose: bool) {
     let ncpus = framework::smp::mp_ncpus_detected();
     for cpu in 1..ncpus {

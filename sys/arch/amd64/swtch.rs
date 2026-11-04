@@ -23,6 +23,7 @@
 //! TODO(user): FPU/XSAVE state, `%fs`/`%gs` bases and the TSS `rsp0` once
 //! threads run user code.
 
+use libkern::conv::u64_from_usize;
 use core::arch::global_asm;
 
 /// Saved context of a thread that is not running (FreeBSD's `struct pcb`,
@@ -88,20 +89,20 @@ pub(crate) unsafe fn cpu_thread_init(pcb: &mut Pcb, stack_top: usize, entry: ext
     // After the six pops and `ret`, %rsp is `stack_top`, 16-byte aligned,
     // so `call r12` in the trampoline enters `entry` with the alignment the
     // ABI expects.
-    let frame = (stack_top - SWITCH_FRAME_WORDS * 8) as *mut u64;
+    let frame = core::ptr::with_exposed_provenance_mut::<u64>(stack_top - SWITCH_FRAME_WORDS * 8);
     // SAFETY: the caller guarantees the stack is mapped and writable; the
     // frame is the top 56 bytes of it.
     unsafe {
         for i in 0..SWITCH_FRAME_WORDS {
             frame.add(i).write(0);
         }
-        frame.add(FRAME_R12).write(entry as usize as u64);
+        frame.add(FRAME_R12).write(u64_from_usize(libkern::fn_addr!(entry)));
         let trampoline: unsafe extern "C" fn() = fork_trampoline;
         frame
             .add(SWITCH_FRAME_WORDS - 1)
-            .write(trampoline as usize as u64);
+            .write(u64_from_usize(libkern::fn_addr!(trampoline)));
     }
-    pcb.rsp = frame as u64;
+    pcb.rsp = u64_from_usize(frame.addr());
 }
 
 /// `mdi::Context::cpu_switch`.

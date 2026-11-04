@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# Host unit tests may unwrap: a failing test is meant to panic.
+allow-unwrap-in-tests = true

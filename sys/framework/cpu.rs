@@ -20,6 +20,7 @@
 //! that this CPU cannot be interrupted or preempted, which is what
 //! [`PinnedToCpu`] and [`crate::pcpu::CpuLocal`] rely on.
 
+use libkern::conv::usize_from_u32;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -37,7 +38,7 @@ impl CpuId {
 
     /// The id as an array index.
     pub const fn index(self) -> usize {
-        self.0 as usize
+        usize_from_u32(self.0)
     }
 
     /// The id as a number.
@@ -51,7 +52,7 @@ impl CpuId {
     ///
     /// If `id >= MAXCPU`.
     pub const fn from_u32(id: u32) -> CpuId {
-        assert!((id as usize) < MAXCPU, "CpuId: out of range");
+        assert!(usize_from_u32(id) < MAXCPU, "CpuId: out of range");
         CpuId(id)
     }
 }
@@ -63,7 +64,7 @@ impl CpuId {
 /// use [`crate::pcpu::CpuLocal`] for per-CPU state.
 pub fn curcpu() -> CpuId {
     let id = Md::curcpu();
-    assert!((id as usize) < MAXCPU, "MD curcpu() out of range");
+    assert!(usize_from_u32(id) < MAXCPU, "MD curcpu() out of range");
     CpuId(id)
 }
 

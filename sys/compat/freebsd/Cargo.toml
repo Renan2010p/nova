@@ -12,6 +12,7 @@ publish.workspace = true
 path = "lib.rs"
 
 [dependencies]
+libkern = { workspace = true }
 framework = { workspace = true }
 kern = { workspace = true }
 sys = { workspace = true }

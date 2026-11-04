@@ -29,6 +29,7 @@
 //! The application processors will start in `mp_machdep.rs`
 //! (`init_secondary`), repeating steps 1, 2 and 6 for themselves.
 
+use libkern::conv::{u64_from_usize, usize_from_u64};
 use mdi::{BootInfo, Firmware, PhysRange};
 use sys::bytes::{read_u32, read_u64};
 use sys::linker::{
@@ -101,6 +102,8 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     physavail.remove(0, ISA_HOLE_END.max(physfree));
     physavail.remove(dmap_limit, u64::MAX);
 
+    // The 8259s are not used: mask them before the APIC takes over.
+    x86::i8259::atpic_mask_all();
     if let Err(e) = x86::local_apic::lapic_init(APIC_SPURIOUS_INT) {
         panic!("local APIC: {e:?} (TODO(xapic): only x2APIC is supported; under bhyve, use -x)");
     }
@@ -111,7 +114,7 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     let ksyms = match (md(MODINFOMD_SSYM), md(MODINFOMD_ESYM)) {
         (Some(ssym), Some(esym)) if esym > ssym => {
             let area = boot_data(ssym, kernend);
-            &area[..area.len().min((esym - ssym) as usize)]
+            &area[..area.len().min(usize_from_u64(esym - ssym))]
         }
         _ => &[],
     };
@@ -150,7 +153,7 @@ fn kernel_image_end() -> u64 {
     unsafe extern "C" {
         static end: u8;
     }
-    core::ptr::addr_of!(end) as u64
+    u64_from_usize(core::ptr::addr_of!(end).addr())
 }
 
 /// Physical `[start, kernend)`, the tail of what the loader placed after
@@ -166,7 +169,7 @@ fn boot_data(start: u64, kernend: u64) -> &'static [u8] {
     // to MI code as `BootInfo::kernel`, so nothing will ever reuse it: the
     // slice is valid and immutable for the life of the kernel.
     unsafe {
-        core::slice::from_raw_parts((KERNBASE + start) as *const u8, (kernend - start) as usize)
+        core::slice::from_raw_parts(core::ptr::with_exposed_provenance::<u8>(usize_from_u64(KERNBASE + start)), usize_from_u64(kernend - start))
     }
 }
 

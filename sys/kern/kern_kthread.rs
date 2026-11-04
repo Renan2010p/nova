@@ -13,14 +13,14 @@
 
 //! Kernel threads (FreeBSD's `kern/kern_kthread.c`).
 
-use alloc::sync::Arc;
-
+use framework::mm::KArc;
 use framework::task::{self, Task};
+use sys::errno::KResult;
 
 /// Creates a kernel thread named `name` running `f` (`kthread_add`). The
-/// thread exits when `f` returns. `None` if memory is exhausted.
-pub fn kthread_add(name: &'static str, f: impl FnOnce() + Send + 'static) -> Option<Arc<Task>> {
-    task::spawn(name, f)
+/// thread exits when `f` returns. May sleep; `ENOMEM` if memory is short.
+pub fn kthread_add(name: &str, f: impl FnOnce() + Send + 'static) -> KResult<KArc<Task>> {
+    Ok(task::spawn(name, f)?)
 }
 
 /// Ends the calling kernel thread (`kthread_exit`).

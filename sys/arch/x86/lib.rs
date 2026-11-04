@@ -27,6 +27,7 @@ compile_error!("the x86 crate only supports x86_64 targets");
 
 pub mod cpufunc;
 pub mod i8254;
+pub mod i8259;
 pub mod identcpu;
 pub mod local_apic;
 pub mod madt;

@@ -28,8 +28,6 @@
 //!
 //! TODO(smp): recycle addresses once TLB shootdown exists.
 
-use alloc::vec::Vec;
-
 use mdi::KernelMap;
 
 use super::frame::{Frame, Segment};
@@ -56,15 +54,17 @@ static KSTACK_MAP: MtxSpin<KstackMap> = MtxSpin::new(KstackMap { next: Md::KVA_M
 pub struct KernelStack {
     /// Start of the slot (the guard page).
     base: usize,
-    frames: Vec<Frame>,
+    frames: [Frame; KSTACK_PAGES],
 }
 
 impl KernelStack {
     /// Allocates and maps a stack, or `None` if memory is exhausted.
     pub(crate) fn new() -> Option<Self> {
-        let frames: Vec<Frame> = (0..KSTACK_PAGES)
-            .map(|_| Frame::alloc())
-            .collect::<Option<_>>()?;
+        let frames: [Option<Frame>; KSTACK_PAGES] = core::array::from_fn(|_| Frame::alloc());
+        if frames.iter().any(Option::is_none) {
+            return None; // the pages that were allocated go back
+        }
+        let frames = frames.map(|f| f.expect("checked above"));
         let mut map = KSTACK_MAP.lock();
         if map.next + SLOT_SIZE > Md::KVA_MAX {
             return None;

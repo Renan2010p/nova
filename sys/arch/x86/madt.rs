@@ -43,7 +43,7 @@ pub fn madt_cpus(madt: &[u8]) -> impl Iterator<Item = MadtCpu> + '_ {
     core::iter::from_fn(move || {
         loop {
             let kind = *madt.get(off)?;
-            let len = *madt.get(off + 1)? as usize;
+            let len = usize::from(*madt.get(off + 1)?);
             if len < 2 {
                 return None;
             }
@@ -73,6 +73,7 @@ pub fn madt_ident(madt: &[u8]) -> Option<[u8; 14]> {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
 

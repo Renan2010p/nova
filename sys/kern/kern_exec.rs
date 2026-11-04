@@ -21,15 +21,16 @@
 //! TODO(exec): interpreters (`PT_INTERP`), `ET_DYN`, files from a file
 //! system, stack growth, ASLR.
 
-use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
 
+use libkern::conv::{u64_from_usize, usize_from_u64};
 use framework::PAGE_SIZE;
+use framework::mm::{KArc, KVec, M_WAITOK};
 use framework::user::{Prot, UserRegs, VM_MAXUSER_ADDRESS, VmError, VmSpace};
 use sys::elf::{ET_EXEC, PF_W, PF_X, PT_LOAD, phdrs};
 use sys::errno::{Errno, KResult};
 
 use crate::kern_abi::{self, ExecImage, ImageParams, SysEntVec};
+use crate::kern_malloc::M_TEMP;
 
 /// Size of the stack mapped for a new image (FreeBSD reserves `maxssiz`
 /// and grows into it; Nova maps this much up front).
@@ -39,7 +40,7 @@ pub const SGROWSIZ_INITIAL: u64 = 1 << 20;
 /// with, and the ABI that runs them.
 pub struct Image {
     /// The new address space.
-    pub vm: Arc<VmSpace>,
+    pub vm: KArc<VmSpace>,
     /// The initial registers.
     pub regs: UserRegs,
     /// The ABI that accepted the image.
@@ -63,16 +64,16 @@ pub fn kern_execve(file: &[u8], path: &str, argv: &[&str], envv: &[&str]) -> KRe
         return Err(Errno::ENOEXEC);
     }
     let abi = kern_abi::abi_select(&image).ok_or(Errno::ENOEXEC)?;
-    let vm = VmSpace::new().ok_or(Errno::ENOMEM)?;
+    let vm = VmSpace::new()?;
 
     // Pages of all segments, with their protections merged: two segments
     // may share a page.
-    let page = PAGE_SIZE as u64;
-    let mut pages: BTreeMap<u64, Prot> = BTreeMap::new();
+    let page = u64_from_usize(PAGE_SIZE);
+    let mut pages: KVec<(u64, Prot)> = KVec::new(&M_TEMP);
     let mut phdr = 0;
     for ph in phdrs(file, &ehdr).filter(|ph| ph.kind == PT_LOAD) {
         let end = ph.vaddr.checked_add(ph.memsz).filter(|&e| e <= VM_MAXUSER_ADDRESS);
-        let file_end = ph.offset.checked_add(ph.filesz).filter(|&e| e <= file.len() as u64);
+        let file_end = ph.offset.checked_add(ph.filesz).filter(|&e| e <= u64_from_usize(file.len()));
         let (Some(end), Some(_)) = (end, file_end) else {
             return Err(Errno::ENOEXEC);
         };
@@ -80,9 +81,17 @@ pub fn kern_execve(file: &[u8], path: &str, argv: &[&str], envv: &[&str]) -> KRe
             return Err(Errno::ENOEXEC);
         }
         for va in (ph.vaddr & !(page - 1)..end).step_by(PAGE_SIZE) {
-            let p = pages.entry(va).or_insert(Prot { write: false, exec: false });
-            p.write |= ph.flags & PF_W != 0;
-            p.exec |= ph.flags & PF_X != 0;
+            let i = match pages.binary_search_by_key(&va, |&(v, _)| v) {
+                Ok(i) => i,
+                Err(i) => {
+                    pages.insert(i, (va, Prot { write: false, exec: false }), M_WAITOK)?;
+                    i
+                }
+            };
+            if let Some((_, p)) = pages.get_mut(i) {
+                p.write |= ph.flags & PF_W != 0;
+                p.exec |= ph.flags & PF_X != 0;
+            }
         }
         if (ph.offset..ph.offset + ph.filesz).contains(&ehdr.phoff) {
             phdr = ph.vaddr + (ehdr.phoff - ph.offset);
@@ -91,11 +100,11 @@ pub fn kern_execve(file: &[u8], path: &str, argv: &[&str], envv: &[&str]) -> KRe
     if pages.is_empty() {
         return Err(Errno::ENOEXEC);
     }
-    for (&va, &prot) in &pages {
+    for &(va, prot) in pages.iter() {
         vm.map_zeroed(va, page, prot).map_err(vm_errno)?;
     }
     for ph in phdrs(file, &ehdr).filter(|ph| ph.kind == PT_LOAD) {
-        let bytes = &file[ph.offset as usize..(ph.offset + ph.filesz) as usize];
+        let bytes = &file[usize_from_u64(ph.offset)..usize_from_u64(ph.offset + ph.filesz)];
         vm.copyout_init(ph.vaddr, bytes).map_err(vm_errno)?;
     }
 

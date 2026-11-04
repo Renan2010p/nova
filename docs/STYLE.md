@@ -88,6 +88,24 @@ Nova must feel like FreeBSD to a Renux user, so:
   (`sys::bytes::read_u32`/`read_u64`) instead of casting pointers to
   structs.
 
+## Explicit code
+
+Nova's Rust is as explicit as Zig (rules R16 and R18 in
+[LAYERING.md](LAYERING.md)):
+
+* **Allocation is visible.** No `Box`/`Vec`/`format!`: `KBox::new(v,
+  &M_PROC, M_WAITOK)?`. Prefer a fixed buffer when there is a bound
+  (`[u8; MAXCOMLEN]`), and no allocation at all where one is not needed.
+* **Conversions are named.** No `as`: `u64::from(x)`, `u32::try_from(x)`,
+  or `libkern::conv` (`u64_from_usize`, `trunc_u8`, `fn_addr!`). Pointers:
+  `.addr()`, `ptr::with_exposed_provenance`, `.cast()`.
+* **Failure is handled or explained.** Errors are `Result`s
+  (`KResult<T>`, `AllocError`). `unwrap()` is not allowed; `expect("why")`
+  states the invariant that makes a value present; a deliberate panic says
+  why in its message.
+* **Context is explicit.** `M_WAITOK` only where sleeping is allowed (the
+  check panics otherwise); spin locks and interrupt guards are values.
+
 ## Formatting and checks
 
 ```sh

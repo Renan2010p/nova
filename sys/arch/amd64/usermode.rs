@@ -31,6 +31,7 @@
 //! on the pages the framework owns. Nothing here knows any ABI: which
 //! register holds what for a system call is the ABI's business.
 
+use libkern::conv::{u64_from_usize, usize_from_u64};
 use core::arch::global_asm;
 use core::mem::offset_of;
 
@@ -218,7 +219,7 @@ pub(crate) fn syscall_init() {
     // alignment checks are cleared on entry, as in FreeBSD.
     unsafe {
         wrmsr(MSR_STAR, star);
-        wrmsr(MSR_LSTAR, entry as usize as u64);
+        wrmsr(MSR_LSTAR, u64_from_usize(libkern::fn_addr!(entry)));
         wrmsr(MSR_SF_MASK, x86::psl::PSL_I | x86::psl::PSL_T | x86::psl::PSL_D | x86::psl::PSL_AC | x86::psl::PSL_NT);
         wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_SCE);
     }
@@ -282,7 +283,7 @@ pub(crate) extern "C" fn user_trap(frame: &mut TrapFrame) -> ! {
     // and resume this one on another CPU.
     let pc = pcpu_self();
     let kern_rsp = pc.kern_rsp.load(core::sync::atomic::Ordering::Relaxed);
-    let regs = pc.user_regs.load(core::sync::atomic::Ordering::Relaxed) as *mut UserRegs;
+    let regs = core::ptr::with_exposed_provenance_mut::<UserRegs>(usize_from_u64(pc.user_regs.load(core::sync::atomic::Ordering::Relaxed)));
     let saved = UserRegs {
         rax: frame.tf_rax,
         rbx: frame.tf_rbx,

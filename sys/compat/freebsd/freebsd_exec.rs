@@ -30,8 +30,7 @@
 //!             +---------------------------+
 //! ```
 
-use alloc::vec::Vec;
-
+use libkern::conv::{u64_from_usize, usize_from_u64};
 use framework::user::VmSpace;
 use kern::kern_abi::ImageParams;
 use kern::kern_exec::{SGROWSIZ_INITIAL, vm_errno};
@@ -93,40 +92,44 @@ pub(crate) fn copyout_strings(vm: &VmSpace, img: &ImageParams<'_>) -> KResult<u6
     let ps_strings = USRSTACK - PS_STRINGS_SIZE;
     let mut destp = ps_strings;
 
-    let mut path = Vec::from(img.execpath.as_bytes());
-    path.push(0);
-    destp = rounddown(destp - path.len() as u64, PTR);
+    // The path, NUL-terminated, written in two pieces: nothing is
+    // assembled in kernel memory.
+    let path_len = u64_from_usize(img.execpath.len()) + 1;
+    destp = rounddown(destp - path_len, PTR);
     let execpathp = destp;
-    put(execpathp, &path)?;
+    put(execpathp, img.execpath.as_bytes())?;
+    put(execpathp + path_len - 1, &[0])?;
 
     // TODO(random): `arc4rand`; there is no entropy source yet.
     destp -= CANARY_LEN;
     let canary = destp;
-    put(canary, &[0; CANARY_LEN as usize])?;
+    put(canary, &[0; usize_from_u64(CANARY_LEN)])?;
 
-    let pagesizeslen = PAGESIZES.len() as u64 * PTR;
+    let pagesizeslen = u64_from_usize(PAGESIZES.len()) * PTR;
     destp = rounddown(destp - pagesizeslen, PTR);
     let pagesizes = destp;
     for (i, &ps) in PAGESIZES.iter().enumerate() {
-        word(pagesizes + i as u64 * PTR, ps)?;
+        word(pagesizes + u64_from_usize(i) * PTR, ps)?;
     }
 
-    let mut strings = Vec::new();
-    for s in img.argv.iter().chain(img.envv) {
-        strings.extend_from_slice(s.as_bytes());
-        strings.push(0);
-    }
+    // argv then envv strings, each NUL-terminated, written in place.
+    let strings_len: u64 = img.argv.iter().chain(img.envv).map(|s| u64_from_usize(s.len()) + 1).sum();
     // Everything must fit in the mapped stack, with room to run.
-    let vectors = (img.argv.len() + img.envv.len() + 2) as u64 * PTR + AT_COUNT * 16;
-    if strings.len() as u64 + vectors > ARG_MAX {
+    let vectors = u64_from_usize(img.argv.len() + img.envv.len() + 2) * PTR + AT_COUNT * 16;
+    if strings_len + vectors > ARG_MAX {
         return Err(Errno::E2BIG);
     }
-    destp = rounddown(destp - strings.len() as u64, PTR);
+    destp = rounddown(destp - strings_len, PTR);
     let ustringp = destp;
-    put(ustringp, &strings)?;
+    let mut at = ustringp;
+    for s in img.argv.iter().chain(img.envv) {
+        put(at, s.as_bytes())?;
+        put(at + u64_from_usize(s.len()), &[0])?;
+        at += u64_from_usize(s.len()) + 1;
+    }
 
     destp = rounddown(destp - AT_COUNT * 16, PTR);
-    let (argc, envc) = (img.argv.len() as u64, img.envv.len() as u64);
+    let (argc, envc) = (u64_from_usize(img.argv.len()), u64_from_usize(img.envv.len()));
     let argv = destp - (argc + 1 + envc + 1) * PTR;
     let envv = argv + (argc + 1) * PTR;
     let mut s = ustringp;
@@ -134,8 +137,8 @@ pub(crate) fn copyout_strings(vm: &VmSpace, img: &ImageParams<'_>) -> KResult<u6
     for (i, a) in img.argv.iter().chain(img.envv).enumerate() {
         word(vectp, s)?;
         vectp += PTR;
-        s += a.len() as u64 + 1;
-        if i as u64 + 1 == argc {
+        s += u64_from_usize(a.len()) + 1;
+        if u64_from_usize(i) + 1 == argc {
             word(vectp, 0)?; // the NULL between argv and envp
             vectp += PTR;
         }
@@ -149,15 +152,15 @@ pub(crate) fn copyout_strings(vm: &VmSpace, img: &ImageParams<'_>) -> KResult<u6
 
     // struct ps_strings
     word(ps_strings, argv)?;
-    put(ps_strings + 8, &(argc as u32).to_le_bytes())?;
+    put(ps_strings + 8, &u32::try_from(argc).map_err(|_| Errno::E2BIG)?.to_le_bytes())?;
     word(ps_strings + 16, envv)?;
-    put(ps_strings + 24, &(envc as u32).to_le_bytes())?;
+    put(ps_strings + 24, &u32::try_from(envc).map_err(|_| Errno::E2BIG)?.to_le_bytes())?;
 
     let aux = [
         (AT_PHDR, img.phdr),
         (AT_PHENT, u64::from(img.phent)),
         (AT_PHNUM, u64::from(img.phnum)),
-        (AT_PAGESZ, framework::PAGE_SIZE as u64),
+        (AT_PAGESZ, u64_from_usize(framework::PAGE_SIZE)),
         (AT_FLAGS, 0),
         (AT_ENTRY, img.entry),
         (AT_BASE, 0),
@@ -180,10 +183,10 @@ pub(crate) fn copyout_strings(vm: &VmSpace, img: &ImageParams<'_>) -> KResult<u6
         (AT_USRSTACKLIM, SGROWSIZ_INITIAL),
         (AT_NULL, 0),
     ];
-    assert!(aux.len() as u64 <= AT_COUNT, "auxv: more entries than AT_COUNT");
+    assert!(u64_from_usize(aux.len()) <= AT_COUNT, "auxv: more entries than AT_COUNT");
     for (i, (k, v)) in aux.iter().enumerate() {
-        word(auxv + i as u64 * 16, *k)?;
-        word(auxv + i as u64 * 16 + 8, *v)?;
+        word(auxv + u64_from_usize(i) * 16, *k)?;
+        word(auxv + u64_from_usize(i) * 16 + 8, *v)?;
     }
 
     // freebsd_fixup: argc just below argv.

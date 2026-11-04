@@ -20,6 +20,7 @@
 //! TODO(xapic): CPUs (or hypervisors) without x2APIC need the MMIO xAPIC,
 //! mapped uncached; until then the kernel refuses to boot on them.
 
+use libkern::conv::trunc_u32;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cpufunc::{cpuid, ia32_pause, rdmsr, wrmsr};
@@ -34,12 +35,16 @@ const MSR_APIC_EOI: u32 = 0x80b;
 const MSR_APIC_ICR: u32 = 0x830;
 const MSR_APIC_SVR: u32 = 0x80f;
 const MSR_APIC_LVT_TIMER: u32 = 0x832;
+const MSR_APIC_LVT_LINT0: u32 = 0x835;
+const MSR_APIC_LVT_ERROR: u32 = 0x837;
 const MSR_APIC_ICR_TIMER: u32 = 0x838;
 const MSR_APIC_CCR_TIMER: u32 = 0x839;
 const MSR_APIC_DCR_TIMER: u32 = 0x83e;
 
 const APIC_SVR_ENABLE: u64 = 1 << 8;
 const APIC_LVT_M: u64 = 1 << 16;
+/// Delivery mode ExtINT: the 8259's interrupts, as in "virtual wire" mode.
+const APIC_LVT_DM_EXTINT: u64 = 0x700;
 const APIC_LVTT_TM_PERIODIC: u64 = 1 << 17;
 /// Timer divide configuration: divide by 16.
 const APIC_TDCR_16: u64 = 0x3;
@@ -83,6 +88,11 @@ pub fn lapic_init(spurious_vector: u8) -> Result<(), LapicError> {
         wrmsr(MSR_APICBASE, base | APICBASE_ENABLED | APICBASE_X2APIC);
         wrmsr(MSR_APIC_TPR, 0);
         wrmsr(MSR_APIC_LVT_TIMER, APIC_LVT_M);
+        // LINT0 carries the 8259s in virtual wire mode: masked, as in
+        // FreeBSD with APICs (ExtINT, so unmasking it would restore the
+        // legacy path). LINT1 stays as the firmware set it (NMI).
+        wrmsr(MSR_APIC_LVT_LINT0, APIC_LVT_M | APIC_LVT_DM_EXTINT);
+        wrmsr(MSR_APIC_LVT_ERROR, APIC_LVT_M);
         wrmsr(MSR_APIC_SVR, APIC_SVR_ENABLE | u64::from(spurious_vector));
     }
     Ok(())
@@ -96,7 +106,7 @@ pub fn lapic_id() -> u32 {
     // SAFETY: x2APIC MSRs exist; reading the ID has no side effects. If
     // the APIC is still in xAPIC mode this would #GP, but `lapic_init`
     // runs before anything asks.
-    unsafe { rdmsr(MSR_APIC_ID) as u32 }
+    unsafe { trunc_u32(rdmsr(MSR_APIC_ID)) } // x2APIC ids are 32 bits
 }
 
 /// Signals end of interrupt to this CPU's local APIC.
@@ -121,7 +131,7 @@ pub fn lapic_calibrate_timer() -> Result<u32, LapicError> {
 }
 
 fn lapic_measure_timer() -> Result<u32, LapicError> {
-    let count = (TIMER_FREQ / CALIBRATE_DIV) as u16;
+    let count = u16::try_from(TIMER_FREQ / CALIBRATE_DIV).expect("a calibration period fits the 16-bit counter");
     let elapsed;
     // SAFETY: x2APIC timer MSRs; the timer is masked, so counting down
     // raises no interrupt.
@@ -138,7 +148,7 @@ fn lapic_measure_timer() -> Result<u32, LapicError> {
             }
             ia32_pause();
         }
-        elapsed = u32::MAX - rdmsr(MSR_APIC_CCR_TIMER) as u32;
+        elapsed = u32::MAX - trunc_u32(rdmsr(MSR_APIC_CCR_TIMER)); // a 32-bit register
         wrmsr(MSR_APIC_ICR_TIMER, 0);
     }
     let freq = u64::from(elapsed) * u64::from(TIMER_FREQ) / u64::from(count);

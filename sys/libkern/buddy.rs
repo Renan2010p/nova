@@ -24,6 +24,13 @@
 //! tests store them in a vector. One byte of state per page records
 //! whether it heads a free block, and of which order.
 
+use crate::conv::{u64_from_usize, usize_from_u64};
+
+/// An order as stored in the state byte: below `FREE` (checked in `new`).
+fn order_u8(order: usize) -> u8 {
+    u8::try_from(order).expect("order < NORDER < 0x80")
+}
+
 /// "No page": the end of a free list.
 pub const NIL: u64 = u64::MAX;
 
@@ -53,7 +60,7 @@ impl<'a, L: Links, const NORDER: usize> Buddy<'a, L, NORDER> {
     /// Creates an allocator with nothing free. `state` holds one byte per
     /// page frame and must be zeroed.
     pub fn new(state: &'a mut [u8], links: L) -> Self {
-        assert!(NORDER > 0 && NORDER < FREE as usize);
+        assert!(NORDER > 0 && NORDER < usize::from(FREE));
         assert!(
             state.iter().all(|&s| s == 0),
             "buddy state must start zeroed"
@@ -85,7 +92,7 @@ impl<'a, L: Links, const NORDER: usize> Buddy<'a, L, NORDER> {
     /// Hands pages `[start, end)` to the allocator, as the largest aligned
     /// blocks that fit.
     pub fn add_range(&mut self, start: u64, end: u64) {
-        let end = end.min(self.state.len() as u64);
+        let end = end.min(u64_from_usize(self.state.len()));
         let mut pfn = start;
         while pfn < end {
             let mut order = NORDER - 1;
@@ -123,17 +130,17 @@ impl<'a, L: Links, const NORDER: usize> Buddy<'a, L, NORDER> {
             "buddy: misaligned block {pfn:#x}/{order}"
         );
         assert!(
-            pfn + (1 << order) <= self.state.len() as u64,
+            pfn + (1 << order) <= u64_from_usize(self.state.len()),
             "buddy: block {pfn:#x} out of range"
         );
         assert!(
-            self.state[pfn as usize] & FREE == 0,
+            self.state[usize_from_u64(pfn)] & FREE == 0,
             "buddy: double free of {pfn:#x}"
         );
         while order + 1 < NORDER {
             let buddy = pfn ^ (1 << order);
-            if buddy as usize >= self.state.len()
-                || self.state[buddy as usize] != FREE | order as u8
+            if usize_from_u64(buddy) >= self.state.len()
+                || self.state[usize_from_u64(buddy)] != FREE | order_u8(order)
             {
                 break;
             }
@@ -152,7 +159,7 @@ impl<'a, L: Links, const NORDER: usize> Buddy<'a, L, NORDER> {
             self.links.set(head, next, pfn);
         }
         self.heads[order] = pfn;
-        self.state[pfn as usize] = FREE | order as u8;
+        self.state[usize_from_u64(pfn)] = FREE | order_u8(order);
         self.nfree += 1 << order;
     }
 
@@ -168,12 +175,13 @@ impl<'a, L: Links, const NORDER: usize> Buddy<'a, L, NORDER> {
             let (nnext, _) = self.links.get(next);
             self.links.set(next, nnext, prev);
         }
-        self.state[pfn as usize] = 0;
+        self.state[usize_from_u64(pfn)] = 0;
         self.nfree -= 1 << order;
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
 

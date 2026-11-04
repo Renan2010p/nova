@@ -20,6 +20,7 @@
 //! kernel linked with `.dynamic` and `DT_HASH`, as the loader looks
 //! symbols up there.
 
+use libkern::conv::u64_from_usize;
 use core::fmt::{self, Write};
 
 use framework::BootInfo;
@@ -54,7 +55,7 @@ pub fn print_symbol(w: &mut dyn Write, addr: usize, is_return: bool) -> fmt::Res
     let back = u64::from(is_return);
     let found = KSYMS
         .get()
-        .and_then(|t| t.lookup((addr as u64).wrapping_sub(back)));
+        .and_then(|t| t.lookup(u64_from_usize(addr).wrapping_sub(back)));
     let Some((name, off)) = found else {
         return w.write_str("??");
     };

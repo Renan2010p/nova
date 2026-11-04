@@ -6,6 +6,7 @@ version = 4
 name = "amd64"
 version = "0.1.0"
 dependencies = [
+ "libkern",
  "mdi",
  "sys",
  "x86",
@@ -17,6 +18,7 @@ version = "0.1.0"
 dependencies = [
  "framework",
  "kern",
+ "libkern",
  "sys",
 ]
 
@@ -28,6 +30,7 @@ dependencies = [
  "libkern",
  "mdi",
  "riscv64",
+ "sys",
 ]
 
 [[package]]
@@ -57,6 +60,7 @@ version = "0.1.0"
 name = "mdi"
 version = "0.1.0"
 dependencies = [
+ "libkern",
  "sys",
 ]
 
@@ -70,6 +74,9 @@ dependencies = [
 [[package]]
 name = "sys"
 version = "0.1.0"
+dependencies = [
+ "libkern",
+]
 
 [[package]]
 name = "vm"
@@ -83,5 +90,6 @@ dependencies = [
 name = "x86"
 version = "0.1.0"
 dependencies = [
+ "libkern",
  "sys",
 ]

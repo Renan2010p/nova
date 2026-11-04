@@ -30,7 +30,7 @@ const CALIBRATE_SPIN_LIMIT: u32 = 1 << 26;
 /// Measures the TSC frequency (`init_TSC`). Returns it, or 0 if the
 /// i8254 did not count.
 pub fn tsc_calibrate() -> u64 {
-    let count = (TIMER_FREQ / CALIBRATE_DIV) as u16;
+    let count = u16::try_from(TIMER_FREQ / CALIBRATE_DIV).expect("a calibration period fits the 16-bit counter");
     i8254::ch2_start(count);
     let start = rdtsc();
     let mut spins = 0;
@@ -60,7 +60,8 @@ pub fn delay(us: u32) {
         let mut left = u64::from(us);
         while left > 0 {
             let chunk = left.min(50_000);
-            i8254::ch2_start((chunk * u64::from(TIMER_FREQ) / 1_000_000) as u16);
+            // 50 ms of the 1.19 MHz i8254 is 59659 counts: it fits.
+            i8254::ch2_start(u16::try_from(chunk * u64::from(TIMER_FREQ) / 1_000_000).expect("chunk <= 50 ms"));
             while !i8254::ch2_expired() {
                 ia32_pause();
             }

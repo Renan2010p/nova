@@ -39,6 +39,7 @@
 //!
 //! TODO(vm): PG_G for kernel pages, NX, PCID, and TLB shootdown IPIs (smp).
 
+use libkern::conv::{u64_from_usize, usize_from_u64};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use mdi::PhysRange;
@@ -94,7 +95,7 @@ pub(crate) fn kernel_pml4() -> u64 {
 pub(crate) fn mptramp_pml4() -> u64 {
     let tramp = MPTRAMP_PML4.load(Ordering::Relaxed);
     let (src, dst) = (dmap_table(kernel_pml4()), dmap_table(tramp));
-    for i in NPTEPG as usize / 2..NPTEPG as usize {
+    for i in usize_from_u64(NPTEPG) / 2..usize_from_u64(NPTEPG) {
         // SAFETY: both are page-table pages reached through the direct map;
         // the trampoline's is used by no CPU while it is being refreshed
         // (APs are started one at a time).
@@ -114,12 +115,12 @@ pub(crate) fn phys_to_dmap(pa: u64) -> usize {
         pa < dmap_limit(),
         "PHYS_TO_DMAP: {pa:#x} is not in the direct map"
     );
-    (DMAP_MIN_ADDRESS + pa) as usize
+    usize_from_u64(DMAP_MIN_ADDRESS + pa)
 }
 
 /// `DMAP_TO_PHYS`.
 pub(crate) fn dmap_to_phys(va: usize) -> u64 {
-    let va = va as u64;
+    let va = u64_from_usize(va);
     assert!(
         va >= DMAP_MIN_ADDRESS && va - DMAP_MIN_ADDRESS < dmap_limit(),
         "DMAP_TO_PHYS: {va:#x} is not in the direct map"
@@ -130,32 +131,32 @@ pub(crate) fn dmap_to_phys(va: usize) -> u64 {
 /// Takes `n` zeroed pages at `*physfree` (FreeBSD's `allocpages`).
 fn allocpages(physfree: &mut u64, n: u64) -> u64 {
     let pa = *physfree;
-    *physfree += n * PAGE_SIZE as u64;
+    *physfree += n * u64_from_usize(PAGE_SIZE);
     assert!(
         *physfree <= BOOT_MAPPED,
         "pmap_bootstrap: out of boot-mapped memory"
     );
     // SAFETY: [pa, physfree) is free RAM right after the loader's data, below
     // BOOT_MAPPED, so the loader maps it at KERNBASE and nothing uses it.
-    unsafe { core::ptr::write_bytes((KERNBASE + pa) as *mut u8, 0, (n as usize) * PAGE_SIZE) };
+    unsafe { core::ptr::write_bytes(core::ptr::with_exposed_provenance_mut::<u8>(usize_from_u64(KERNBASE + pa)), 0, usize_from_u64(n) * PAGE_SIZE) };
     pa
 }
 
 /// A page-table page, through the loader's `KERNBASE` mapping.
-fn table(pa: u64) -> &'static mut [u64; NPTEPG as usize] {
+fn table(pa: u64) -> &'static mut [u64; usize_from_u64(NPTEPG)] {
     // SAFETY: `pa` comes from `allocpages`: a page below BOOT_MAPPED, owned
     // by the page tables under construction, and only reached through the
     // reference returned here while they are built.
-    unsafe { &mut *((KERNBASE + pa) as *mut [u64; NPTEPG as usize]) }
+    unsafe { &mut *core::ptr::with_exposed_provenance_mut::<[u64; usize_from_u64(NPTEPG)]>(usize_from_u64(KERNBASE + pa)) }
 }
 
 /// Builds and loads the kernel's page tables. `physfree` is the first free
 /// physical page after the loader's data and is advanced past the
 /// page-table pages. Returns the end of the direct map's physical range.
 pub(crate) fn pmap_bootstrap(physfree: &mut u64, physmem: &[PhysRange]) -> u64 {
-    *physfree = physfree.next_multiple_of(PAGE_SIZE as u64);
+    *physfree = physfree.next_multiple_of(u64_from_usize(PAGE_SIZE));
     let top = physmem.last().map_or(0, |r| r.end);
-    let max = NDMPML4E as u64 * NPTEPG * NBPDP;
+    let max = u64_from_usize(NDMPML4E) * NPTEPG * NBPDP;
     let limit = top.max(DMAP_MIN_SIZE).next_multiple_of(NBPDP).min(max);
     let ndmpdp = limit / NBPDP;
 
@@ -166,7 +167,7 @@ pub(crate) fn pmap_bootstrap(physfree: &mut u64, physmem: &[PhysRange]) -> u64 {
     let kpdp_pa = allocpages(physfree, 1);
     let kpd_pa = allocpages(physfree, 1);
     for (i, pde) in table(kpd_pa).iter_mut().enumerate() {
-        *pde = (i as u64 * NBPDR) | PG_V | PG_RW | PG_PS;
+        *pde = (u64_from_usize(i) * NBPDR) | PG_V | PG_RW | PG_PS;
     }
     table(kpdp_pa)[KPDPI] = kpd_pa | PG_V | PG_RW;
     pml4[KPML4I] = kpdp_pa | PG_V | PG_RW;
@@ -178,7 +179,7 @@ pub(crate) fn pmap_bootstrap(physfree: &mut u64, physmem: &[PhysRange]) -> u64 {
     let ndmpml4 = ndmpdp.div_ceil(NPTEPG);
     let dmpdp_pa = allocpages(physfree, ndmpml4);
     let dmpdp =
-        |i: u64| &mut table(dmpdp_pa + (i / NPTEPG) * PAGE_SIZE as u64)[(i % NPTEPG) as usize];
+        |i: u64| &mut table(dmpdp_pa + (i / NPTEPG) * u64_from_usize(PAGE_SIZE))[usize_from_u64(i % NPTEPG)];
     if has_page1gb() {
         for i in 0..ndmpdp {
             *dmpdp(i) = (i * NBPDP) | PG_V | PG_RW | PG_PS;
@@ -186,21 +187,21 @@ pub(crate) fn pmap_bootstrap(physfree: &mut u64, physmem: &[PhysRange]) -> u64 {
     } else {
         let dmpd_pa = allocpages(physfree, ndmpdp);
         for i in 0..ndmpdp {
-            let pd_pa = dmpd_pa + i * PAGE_SIZE as u64;
+            let pd_pa = dmpd_pa + i * u64_from_usize(PAGE_SIZE);
             for (j, pde) in table(pd_pa).iter_mut().enumerate() {
-                *pde = (i * NBPDP + j as u64 * NBPDR) | PG_V | PG_RW | PG_PS;
+                *pde = (i * NBPDP + u64_from_usize(j) * NBPDR) | PG_V | PG_RW | PG_PS;
             }
             *dmpdp(i) = pd_pa | PG_V | PG_RW;
         }
     }
     for i in 0..ndmpml4 {
-        pml4[DMPML4I + i as usize] = (dmpdp_pa + i * PAGE_SIZE as u64) | PG_V | PG_RW;
+        pml4[DMPML4I + usize_from_u64(i)] = (dmpdp_pa + i * u64_from_usize(PAGE_SIZE)) | PG_V | PG_RW;
     }
 
     // The AP trampoline's tables: identity-map [0, 2 MiB) in the low half;
     // the kernel half is copied in by `mptramp_pml4` at AP start.
     let tramp = allocpages(physfree, 3);
-    let (tpdp, tpd) = (tramp + PAGE_SIZE as u64, tramp + 2 * PAGE_SIZE as u64);
+    let (tpdp, tpd) = (tramp + u64_from_usize(PAGE_SIZE), tramp + 2 * u64_from_usize(PAGE_SIZE));
     table(tpd)[0] = PG_V | PG_RW | PG_PS;
     table(tpdp)[0] = tpd | PG_V | PG_RW;
     table(tramp)[0] = tpdp | PG_V | PG_RW;
@@ -223,7 +224,7 @@ fn pindex(va: usize, level: u32) -> usize {
 
 /// A page-table page, through the direct map.
 fn dmap_table(pa: u64) -> *mut u64 {
-    phys_to_dmap(pa & PG_FRAME) as *mut u64
+    core::ptr::with_exposed_provenance_mut::<u64>(phys_to_dmap(pa & PG_FRAME))
 }
 
 /// `mdi::KernelMap::pmap_kenter`.
@@ -301,7 +302,7 @@ pub(crate) fn pmap_kextract(va: usize) -> Option<u64> {
         }
         if level == 0 || (level <= 2 && entry & PG_PS != 0) {
             let page_mask = (1u64 << (12 + 9 * level)) - 1;
-            return Some((entry & PG_FRAME & !page_mask) | (va as u64 & page_mask));
+            return Some((entry & PG_FRAME & !page_mask) | (u64_from_usize(va) & page_mask));
         }
         table = dmap_table(entry);
     }
@@ -309,13 +310,13 @@ pub(crate) fn pmap_kextract(va: usize) -> Option<u64> {
 }
 
 /// First PML4 slot of the kernel half.
-const NUPML4E: usize = NPTEPG as usize / 2;
+const NUPML4E: usize = usize_from_u64(NPTEPG) / 2;
 
 /// `mdi::UserMode::pmap_pinit`: a new, empty user address space.
 pub(crate) fn pmap_pinit(alloc: &mut dyn FnMut() -> Option<u64>) -> Option<u64> {
     let root = alloc()?;
     let (src, dst) = (dmap_table(kernel_pml4()), dmap_table(root));
-    for i in 0..NPTEPG as usize {
+    for i in 0..usize_from_u64(NPTEPG) {
         let e = if i < NUPML4E { 0 } else {
             // SAFETY: the kernel's PML4, through the direct map; its upper
             // half is fixed after the bootstrap.
@@ -339,8 +340,8 @@ pub(crate) unsafe fn pmap_enter_user(
     prot: mdi::Prot,
     alloc: &mut dyn FnMut() -> Option<u64>,
 ) -> bool {
-    assert!(va < crate::usermode::VM_MAXUSER_ADDRESS && va.is_multiple_of(PAGE_SIZE as u64));
-    let va = va as usize;
+    assert!(va < crate::usermode::VM_MAXUSER_ADDRESS && va.is_multiple_of(u64_from_usize(PAGE_SIZE)));
+    let va = usize_from_u64(va);
     let mut table = dmap_table(root);
     for level in (1..=3).rev() {
         // SAFETY: `table` is a page-table page of `root`'s user half,
@@ -379,7 +380,7 @@ pub(crate) unsafe fn pmap_release(root: u64, free: &mut dyn FnMut(u64)) {
                 // CPU uses any more (the caller's contract).
                 let e = unsafe { table.add(i).read() };
                 if e & PG_V != 0 {
-                    release(e & PG_FRAME, level - 1, NPTEPG as usize, free);
+                    release(e & PG_FRAME, level - 1, usize_from_u64(NPTEPG), free);
                 }
             }
         }

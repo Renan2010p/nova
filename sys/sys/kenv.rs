@@ -80,6 +80,7 @@ impl<'a> StaticEnv<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::StaticEnv;
 

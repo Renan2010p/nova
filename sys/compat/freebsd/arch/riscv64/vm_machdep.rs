@@ -29,7 +29,7 @@ pub(crate) fn cpu_set_syscall_retval(regs: &mut UserRegs, result: Result<[u64; 2
             regs.x[T0] = 0;
         }
         Err(errno) => {
-            regs.x[A0] = errno as u64;
+            regs.x[A0] = u64::from(errno.unsigned_abs());
             regs.x[T0] = 1;
         }
     }

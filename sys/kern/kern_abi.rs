@@ -36,8 +36,6 @@
 //! | numbers errors and signals                   | decides which error, and acts on signals    |
 //! | says which signal a fault raises             | delivers it (for now: kills the process)    |
 
-use alloc::vec::Vec;
-
 use framework::sync::MtxSpin;
 use framework::user::{UserFault, UserRegs, VmSpace};
 use sys::elf::Ehdr;
@@ -131,21 +129,29 @@ pub trait SysEntVec: Sync {
     fn signal_number(&self, sig: Signal) -> i32;
 }
 
+/// Most ABIs a kernel can be built with (a fixed table, as FreeBSD's
+/// `elf_brand_list[MAX_BRANDS]`).
+pub const MAX_BRANDS: usize = 8;
+
 /// The ABIs this kernel is built with, in the order they were registered.
-static SYSVECS: MtxSpin<Vec<&'static dyn SysEntVec>> = MtxSpin::new(Vec::new());
+static SYSVECS: MtxSpin<[Option<&'static dyn SysEntVec>; MAX_BRANDS]> = MtxSpin::new([None; MAX_BRANDS]);
 
 /// Adds an ABI (`elf_insert_brand_entry`). Called by the kernel binary
 /// before `mi_startup`.
+///
+/// # Panics
+///
+/// If [`MAX_BRANDS`] ABIs are registered already: the kernel binary is
+/// misconfigured.
 pub fn abi_register(sv: &'static dyn SysEntVec) {
-    SYSVECS.lock().push(sv);
+    let mut table = SYSVECS.lock();
+    let Some(slot) = table.iter_mut().find(|s| s.is_none()) else {
+        panic!("abi_register: more than {MAX_BRANDS} ABIs");
+    };
+    *slot = Some(sv);
 }
 
 /// The ABI that runs `image`: the first registered one that accepts it.
 pub fn abi_select(image: &ExecImage<'_>) -> Option<&'static dyn SysEntVec> {
-    SYSVECS.lock().iter().copied().find(|sv| sv.accepts(image))
-}
-
-/// The names of the registered ABIs.
-pub fn abi_names() -> Vec<&'static str> {
-    SYSVECS.lock().iter().map(|sv| sv.name()).collect()
+    SYSVECS.lock().iter().flatten().copied().find(|sv| sv.accepts(image))
 }

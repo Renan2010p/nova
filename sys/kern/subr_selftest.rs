@@ -19,18 +19,21 @@
 //! test: `pf` (a kernel page fault) or `stack` (a kernel stack overflow,
 //! caught by the guard page).
 
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use libkern::conv::usize_from_u32;
+
+use framework::mm::{KArc, KBox, KVec, M_WAITOK, M_ZERO, MallocType};
 use framework::sync::{Mutex, WaitQueue};
 use framework::task::{self, Task};
 
 use crate::kern_environment::StaticEnv;
 use crate::kern_kthread::kthread_add;
 use crate::kern_synch::pause;
-use crate::{kern_clock, printf};
+use crate::printf;
+
+/// The self-tests' memory, so their accounting is checked on its own.
+static M_SELFTEST: MallocType = MallocType::new("selftest");
 
 /// Runs every non-fatal self-test.
 pub fn run(verbose: bool, hz: u32) {
@@ -42,37 +45,61 @@ pub fn run(verbose: bool, hz: u32) {
 
 /// Waits for a thread to exit (there is no `kthread_join` in FreeBSD;
 /// tests poll, as `kthread_shutdown` does).
-fn join(t: &Arc<Task>) {
+fn join(t: &KArc<Task>) {
     while !t.has_exited() {
         pause("join", 1);
     }
 }
 
-fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> Arc<Task> {
-    kthread_add(name, f).unwrap_or_else(|| panic!("selftest: cannot create thread {name}"))
+fn spawn(name: &'static str, f: impl FnOnce() + Send + 'static) -> KArc<Task> {
+    match kthread_add(name, f) {
+        Ok(t) => t,
+        Err(e) => panic!("selftest: cannot create thread {name}: {e:?}"),
+    }
 }
 
-/// The heap: slab objects, a large block, and freed memory coming back.
+/// A self-test allocation; failing one is a failed test.
+fn must<T>(r: Result<T, framework::mm::AllocError>, what: &str) -> T {
+    match r {
+        Ok(v) => v,
+        Err(_) => panic!("selftest: no memory for {what}"),
+    }
+}
+
+/// The heap: slab objects, a large block, growth, zeroing, and every byte
+/// accounted to its malloc type and given back.
 fn kmem(verbose: bool) {
     let before = framework::mm::vm_phys::free_count();
     {
-        let v: Vec<u64> = (1..=1000).collect();
-        let big: Box<[u8]> = alloc::vec![0xa5; 64 * 1024].into_boxed_slice();
-        let small: Vec<Box<u32>> = (0..256).map(Box::new).collect();
-        assert_eq!(v.iter().sum::<u64>(), 500_500, "selftest: kmem: Vec");
-        assert!(
-            big.iter().all(|&b| b == 0xa5),
-            "selftest: kmem: large block"
-        );
-        assert!(
-            small.iter().zip(0..).all(|(b, i)| **b == i),
-            "selftest: kmem: slab"
-        );
+        let mut v: KVec<u64> = KVec::new(&M_SELFTEST);
+        for i in 1..=1000 {
+            must(v.push(i, M_WAITOK), "KVec::push");
+        }
+        let big = must(KBox::new([0xa5u8; 64 * 1024], &M_SELFTEST, M_WAITOK), "a large block");
+        let mut small: KVec<KBox<u32>> = must(KVec::with_capacity(256, &M_SELFTEST, M_WAITOK), "KVec");
+        for i in 0..256 {
+            must(small.push(must(KBox::new(i, &M_SELFTEST, M_WAITOK), "KBox"), M_WAITOK), "KVec::push");
+        }
+        let zeroed: KVec<u8> = {
+            let mut z = must(KVec::with_capacity(4096, &M_SELFTEST, M_WAITOK | M_ZERO), "KVec");
+            must(z.extend_from_slice(&[0; 4096], M_WAITOK), "KVec::extend_from_slice");
+            z
+        };
+        let shared = must(KArc::new(7u64, &M_SELFTEST, M_WAITOK), "KArc");
+        let again = shared.clone();
+        assert_eq!(v.iter().sum::<u64>(), 500_500, "selftest: kmem: KVec");
+        assert!(big.iter().all(|&b| b == 0xa5), "selftest: kmem: large block");
+        assert!(small.iter().zip(0..).all(|(b, i)| **b == i), "selftest: kmem: slab");
+        assert!(zeroed.iter().all(|&b| b == 0), "selftest: kmem: M_ZERO");
+        assert!(KArc::ptr_eq(&shared, &again) && *again == 7, "selftest: kmem: KArc");
+        assert!(M_SELFTEST.inuse() > 64 * 1024, "selftest: kmem: accounting");
     }
+    assert_eq!(M_SELFTEST.inuse(), 0, "selftest: kmem: memory not given back");
     let kept = before.saturating_sub(framework::mm::vm_phys::free_count());
     if verbose {
         printf!(
-            "selftest: kmem: Box and Vec work ({} pages kept by the heap's slabs)\n",
+            "selftest: kmem: KBox, KVec and KArc work; {} allocations, all freed ({} pages kept by the heap's slabs)\n",
+            M_SELFTEST.calls(),
             kept
         );
     }
@@ -83,69 +110,71 @@ fn kthreads(verbose: bool) {
     struct PingPong {
         turn: AtomicU32,
         wq: WaitQueue,
-        log: Mutex<Vec<&'static str>>,
+        log: Mutex<KVec<&'static str>>,
     }
     const ROUNDS: u32 = 3;
-    let pp = Arc::new(PingPong {
-        turn: AtomicU32::new(0),
-        wq: WaitQueue::new(),
-        log: Mutex::new(Vec::new()),
-    });
-    let threads: Vec<Arc<Task>> = [("ping", 0), ("pong", 1)]
-        .into_iter()
-        .map(|(name, me)| {
-            let pp = pp.clone();
-            spawn(name, move || {
-                for _ in 0..ROUNDS {
-                    pp.wq
-                        .wait_until(|| pp.turn.load(Ordering::Acquire) % 2 == me);
-                    pp.log.lock().push(name);
-                    pp.turn.fetch_add(1, Ordering::Release);
-                    pp.wq.wake_all();
-                }
-            })
+    let pp = must(
+        KArc::new(
+            PingPong {
+                turn: AtomicU32::new(0),
+                wq: WaitQueue::new(),
+                log: Mutex::new(KVec::new(&M_SELFTEST)),
+            },
+            &M_SELFTEST,
+            M_WAITOK,
+        ),
+        "the ping pong state",
+    );
+    let threads = [("ping", 0), ("pong", 1)].map(|(name, me)| {
+        let pp = pp.clone();
+        spawn(name, move || {
+            for _ in 0..ROUNDS {
+                pp.wq.wait_until(|| pp.turn.load(Ordering::Acquire) % 2 == me);
+                must(pp.log.lock().push(name, M_WAITOK), "the log");
+                pp.turn.fetch_add(1, Ordering::Release);
+                pp.wq.wake_all();
+            }
         })
-        .collect();
+    });
     threads.iter().for_each(join);
     let log = pp.log.lock();
     assert!(
-        log.len() == 2 * ROUNDS as usize && log.chunks(2).all(|c| c == ["ping", "pong"]),
+        log.len() == 2 * usize::try_from(ROUNDS).expect("3 fits in usize") && log.chunks(2).all(|c| c == ["ping", "pong"]),
         "selftest: kthreads: wrong order {:?}",
         *log
     );
     if verbose {
-        let tids: Vec<u64> = threads.iter().map(|t| t.tid()).collect();
-        printf!(
-            "selftest: kthreads: tids {:?} took turns: {}\n",
-            tids,
-            log.join(" ")
-        );
+        let tids = threads.each_ref().map(|t| t.tid());
+        printf!("selftest: kthreads: tids {:?} took turns:", tids);
+        for name in log.iter() {
+            printf!(" {}", name);
+        }
+        printf!("\n");
     }
 }
 
 /// Threads contending for a sleep mutex.
 fn mutex(verbose: bool) {
-    const THREADS: u64 = 3;
+    const THREADS: usize = 3;
     const ITERATIONS: u64 = 500;
-    let counter = Arc::new(Mutex::new(0u64));
-    let threads: Vec<Arc<Task>> = (0..THREADS)
-        .map(|_| {
-            let counter = counter.clone();
-            spawn("mtxtest", move || {
-                for i in 0..ITERATIONS {
-                    let mut c = counter.lock();
-                    *c += 1;
-                    if i % 50 == 0 {
-                        // Yield holding the mutex: the others must block.
-                        task::yield_now();
-                    }
+    let counter = must(KArc::new(Mutex::new(0u64), &M_SELFTEST, M_WAITOK), "the counter");
+    let threads: [KArc<Task>; THREADS] = core::array::from_fn(|_| {
+        let counter = counter.clone();
+        spawn("mtxtest", move || {
+            for i in 0..ITERATIONS {
+                let mut c = counter.lock();
+                *c += 1;
+                if i % 50 == 0 {
+                    // Yield holding the mutex: the others must block.
+                    task::yield_now();
                 }
-            })
+            }
         })
-        .collect();
+    });
     threads.iter().for_each(join);
     let total = *counter.lock();
-    assert_eq!(total, THREADS * ITERATIONS, "selftest: mutex: lost updates");
+    let expected = ITERATIONS * u64::try_from(THREADS).expect("3 fits in u64");
+    assert_eq!(total, expected, "selftest: mutex: lost updates");
     if verbose {
         printf!(
             "selftest: mutex: {} threads x {} increments = {}\n",
@@ -157,63 +186,55 @@ fn mutex(verbose: bool) {
 }
 
 /// Threads that never yield must still be preempted by the clock. There
-/// is one spinner per CPU, so no CPU is left for this thread unless the
-/// clock takes one away from a spinner.
+/// are more spinners than CPUs, and a spinner never gives its CPU up: if
+/// every one of them gets to run, the clock took CPUs away from some.
 fn preemption(verbose: bool, hz: u32) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let spins = Arc::new(AtomicU64::new(0));
-    let running = Arc::new(AtomicU32::new(0));
-    let ncpus = framework::cpu::mp_ncpus();
-    let spinners: Vec<Arc<Task>> = (0..ncpus)
-        .map(|_| {
-            let (stop, spins, running) = (stop.clone(), spins.clone(), running.clone());
-            spawn("spinner", move || {
-                running.fetch_add(1, Ordering::AcqRel);
-                while !stop.load(Ordering::Acquire) {
-                    spins.fetch_add(1, Ordering::Relaxed);
-                    core::hint::spin_loop();
-                }
-            })
-        })
-        .collect();
-    // Wait until the spinners hold every other CPU, so that none is idle
-    // when this thread wakes up.
-    while running.load(Ordering::Acquire) < ncpus - 1 {
-        task::yield_now();
+    struct Spin {
+        stop: AtomicBool,
+        /// How far each spinner got.
+        spins: KVec<AtomicU64>,
     }
-    let start = kern_clock::ticks();
+    let ncpus = framework::cpu::mp_ncpus();
+    let nspinners = usize_from_u32(ncpus) + 1;
+    let mut spins = must(KVec::with_capacity(nspinners, &M_SELFTEST, M_WAITOK), "the counters");
+    for _ in 0..nspinners {
+        must(spins.push(AtomicU64::new(0), M_WAITOK), "the counters");
+    }
+    let st = must(
+        KArc::new(Spin { stop: AtomicBool::new(false), spins }, &M_SELFTEST, M_WAITOK),
+        "the spinners' state",
+    );
+    let quantum = (hz / 10).max(1);
     let nivcsw = task::involuntary_switches();
-    // While this thread sleeps the last spinner takes this CPU too. Waking
-    // up only lets us run again if the clock preempts one of them.
-    pause("preempt", 1);
-    let back = kern_clock::ticks();
-    let preempted = task::involuntary_switches() - nivcsw;
-    stop.store(true, Ordering::Release);
+    let mut spinners: KVec<KArc<Task>> = must(KVec::with_capacity(nspinners, &M_SELFTEST, M_WAITOK), "the spinner list");
+    for i in 0..nspinners {
+        let st = st.clone();
+        let t = spawn("spinner", move || {
+            let Some(mine) = st.spins.get(i) else { return };
+            while !st.stop.load(Ordering::Acquire) {
+                mine.fetch_add(1, Ordering::Relaxed);
+                core::hint::spin_loop();
+            }
+        });
+        must(spinners.push(t, M_WAITOK), "the spinner list");
+    }
+    // While this thread sleeps, the spinners have every CPU and one more
+    // spinner than CPUs: that one runs only if the clock preempts another.
+    let ticks = 5 * quantum;
+    pause("preempt", ticks);
+    st.stop.store(true, Ordering::Release);
     spinners.iter().for_each(join);
+    let preempted = task::involuntary_switches() - nivcsw;
+    let starved = st.spins.iter().filter(|s| s.load(Ordering::Relaxed) == 0).count();
     assert!(
-        spins.load(Ordering::Relaxed) > 0,
-        "selftest: preemption: the spinners never ran"
+        starved == 0,
+        "selftest: preemption: {starved} of {nspinners} spinners never ran on {ncpus} CPU(s)"
     );
-    assert!(
-        preempted > 0,
-        "selftest: preemption: back without any involuntary switch"
-    );
-    // Every CPU's slice ends within one quantum, so the first one to end
-    // lets this thread back in at most that long after it woke up.
-    let quantum = u64::from((hz / 10).max(1));
-    assert!(
-        back - start <= quantum + 1,
-        "selftest: preemption: waited {} ticks",
-        back - start
-    );
+    assert!(preempted > 0, "selftest: preemption: every spinner ran, but no involuntary switch");
     if verbose {
         printf!(
-            "selftest: preemption: {} busy thread(s) on {} CPU(s); back after {} tick(s) through {} involuntary switch(es) (quantum {})\n",
-            spinners.len(),
-            framework::cpu::mp_ncpus(),
-            back - start,
-            preempted,
-            quantum
+            "selftest: preemption: {} busy threads shared {} CPU(s) for {} ticks through {} involuntary switch(es) (quantum {})\n",
+            nspinners, ncpus, ticks, preempted, quantum
         );
     }
 }

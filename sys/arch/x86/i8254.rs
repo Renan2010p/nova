@@ -43,8 +43,9 @@ pub fn ch2_start(count: u16) {
         let v = inb(NMISC);
         outb(NMISC, (v & !NMISC_SPKR) | NMISC_GATE2);
         outb(TIMER_MODE, TIMER_SEL2_ONESHOT);
-        outb(TIMER_CNTR2, count as u8);
-        outb(TIMER_CNTR2, (count >> 8) as u8); // counting starts here
+        let [lo, hi] = count.to_le_bytes();
+        outb(TIMER_CNTR2, lo);
+        outb(TIMER_CNTR2, hi); // counting starts here
     }
 }
 

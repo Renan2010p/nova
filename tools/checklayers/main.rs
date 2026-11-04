@@ -33,6 +33,12 @@
 //! * R9 personalities (`compat/*`) are leaves: only `conf` depends on them;
 //! * R13 no machine-dependent vocabulary (`apic`, `amd64`, `msr`, ...) in
 //!   identifiers of MI code, outside `arch/` directories;
+//! * R16 no hidden allocation: no crate links Rust's `alloc` (no
+//!   `extern crate alloc`) or installs a `#[global_allocator]`; memory comes
+//!   only from `framework::mm::malloc`, explicitly, as a `Result`;
+//! * R17 every directory under sys/ that holds a subsystem is a crate of
+//!   its own (with its dependencies declared, so R1 sees them), and its
+//!   root documents what it offers (`//!`);
 //! * R15 no ABI vocabulary (`freebsd`, `linux`, ...) in identifiers
 //!   outside the personalities (`compat/*`) and `conf`: the kernel knows
 //!   no ABI, so running another one only takes a new `sys/compat/<abi>`.
@@ -263,18 +269,25 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
         (_, "mdi") => ("lib.rs", "#![deny(unsafe_code)]"),
         _ => ("lib.rs", "#![forbid(unsafe_code)]"),
     };
-    if !c.trusted {
-        let root = dir.join(root_name);
-        if !read(&root)?.contains(attr) {
-            report.err(
-                &root,
-                1,
-                format!(
-                    "R4: `{}` is not in the trusted base and must declare {attr}",
-                    c.name
-                ),
-            );
-        }
+    let root = dir.join(root_name);
+    let root_src = read(&root)?;
+    // R17: every crate is a small module whose root says what it is.
+    if !root_src.lines().any(|l| l.starts_with("//!")) {
+        report.err(
+            &root,
+            1,
+            format!("R17: `{}` must document itself at its root (`//!`): what it offers, what it depends on", c.name),
+        );
+    }
+    if !c.trusted && !root_src.contains(attr) {
+        report.err(
+            &root,
+            1,
+            format!(
+                "R4: `{}` is not in the trusted base and must declare {attr}",
+                c.name
+            ),
+        );
     }
 
     for file in &files {
@@ -329,6 +342,14 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
                         );
                     }
                 }
+            }
+            if line.contains("extern crate alloc") || line.contains("global_allocator") {
+                report.err(
+                    file,
+                    n,
+                    "R16: hidden allocation; use framework::mm (KBox, KVec, KArc) with a \
+                     MallocType and M_WAITOK/M_NOWAIT",
+                );
             }
             if line
                 .split_whitespace()

@@ -20,6 +20,7 @@
 //! call FreeBSD has but Nova does not implement yet fails with `ENOSYS`
 //! (a FreeBSD program may handle that), logged on a verbose boot.
 
+use libkern::conv::{usize_from_u32, trunc_i32};
 use kern::kern_proc::{PID_INIT, Proc};
 use kern::{printf, sys_generic};
 use sys::errno::Errno;
@@ -46,19 +47,20 @@ pub(crate) fn syscall(p: &Proc, code: u64, args: &[u64; 6]) -> SyscallResult {
         return nosys(p, code);
     };
     match code {
-        SYS__exit => SyscallResult::Exit(args[0] as i32),
-        SYS_write => match sys_generic::kern_write(p, args[0] as i32, args[1], args[2]) {
+        // `int` arguments are the low 32 bits of their register.
+        SYS__exit => SyscallResult::Exit(trunc_i32(args[0])),
+        SYS_write => match sys_generic::kern_write(p, trunc_i32(args[0]), args[1], args[2]) {
             Ok(n) => SyscallResult::Ok([n, 0]),
             Err(e) => SyscallResult::Err(e),
         },
-        c if c >= SYS_MAXSYSCALL || is_nosys(SYSCALLNAMES[c as usize]) => nosys(p, u64::from(c)),
+        c if c >= SYS_MAXSYSCALL || is_nosys(SYSCALLNAMES[usize_from_u32(c)]) => nosys(p, u64::from(c)),
         c => {
             if kern::init_main::bootverbose() {
                 printf!(
                     "pid {} comm {}: {} ({}) not implemented\n",
                     p.pid,
-                    p.comm,
-                    SYSCALLNAMES[c as usize],
+                    p.comm(),
+                    SYSCALLNAMES[usize_from_u32(c)],
                     c
                 );
             }
@@ -76,7 +78,7 @@ fn is_nosys(name: &str) -> bool {
 /// (the default `kern.lognosys`).
 fn nosys(p: &Proc, code: u64) -> SyscallResult {
     if p.pid == PID_INIT {
-        printf!("pid {} comm {}: nosys {}\n", p.pid, p.comm, code);
+        printf!("pid {} comm {}: nosys {}\n", p.pid, p.comm(), code);
     }
     SyscallResult::Signal(Signal::SIGSYS)
 }

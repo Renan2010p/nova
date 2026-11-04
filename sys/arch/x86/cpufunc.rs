@@ -18,6 +18,7 @@
 //! a safe `fn` (`cli`, `hlt`, `pause`). One that can (port I/O may drive a
 //! DMA-capable device) is an `unsafe fn` with its contract documented.
 
+use libkern::conv::trunc_u32;
 use core::arch::asm;
 
 /// `cli`: disables maskable interrupts on this CPU.
@@ -88,7 +89,7 @@ pub unsafe fn rdmsr(msr: u32) -> u64 {
 pub unsafe fn wrmsr(msr: u32, v: u64) {
     // SAFETY: forwarded to the caller, see `# Safety`.
     unsafe {
-        asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32,
+        asm!("wrmsr", in("ecx") msr, in("eax") trunc_u32(v), in("edx") trunc_u32(v >> 32),
              options(nostack, preserves_flags))
     }
 }
@@ -152,7 +153,7 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
             options(nomem, nostack, preserves_flags),
         )
     }
-    [eax, ebx as u32, ecx, edx]
+    [eax, trunc_u32(ebx), ecx, edx]
 }
 
 /// Reads `%cr2`, the faulting address of the last page fault.

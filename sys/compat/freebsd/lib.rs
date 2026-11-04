@@ -50,7 +50,6 @@ mod freebsd_syscalls;
 mod freebsd_sysent;
 mod freebsd_sysvec;
 
-extern crate alloc;
 
 pub use freebsd_sysvec::ELF64_FREEBSD_SYSVEC;
 

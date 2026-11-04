@@ -23,6 +23,7 @@
 //! u64 symtab size | symtab | u64 strtab size | strtab
 //! ```
 
+use libkern::conv::{usize_from_u64, usize_from_u32};
 use crate::bytes::{read_u32, read_u64};
 
 /// `\x7fELF`.
@@ -107,7 +108,7 @@ pub struct Phdr {
 
 /// The program headers of `image`, as far as they lie inside it.
 pub fn phdrs<'a>(image: &'a [u8], ehdr: &Ehdr) -> impl Iterator<Item = Phdr> + 'a {
-    let (phoff, phnum, phentsize) = (ehdr.phoff as usize, ehdr.phnum as usize, ehdr.phentsize as usize);
+    let (phoff, phnum, phentsize) = (usize_from_u64(ehdr.phoff), usize::from(ehdr.phnum), usize::from(ehdr.phentsize));
     (0..phnum).filter_map(move |i| {
         let ph = image.get(phoff.checked_add(i.checked_mul(phentsize)?)?..)?.get(..ELF64_PHDR_SIZE)?;
         Some(Phdr {
@@ -151,8 +152,8 @@ pub fn segment_notes(seg: &[u8]) -> impl Iterator<Item = Note<'_>> + '_ {
     core::iter::from_fn(move || {
         let align4 = |n: usize| n.checked_add(3).map(|n| n & !3);
         let (namesz, descsz, kind) = (
-            read_u32(seg, off)? as usize,
-            read_u32(seg, off.checked_add(4)?)? as usize,
+            usize_from_u32(read_u32(seg, off)?),
+            usize_from_u32(read_u32(seg, off.checked_add(4)?)?),
             read_u32(seg, off.checked_add(8)?)?,
         );
         let name_at = off.checked_add(12)?;
@@ -227,7 +228,7 @@ impl<'a> KSymTab<'a> {
 
     /// The name of a symbol.
     pub fn name(&self, sym: &Sym) -> Option<&'a str> {
-        let rest = self.strtab.get(sym.name as usize..)?;
+        let rest = self.strtab.get(usize_from_u32(sym.name)..)?;
         let end = rest.iter().position(|&b| b == 0)?;
         core::str::from_utf8(&rest[..end])
             .ok()
@@ -257,6 +258,7 @@ impl<'a> KSymTab<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
 

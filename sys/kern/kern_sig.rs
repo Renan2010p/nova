@@ -35,7 +35,7 @@ pub fn sigexit(p: &Proc, sig: Signal) -> ExitStatus {
         crate::log!(
             "pid {} ({}), jid {}, uid {}: exited on signal {} ({}{})\n",
             p.pid,
-            p.comm,
+            p.comm(),
             p.jid,
             p.uid,
             p.abi.signal_number(sig),

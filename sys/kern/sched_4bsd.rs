@@ -22,26 +22,26 @@
 //! queues and CPU affinity (smp); then ULE (`sched_ule.c`), FreeBSD's
 //! default.
 
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use framework::MAXCPU;
 use framework::pcpu::CpuLocal;
 use framework::sync::MtxSpin;
-use framework::task::{self, Scheduler, Task};
+use framework::mm::KArc;
+use framework::task::{self, Scheduler, Task, TaskQueue};
 
 struct Sched4bsd {
-    runq: MtxSpin<VecDeque<Arc<Task>>>,
+    /// Runnable threads, linked through themselves: no allocation here.
+    runq: MtxSpin<TaskQueue>,
 }
 
 impl Scheduler for Sched4bsd {
-    fn enqueue(&self, task: Arc<Task>) {
+    fn enqueue(&self, task: KArc<Task>) {
         self.runq.lock().push_back(task);
     }
 
-    fn pick_next(&self) -> Option<Arc<Task>> {
+    fn pick_next(&self) -> Option<KArc<Task>> {
         let next = self.runq.lock().pop_front();
         if next.is_some() {
             // The chosen thread runs on this CPU with a fresh slice, as
@@ -54,7 +54,7 @@ impl Scheduler for Sched4bsd {
 }
 
 static SCHED: Sched4bsd = Sched4bsd {
-    runq: MtxSpin::new(VecDeque::new()),
+    runq: MtxSpin::new(TaskQueue::new()),
 };
 
 /// Ticks a thread may run before being preempted (`sched_quantum`).

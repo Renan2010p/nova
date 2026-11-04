@@ -21,6 +21,7 @@
 //! Everything below is private to the framework: services get pages only
 //! as [`Frame`](super::Frame)s and [`Segment`](super::Segment)s.
 
+use libkern::conv::{u64_from_usize, usize_from_u64};
 use libkern::buddy::{Buddy, Links};
 use mdi::{DirectMap, PhysRange};
 
@@ -37,7 +38,7 @@ struct DmapLinks;
 
 impl Links for DmapLinks {
     fn get(&mut self, pfn: u64) -> (u64, u64) {
-        let p = Md::phys_to_dmap(pfn << PAGE_SHIFT) as *const u64;
+        let p = core::ptr::with_exposed_provenance::<u64>(Md::phys_to_dmap(pfn << PAGE_SHIFT));
         // SAFETY: `pfn` heads a free block: the allocator owns that page and
         // nothing else reads or writes it. The direct map makes it readable
         // (mdi::DirectMap contract), and the address is page aligned.
@@ -45,7 +46,7 @@ impl Links for DmapLinks {
     }
 
     fn set(&mut self, pfn: u64, next: u64, prev: u64) {
-        let p = Md::phys_to_dmap(pfn << PAGE_SHIFT) as *mut u64;
+        let p = core::ptr::with_exposed_provenance_mut::<u64>(Md::phys_to_dmap(pfn << PAGE_SHIFT));
         // SAFETY: as in `get`; the page is being put on (or is on) a free
         // list, so the allocator is its only user.
         unsafe {
@@ -62,10 +63,10 @@ pub(crate) fn init(physavail: &[PhysRange]) {
     let mut vm = VM_PHYS.lock();
     assert!(vm.is_none(), "vm_phys: initialized twice");
 
-    let first_pfn = |r: &PhysRange| r.start.div_ceil(PAGE_SIZE as u64);
-    let end_pfn = |r: &PhysRange| r.end.min(Md::dmap_limit()) / PAGE_SIZE as u64;
+    let first_pfn = |r: &PhysRange| r.start.div_ceil(u64_from_usize(PAGE_SIZE));
+    let end_pfn = |r: &PhysRange| r.end.min(Md::dmap_limit()) / u64_from_usize(PAGE_SIZE);
     let npages = physavail.iter().map(end_pfn).max().unwrap_or(0);
-    let state_pages = (npages as usize).div_ceil(PAGE_SIZE) as u64;
+    let state_pages = u64_from_usize(usize_from_u64(npages).div_ceil(PAGE_SIZE));
 
     // Steal room for the state array from the start of the first range
     // that has it (FreeBSD's vm_page_startup does the same for vm_page_array).
@@ -75,13 +76,13 @@ pub(crate) fn init(physavail: &[PhysRange]) {
         .find(|(_, r)| end_pfn(r).saturating_sub(first_pfn(r)) > state_pages)
         .map(|(i, r)| (i, first_pfn(r)))
         .expect("vm_phys: no physical memory for the page state array");
-    let state_va = Md::phys_to_dmap(state_pfn << PAGE_SHIFT) as *mut u8;
+    let state_va = core::ptr::with_exposed_provenance_mut::<u8>(Md::phys_to_dmap(state_pfn << PAGE_SHIFT));
     // SAFETY: these pages are available RAM (physavail) inside the direct
     // map, taken out of the allocator below, so this slice is their only
     // user for the life of the kernel. Zeroed before use.
     let state = unsafe {
-        core::ptr::write_bytes(state_va, 0, npages as usize);
-        core::slice::from_raw_parts_mut(state_va, npages as usize)
+        core::ptr::write_bytes(state_va, 0, usize_from_u64(npages));
+        core::slice::from_raw_parts_mut(state_va, usize_from_u64(npages))
     };
 
     let mut buddy = Buddy::new(state, DmapLinks);

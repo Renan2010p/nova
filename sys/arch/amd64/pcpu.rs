@@ -24,6 +24,7 @@
 //! this CPU's TSS. Assembly reads them at fixed offsets, hence
 //! `#[repr(C)]`.
 
+use libkern::conv::{u64_from_usize, usize_from_u32, trunc_u32};
 use core::arch::asm;
 use core::mem::offset_of;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -71,7 +72,7 @@ static PCPU: [Pcpu; MAXCPU] = {
     }; MAXCPU];
     let mut i = 0;
     while i < MAXCPU {
-        a[i].cpuid = i as u32;
+        a[i].cpuid = trunc_u32(u64_from_usize(i)); // i < MAXCPU
         i += 1;
     }
     a
@@ -80,11 +81,11 @@ static PCPU: [Pcpu; MAXCPU] = {
 /// Makes `%gs` point at CPU `cpuid`'s area. Called by each CPU on itself,
 /// first thing: `hammer_time` for the boot CPU, `init_secondary` for APs.
 pub(crate) fn pcpu_init(cpuid: u32) {
-    let pcpu = &PCPU[cpuid as usize];
+    let pcpu = &PCPU[usize_from_u32(cpuid)];
     // SAFETY: MSR_GSBASE exists on every amd64 CPU. The new base points at
     // a static that lives forever and whose `cpuid` is this CPU's, which
     // is exactly the invariant `curcpu()` relies on.
-    unsafe { wrmsr(MSR_GSBASE, pcpu as *const Pcpu as u64) }
+    unsafe { wrmsr(MSR_GSBASE, u64_from_usize(core::ptr::from_ref(pcpu).addr())) }
 }
 
 /// Id of the executing CPU.
@@ -106,10 +107,10 @@ pub(crate) fn curcpu() -> u32 {
 
 /// Records where CPU `cpuid`'s `TSS.rsp0` is (from `cpu_tables_init`).
 pub(crate) fn pcpu_set_tss_rsp0(cpuid: u32, addr: u64) {
-    PCPU[cpuid as usize].tss_rsp0.store(addr, Ordering::Relaxed);
+    PCPU[usize_from_u32(cpuid)].tss_rsp0.store(addr, Ordering::Relaxed);
 }
 
 /// This CPU's area.
 pub(crate) fn pcpu_self() -> &'static Pcpu {
-    &PCPU[curcpu() as usize]
+    &PCPU[usize_from_u32(curcpu())]
 }

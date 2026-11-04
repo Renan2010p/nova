@@ -17,6 +17,8 @@
 //! Only the encodings live here. Which descriptor goes in which GDT slot
 //! is part of the amd64 ABI and lives in `amd64::segments`.
 
+use libkern::conv::{trunc_u16, u64_from_u16, u64_from_u8, u64_from_usize};
+
 /// Kernel privilege level.
 pub const SEL_KPL: u16 = 0;
 /// User privilege level.
@@ -25,7 +27,7 @@ pub const SEL_UPL: u16 = 3;
 /// Selector of GDT slot `slot` with requested privilege level `rpl`
 /// (FreeBSD's `GSEL`).
 pub const fn gsel(slot: usize, rpl: u16) -> u16 {
-    ((slot as u16) << 3) | rpl
+    (trunc_u16(u64_from_usize(slot)) << 3) | rpl // slot < 8192
 }
 
 /// 64-bit code segment, ring 0.
@@ -59,14 +61,15 @@ pub const fn tss_descriptor(base: u64, size: u64) -> [u64; 2] {
 /// A 64-bit IDT gate (FreeBSD's `struct gate_descriptor`), as two words.
 pub const fn gate_descriptor(offset: u64, sel: u16, ist: u8, typ: u64, dpl: u16) -> [u64; 2] {
     let low = (offset & 0xffff)
-        | ((sel as u64) << 16)
-        | (((ist & 7) as u64) << 32)
-        | ((typ | ((dpl as u64) << 5) | 0x80) << 40) // present
+        | (u64_from_u16(sel) << 16)
+        | (u64_from_u8(ist & 7) << 32)
+        | ((typ | (u64_from_u16(dpl) << 5) | 0x80) << 40) // present
         | (((offset >> 16) & 0xffff) << 48);
     [low, offset >> 32]
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
 

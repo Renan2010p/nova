@@ -25,6 +25,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod buddy;
+pub mod conv;
 pub mod range;
 pub mod rust_demangle;
 pub mod spinlock;

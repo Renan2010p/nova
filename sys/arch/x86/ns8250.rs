@@ -68,8 +68,9 @@ impl Ns8250 {
         unsafe {
             outb(b + REG_IER, 0);
             outb(b + REG_LCR, LCR_DLAB);
-            outb(b + REG_DATA, DIVISOR_115200 as u8);
-            outb(b + REG_IER, (DIVISOR_115200 >> 8) as u8);
+            let [lo, hi] = DIVISOR_115200.to_le_bytes();
+            outb(b + REG_DATA, lo);
+            outb(b + REG_IER, hi);
             outb(b + REG_LCR, LCR_8N1);
             outb(b + REG_FCR, FCR_ENABLE_CLEAR);
             outb(b + REG_MCR, MCR_DTR_RTS);

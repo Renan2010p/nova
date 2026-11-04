@@ -31,6 +31,7 @@
 //! Machine-dependent record types (`MODINFOMD_SMAP`, `MODINFOMD_EFI_MAP`,
 //! ...) are defined by each architecture, not here.
 
+use libkern::conv::usize_from_u32;
 use crate::bytes::{read_u32, read_u64, roundup2};
 
 /// End of the list.
@@ -132,7 +133,7 @@ impl<'a> Record<'a> {
 /// Parses the record at `off`; returns it and the offset of the next one.
 fn parse(buf: &[u8], off: usize) -> Option<(Record<'_>, usize)> {
     let kind = read_u32(buf, off)?;
-    let size = read_u32(buf, off + 4)? as usize;
+    let size = usize_from_u32(read_u32(buf, off + 4)?);
     if kind == MODINFO_END && size == 0 {
         return None;
     }
@@ -290,6 +291,7 @@ impl<'a> Module<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::*;
 
@@ -297,7 +299,7 @@ mod tests {
         buf.extend_from_slice(&kind.to_ne_bytes());
         buf.extend_from_slice(&(data.len() as u32).to_ne_bytes());
         buf.extend_from_slice(data);
-        while buf.len() % MD_ALIGN != 0 {
+        while !buf.len().is_multiple_of(MD_ALIGN) {
             buf.push(0);
         }
     }

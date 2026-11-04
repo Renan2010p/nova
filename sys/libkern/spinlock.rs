@@ -101,6 +101,7 @@ impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::SpinLock;
 

@@ -46,6 +46,8 @@ kernel".
 | `sys::elf` `ehdr_parse_never_panics` | any bytes, any length: no panic, no truncated header accepted |
 | `sys::elf` `phdrs_never_panic` | any offsets, sizes and counts in the header: no panic, no out-of-bounds read |
 | `sys::elf` `segment_notes_never_panic` | any `PT_NOTE` contents: no panic or overflow, every note lies inside its segment |
+| `libkern::conv` `widenings_are_lossless` | the named `usize`/`u64`/`u32` conversions lose nothing, both ways |
+| `libkern::conv` `truncations_keep_the_low_bits` | `trunc_u32`/`trunc_u16`/`trunc_u8` keep exactly the low bits; signed reinterpretation round-trips |
 | `x86::psl` `user_rflags_is_safe` | whatever flags a program asks for, user mode runs with interrupts on, IOPL 0, no nested-task or virtual-8086 mode |
 | `x86::psl` `user_rflags_keeps_user_bits` | the flags a program may change are kept |
 

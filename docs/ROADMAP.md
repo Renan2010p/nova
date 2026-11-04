@@ -15,6 +15,7 @@ FreeBSD userland; real hardware comes after.
 | 3c | **Second architecture stub** (`sys/arch/riscv64`, compile-only) and rule R13 (no MD vocabulary in MI code) | `make check` builds the kernel for riscv64 | **done** |
 | 4 | User address spaces (`VmSpace` over `pmap`); user mode; ELF loader; `compat/freebsd` `sysentvec`; `copyin`/`copyout`; rule R15 (the kernel knows no ABI) | a static FreeBSD binary does `write` + `exit` | **done** (to be validated under bhyve) |
 | 4b | Formal verification, phase 1 (see [VERIFICATION.md](VERIFICATION.md)): Miri on the host tests, Kani proofs of `libkern` and the checks guarding `unsafe` | `make miri` and `make kani` pass | **done** |
+| 4c | **Explicit code**, as in Zig: no hidden allocation (`malloc(9)` with `MallocType` and flags, `KBox`/`KVec`/`KArc`/`KFnOnce`, no `alloc` crate, rule R16), one crate per subsystem (R17), no `as` or `unwrap()` (R18) | the kernel links no allocator; `make clippy` is clean on every port | **done** (to be validated under bhyve) |
 | 5 | VFS, devfs, tmpfs/`md_image` root; `fork`/`exec`/`wait`; signals | `/rescue/sh` runs | |
 | 6 | Full `mmap`; the sysctls libc needs; `ld-elf.so.1` | dynamic FreeBSD binaries run | |
 | 7 | `bus_space`/`bus_dma`, PCI, virtio-blk, UFS | boots to `init` from a FreeBSD disk | |

@@ -18,23 +18,21 @@
 //! locked, after the thread is on the queue, and a waker makes the
 //! condition true before taking the same lock to wake.
 
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-
 use super::MtxSpin;
 use crate::cpu::{assert_no_guard, intr_guard};
-use crate::task::{self, Task};
+use crate::task::{self, TaskQueue};
 
-/// Threads waiting for something.
+/// Threads waiting for something. Waiting and waking never allocate: the
+/// queue links the threads themselves.
 pub struct WaitQueue {
-    waiters: MtxSpin<VecDeque<Arc<Task>>>,
+    waiters: MtxSpin<TaskQueue>,
 }
 
 impl WaitQueue {
     /// An empty queue.
     pub const fn new() -> Self {
         Self {
-            waiters: MtxSpin::new(VecDeque::new()),
+            waiters: MtxSpin::new(TaskQueue::new()),
         }
     }
 
@@ -83,8 +81,8 @@ impl WaitQueue {
     /// Wakes every thread waiting now (a thread that blocks again while
     /// this runs waits for the next wakeup).
     pub fn wake_all(&self) {
-        let waiters = core::mem::take(&mut *self.waiters.lock());
-        for t in waiters {
+        let mut waiters = core::mem::take(&mut *self.waiters.lock());
+        while let Some(t) = waiters.pop_front() {
             task::unpark(t);
         }
     }

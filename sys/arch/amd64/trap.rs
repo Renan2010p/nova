@@ -20,6 +20,7 @@
 //! reported exactly like FreeBSD's `trap_fatal` does. User-mode traps and
 //! the `vm_fault` upcall come with user mode.
 
+use libkern::conv::trunc_u8;
 use core::fmt::{self, Write};
 
 use x86::cpufunc::{rcr2, rdmsr};
@@ -94,7 +95,8 @@ unsafe extern "Rust" {
 /// Called by `alltraps` with interrupts disabled.
 pub(crate) extern "C" fn trap(frame: &mut TrapFrame) {
     if frame.tf_trapno & T_INTR != 0 {
-        match frame.tf_trapno as u8 {
+        // The vector is the low byte of the trap number.
+        match trunc_u8(frame.tf_trapno) {
             APIC_TIMER_INT => {
                 lapic_eoi();
                 // SAFETY: both are defined once by the framework with the
@@ -108,7 +110,7 @@ pub(crate) extern "C" fn trap(frame: &mut TrapFrame) {
             }
             IPI_BITMAP_VECTOR | IPI_STOP => {
                 lapic_eoi();
-                let ipi = if frame.tf_trapno as u8 == IPI_STOP {
+                let ipi = if trunc_u8(frame.tf_trapno) == IPI_STOP {
                     mdi::Ipi::Stop
                 } else {
                     mdi::Ipi::Ast
@@ -233,7 +235,7 @@ fn dblfault_handler(frame: &TrapFrame) -> ! {
 fn trap_fatal(frame: &TrapFrame) -> ! {
     let _ = trap_diag(frame, &mut Cons);
     if frame.tf_trapno & T_INTR != 0 {
-        panic!("unexpected interrupt on vector {}", frame.tf_trapno as u8);
+        panic!("unexpected interrupt on vector {}", trunc_u8(frame.tf_trapno));
     }
     panic!("{}", trap_msg(frame.tf_trapno));
 }

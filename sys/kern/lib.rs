@@ -35,8 +35,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-extern crate alloc;
-
 pub mod init_main;
 pub mod kern_abi;
 pub mod kern_clock;
@@ -46,6 +44,7 @@ pub mod kern_exec;
 pub mod kern_exit;
 pub mod kern_kthread;
 pub mod kern_linker;
+pub mod kern_malloc;
 pub mod kern_proc;
 pub mod kern_shutdown;
 pub mod kern_sig;

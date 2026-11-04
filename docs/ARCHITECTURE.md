@@ -297,9 +297,24 @@ FreeBSD (Xorg, Wayland); the kernel will provide the interfaces it needs
         │                 links stored in the free pages via the DMAP)
         ├──► Frame / Segment   owned pages: freed on drop, zeroed on alloc,
         │                      contents copied in and out, never borrowed
-        └──► mm::kmem          #[global_allocator]: 16 B–2 KiB slab classes,
-                               larger requests as buddy blocks
+        └──► mm::kmem          16 B–2 KiB slab classes, larger requests
+                 │             as buddy blocks
+                 ▼
+            mm::malloc         malloc(9): MallocType + M_WAITOK/M_NOWAIT,
+                               Result; KBox, KVec, KArc, KFnOnce own it
 ```
+
+Allocation is explicit everywhere (rule R16), as in Zig: the kernel has no
+global allocator and does not link Rust's `alloc`. Every allocation says
+who allocates (a `MallocType`, accounted per subsystem like FreeBSD's
+`vmstat -m`), whether it may sleep (`M_WAITOK`, checked to hold no spin
+lock or interrupt guard, or `M_NOWAIT`), and returns a `Result` whose
+error is `ENOMEM`. Growing a `KVec` is itself an allocation that takes
+flags and can fail. What must not allocate does not: run queues and wait
+queues are `TaskQueue`s linked through the threads, thread names and
+command names are fixed buffers (`MAXCOMLEN`), the ABI table is a fixed
+array (`MAX_BRANDS`), and exec writes argument strings straight to the
+new stack.
 
 The direct map (`DMAP_MIN_ADDRESS = 0xfffff80000000000`, FreeBSD's
 address) is built by the MD `pmap_bootstrap` and promised to the

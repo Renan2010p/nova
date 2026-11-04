@@ -465,7 +465,7 @@ impl<'s> Parser<'s, '_> {
             if c == b'_' {
                 return Ok(v);
             }
-            let d = (c as char).to_digit(16).ok_or(())?;
+            let d = char::from(c).to_digit(16).ok_or(())?;
             v = v
                 .checked_mul(16)
                 .and_then(|v| v.checked_add(u64::from(d)))
@@ -475,6 +475,7 @@ impl<'s> Parser<'s, '_> {
 }
 
 #[cfg(test)]
+#[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
     use super::demangle;
 
