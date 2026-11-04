@@ -12,7 +12,7 @@ FreeBSD userland; real hardware comes after.
 | 3 | Threads: context switch, kernel stacks with guard pages (`pmap_kenter`/`pmap_kremove`), injected scheduler (4BSD round robin), preemption, wait queues, sleep mutexes, `pause`; FreeBSD-style boot, panic and halt messages with symbolized backtraces | kernel threads take turns, a busy thread is preempted, mutex contention is correct | **done** |
 | 3b | **SMP**: CPUs from the ACPI MADT, AP start-up (`mpboot`, INIT-SIPI-SIPI, `init_secondary`), per-CPU idle threads and clocks, `IPI_AST` and `IPI_STOP`; FreeBSD's SMP messages | `Launching APs: 1`, the self-tests pass on every CPU | **done** (to be validated under bhyve) |
 | 3b+ | TLB shootdown IPIs, NMI stop, per-CPU run queues (ULE) | kernel addresses can be recycled | |
-| 3c | **Second architecture stub** (riscv64 or aarch64) that compiles | proves no MD code leaked into MI code | |
+| 3c | **Second architecture stub** (`sys/arch/riscv64`, compile-only) and rule R13 (no MD vocabulary in MI code) | `make check` builds the kernel for riscv64 | **done** |
 | 4 | User address spaces (`VmSpace` over `pmap`); user mode; ELF loader; `compat/freebsd` `sysentvec`; `UserPtr`/`copyin`/`copyout` | a static FreeBSD binary does `write` + `exit` | |
 | 5 | VFS, devfs, tmpfs/`md_image` root; `fork`/`exec`/`wait`; signals | `/rescue/sh` runs | |
 | 6 | Full `mmap`; the sysctls libc needs; `ld-elf.so.1` | dynamic FreeBSD binaries run | |

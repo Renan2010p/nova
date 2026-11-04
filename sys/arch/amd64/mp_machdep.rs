@@ -23,6 +23,7 @@
 //!   what `hammer_time` did for the boot CPU (page tables, per-CPU area,
 //!   descriptor tables, local APIC), then hands over to the framework.
 
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use mdi::PhysRange;
@@ -31,6 +32,7 @@ use sys::kenv::StaticEnv;
 use x86::cpufunc::{load_cr0, load_cr3, load_cr4, rcr0, rcr4};
 use x86::identcpu::topo_shifts;
 use x86::local_apic::{ipi_startup, lapic_id, lapic_init};
+use x86::madt::{MADT_SIG, madt_cpus, madt_ident};
 use x86::tsc::delay;
 
 use crate::mpboot::{
@@ -112,19 +114,21 @@ pub(crate) fn cpu_mp_setup(kenv: &StaticEnv<'_>, physmem: &[PhysRange]) {
     let tramp_ok = physmem
         .iter()
         .any(|r| r.start <= MPTRAMP_ADDR && MPTRAMP_ADDR + PAGE_SIZE as u64 <= r.end);
-    let Some(madt) = find_rsdp(kenv).and_then(|rsdp| acpi::find_table(&rsdp, b"APIC", &phys_read))
+    let Some(madt) = find_rsdp(kenv).and_then(|rsdp| acpi::find_table(&rsdp, MADT_SIG, &phys_read))
     else {
         return;
     };
-    for (slot, b) in MADT_IDENT.iter().zip(madt[10..24].iter()) {
-        slot.store(*b, Ordering::Relaxed);
+    if let Some(ident) = madt_ident(madt) {
+        for (slot, b) in MADT_IDENT.iter().zip(ident) {
+            slot.store(b, Ordering::Relaxed);
+        }
+        MADT_FOUND.store(true, Ordering::Relaxed);
     }
-    MADT_FOUND.store(true, Ordering::Relaxed);
     if !tramp_ok {
         return;
     }
     let mut n = 1;
-    for cpu in acpi::madt_cpus(madt).filter(|c| c.apic_id != bsp) {
+    for cpu in madt_cpus(madt).filter(|c| c.apic_id != bsp) {
         if n == MAXCPU {
             break;
         }
@@ -139,16 +143,36 @@ pub(crate) fn cpu_mp_probe() -> u32 {
     MP_NCPUS.load(Ordering::Relaxed)
 }
 
-/// `mdi::Smp::cpu_apic_id`.
+/// The APIC id of CPU `cpuid` (`mdi::Smp::cpu_hwid`).
 pub(crate) fn cpu_apic_id(cpuid: u32) -> u32 {
     CPU_APIC_ID[cpuid as usize].load(Ordering::Relaxed)
 }
 
-/// The MADT's OEM id and OEM table id (6 + 8 bytes), if one was found.
-pub(crate) fn madt_ident() -> Option<[u8; 14]> {
-    MADT_FOUND
-        .load(Ordering::Relaxed)
-        .then(|| core::array::from_fn(|i| MADT_IDENT[i].load(Ordering::Relaxed)))
+/// `mdi::Smp::cpu_mp_print_probe`: FreeBSD's `madt_probe` banner,
+/// `ACPI APIC Table: <OEMID  TABLEID >`.
+pub(crate) fn print_madt(w: &mut dyn fmt::Write) -> fmt::Result {
+    if !MADT_FOUND.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let id: [u8; 14] = core::array::from_fn(|i| MADT_IDENT[i].load(Ordering::Relaxed));
+    w.write_str("ACPI APIC Table: <")?;
+    print_field(w, &id[..6])?;
+    w.write_char(' ')?;
+    print_field(w, &id[6..])?;
+    w.write_str(">\n")
+}
+
+/// Prints a fixed-size firmware string like FreeBSD's `%.*s`: up to its
+/// length, or to the first NUL.
+fn print_field(w: &mut dyn fmt::Write, field: &[u8]) -> fmt::Result {
+    for &c in field.iter().take_while(|&&c| c != 0) {
+        w.write_char(if c.is_ascii_graphic() || c == b' ' {
+            c as char
+        } else {
+            '?'
+        })?;
+    }
+    Ok(())
 }
 
 /// `mdi::Smp::cpu_topology`: packages, cores per package, threads per

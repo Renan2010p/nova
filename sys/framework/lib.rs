@@ -36,18 +36,15 @@
 //! `mdi` contract, and wraps it in MI, SMP-aware APIs. Services never name
 //! an architecture.
 //!
+//! Which architecture that is, is said in exactly one file, `arch/mod.rs`.
 //! Porting Nova to a new architecture means writing `sys/arch/<arch>` and
-//! adding one line to this crate's `Cargo.toml` and one `use` below.
+//! adding one line there and one to this crate's `Cargo.toml`.
 
 #![no_std]
 
 extern crate alloc;
 
-#[cfg(target_arch = "x86_64")]
-use amd64 as md;
-
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("Nova: no sys/arch port for this target architecture");
+mod arch;
 
 pub mod clock;
 pub mod cons;
@@ -68,7 +65,7 @@ mod sealed {
 pub use mdi::{BootInfo, Firmware, MiStartup, PhysRange, StackFrame};
 
 /// The implementation of the `mdi` contract for this build.
-type Md = md::Machine;
+type Md = arch::Machine;
 
 const _: () = assert_implements_mdi::<Md>();
 const fn assert_implements_mdi<M: mdi::Machine>() {}
@@ -81,6 +78,10 @@ pub const MACHINE_ARCH: &str = <Md as mdi::Machine>::MACHINE_ARCH;
 pub const PAGE_SIZE: usize = <Md as mdi::Machine>::PAGE_SIZE;
 /// Maximum number of CPUs this build supports.
 pub const MAXCPU: usize = <Md as mdi::Machine>::MAXCPU;
+/// Pages of each kernel thread stack.
+pub const KSTACK_PAGES: usize = <Md as mdi::Machine>::KSTACK_PAGES;
+/// Block orders of the physical page allocator.
+pub const VM_NFREEORDER: usize = <Md as mdi::Machine>::VM_NFREEORDER;
 
 static INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 

@@ -25,6 +25,7 @@ fn main() {
     }
     let ldscript = match arch.as_str() {
         "x86_64" => "ldscript.amd64",
+        "riscv64" => "ldscript.riscv64",
         other => panic!("Nova: no linker script for target architecture {other}"),
     };
     let dir = env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");

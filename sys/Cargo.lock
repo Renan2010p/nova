@@ -27,6 +27,7 @@ dependencies = [
  "amd64",
  "libkern",
  "mdi",
+ "riscv64",
 ]
 
 [[package]]
@@ -60,6 +61,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "riscv64"
+version = "0.1.0"
+dependencies = [
+ "mdi",
+]
+
+[[package]]
 name = "sys"
 version = "0.1.0"
 
@@ -74,3 +82,6 @@ dependencies = [
 [[package]]
 name = "x86"
 version = "0.1.0"
+dependencies = [
+ "sys",
+]

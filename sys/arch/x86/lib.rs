@@ -29,6 +29,7 @@ pub mod cpufunc;
 pub mod i8254;
 pub mod identcpu;
 pub mod local_apic;
+pub mod madt;
 pub mod ns8250;
 pub mod psl;
 pub mod segments;

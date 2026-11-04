@@ -38,7 +38,6 @@
 //! the point where FreeBSD would start `init(8)`.
 
 use alloc::format;
-use alloc::string::String;
 
 use framework::{BootInfo, PAGE_SIZE};
 use sys::copyright::{COPYRIGHT, OSTYPE};
@@ -102,7 +101,7 @@ fn identify_cpu() {
     let _ = framework::cpu::print_cpu_info(&mut Cons);
 }
 
-/// Memory sizes, as amd64's `cpu_startup` reports them.
+/// Memory sizes, as FreeBSD's `cpu_startup` reports them.
 fn cpu_startup(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
     let free = framework::mm::vm_phys::free_count() * PAGE_SIZE as u64;
     // SMBIOS knows the installed RAM; the firmware map only what is usable.
@@ -129,16 +128,11 @@ fn cpu_startup(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
     printf!("avail memory = {} ({} MB)\n", free, free / 1_048_576);
 }
 
-/// Reports the CPUs the firmware lists (`madt_probe`, `mp_start`,
-/// `cpu_mp_announce`). The APs are started later, by `release_aps`.
+/// Reports the CPUs the firmware lists (the machine's probe line, then
+/// `mp_start` and `cpu_mp_announce`). The APs are started later, by
+/// `release_aps`.
 fn mp_start() {
-    if let Some(id) = framework::smp::acpi_madt_ident() {
-        let (oem, table) = (
-            String::from_utf8_lossy(&id[..6]),
-            String::from_utf8_lossy(&id[6..]),
-        );
-        printf!("ACPI APIC Table: <{} {}>\n", oem, table);
-    }
+    let _ = framework::smp::cpu_mp_print_probe(&mut Cons);
     let ncpus = framework::smp::mp_ncpus_detected();
     if ncpus < 2 {
         return;
@@ -164,7 +158,7 @@ fn release_aps(bootverbose: bool) {
             panic!(
                 "AP #{} (PHY# {}) failed!",
                 cpu,
-                framework::smp::cpu_apic_id(cpu)
+                framework::smp::cpu_hwid(cpu)
             );
         }
         if bootverbose {

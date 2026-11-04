@@ -20,5 +20,8 @@ mdi = { workspace = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 amd64 = { workspace = true }
 
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv64 = { workspace = true }
+
 [lints]
 workspace = true

@@ -25,7 +25,7 @@ The **trusted base** (the framekernel's TCB) is `libkern`, `arch/*` and
 |---|---|---|
 | **R1** | Dependencies only point to the layers in the table. In particular, only `framework` (and other MD crates) depend on `arch/*`, and `arch/*` never depends on the framework or on services. | checklayers |
 | **R2** | Services and `conf` do not depend on `mdi`; they use the framework's wrappers. | checklayers |
-| **R3** | `cfg(target_arch …)` appears only in `arch/*`, in `framework`, or in files under an `arch/` directory of a service (e.g. `compat/freebsd/arch/amd64.rs`). | checklayers |
+| **R3** | `cfg(target_arch …)` appears only in `sys/arch/*` or in files under an `arch/` directory: `framework/arch/mod.rs` (the one place that selects the port) and each ABI's `compat/<abi>/arch/<arch>/`. | checklayers |
 | **R4** | `unsafe` only in the trusted base. Every other crate root declares `#![forbid(unsafe_code)]`; `conf` and `mdi` declare `#![deny(unsafe_code)]` and opt in item by item (the entry macro; `unsafe trait` declarations). | checklayers + compiler |
 | **R5** | `asm!`, `global_asm!`, `naked_asm!` only in `arch/*`. | checklayers |
 | **R6** | No `static mut` anywhere. Shared state lives behind a lock, in an atomic, or in a `CpuLocal`. | checklayers |
@@ -34,7 +34,9 @@ The **trusted base** (the framekernel's TCB) is `libkern`, `arch/*` and
 | **R9** | ABI personalities (`compat/*`) are leaves: only `conf` depends on them. The rest of the kernel never knows a userland ABI. | checklayers |
 | **R10** | Every public API of the framework is sound: no sequence of safe calls from a service can cause undefined behaviour. | review |
 | **R11** | Every `unsafe` block has a `// SAFETY:` comment, and every `unsafe fn` a `# Safety` section. | clippy (`undocumented_unsafe_blocks = "deny"`) + review |
-| **R12** | MD code is reached through `mdi` traits; a missing implementation is a compile error. | compiler (`framework` asserts `md::Machine: mdi::Machine`) |
+| **R12** | MD code is reached through `mdi` traits; a missing implementation is a compile error. | compiler (`framework` asserts `Md: mdi::Machine`) |
+| **R13** | No machine-dependent vocabulary in identifiers of MI code: architectures (`amd64`, `x86`, `riscv64`...), registers and tables (`rflags`, `cr3`, `msr`, `gdt`, `tss`, `ist`, `pml4`...), instructions and devices (`inb`, `hlt`, `tsc`, `apic`, `madt`, `i8254`...). The `mdi` contract speaks MI (`cpu_hwid`, "exception stacks"), and machine values come from the port (`KSTACK_PAGES`, `VM_NFREEORDER`, `AP_EXCEPTION_STACKS`). Only `sys/arch/*` and `arch/` directories are exempt. | checklayers (snake_case and CamelCase words of every identifier) |
+| **R14** | The kernel compiles for every port, including the compile-only `sys/arch/riscv64`. If an MI change builds for amd64 only, MD code leaked into it. | `make check` (`cargo check --target` for each of `PORTS`) |
 
 Source checks ignore comments and string literals, so documentation may
 mention `target_arch`, `asm!` or `static mut` freely.

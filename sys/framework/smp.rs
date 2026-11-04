@@ -15,7 +15,7 @@
 //! under FreeBSD's `kern/subr_smp.c` and `x86/x86/mp_x86.c`).
 //!
 //! The boot CPU starts each application processor with [`start_ap`]: the
-//! framework gives it a boot stack, IST stacks and an idle thread, and the
+//! framework gives it a boot stack, exception stacks and an idle thread, and the
 //! MD layer wakes it. The AP sets itself up and calls [`__nova_ap_startup`],
 //! which starts its clock and enters the scheduler through its idle thread.
 //! From then on it runs threads from the shared run queue.
@@ -23,6 +23,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use mdi::{Ipi, Smp};
@@ -57,14 +58,15 @@ pub fn cpu_topology() -> (u32, u32, u32) {
     Md::cpu_topology()
 }
 
-/// The hardware id (APIC id) of CPU `cpu`.
-pub fn cpu_apic_id(cpu: u32) -> u32 {
-    Md::cpu_apic_id(cpu)
+/// The hardware id of CPU `cpu` (`cpu_hwid`).
+pub fn cpu_hwid(cpu: u32) -> u32 {
+    Md::cpu_hwid(cpu)
 }
 
-/// OEM id and OEM table id of the ACPI table the CPUs come from.
-pub fn acpi_madt_ident() -> Option<[u8; 14]> {
-    Md::acpi_madt_ident()
+/// Writes what the machine reports when it probes the CPUs from firmware
+/// tables (FreeBSD's line for that table), if anything.
+pub fn cpu_mp_print_probe(w: &mut dyn core::fmt::Write) -> core::fmt::Result {
+    Md::cpu_mp_print_probe(w)
 }
 
 /// The CPUs that are running.
@@ -94,24 +96,26 @@ pub fn start_ap(cpu: u32) -> bool {
     let name: &'static str = Box::leak(format!("idle: cpu{cpu}").into_boxed_str());
     let idle = task::new_idle(name).expect("start_ap: no memory for the idle thread");
     let boot = KernelStack::new().expect("start_ap: no memory for the boot stack");
-    let ist: [KernelStack; 3] =
-        core::array::from_fn(|_| KernelStack::new().expect("start_ap: no memory for IST stacks"));
+    let exception_stacks: Vec<KernelStack> = (0..Md::AP_EXCEPTION_STACKS)
+        .map(|_| KernelStack::new().expect("start_ap: no memory for exception stacks"))
+        .collect();
+    let exception_tops: Vec<usize> = exception_stacks.iter().map(KernelStack::top).collect();
     *AP_IDLE.lock() = Some(idle);
 
     let up = {
-        // Interrupts off: the INIT-SIPI-SIPI delays must not be stretched
-        // by preemption.
+        // Interrupts off: the MD start sequence's delays must not be
+        // stretched by preemption.
         let _g = intr_guard();
         // SAFETY: `cpu` is a detected AP, started only once (checked
         // above), and starts are serialized by STARTED plus the single boot
         // thread. The stacks are fresh, mapped, 16-byte aligned, and are
         // leaked below, so they stay valid forever and are used by nothing
         // else.
-        unsafe { Md::cpu_start_ap(cpu, boot.top(), ist.each_ref().map(KernelStack::top)) }
+        unsafe { Md::cpu_start_ap(cpu, boot.top(), &exception_tops) }
     };
     // Whether or not it answered, the AP may run on these stacks one day.
     core::mem::forget(boot);
-    core::mem::forget(ist);
+    core::mem::forget(exception_stacks);
     if !up {
         AP_IDLE.lock().take();
         return false;

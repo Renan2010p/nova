@@ -19,8 +19,16 @@ kernel: check
 	cd sys && ${CARGO} build --profile ${PROFILE}
 	@echo "==> ${KERNEL}"
 
+# The layering rules, then the kernel built for every port: if MI code
+# compiles only for amd64, MD code leaked into it (rule R14).
+PORTS=		riscv64gc-unknown-none-elf
+
 check:
 	cd tools && ${CARGO} run -q -p checklayers -- ../sys
+	@cd sys && for t in ${PORTS}; do \
+	    ${CARGO} check -q -p kernel --target $$t || exit 1; \
+	    echo "check: the kernel compiles for $$t"; \
+	done
 
 # Crates that are plain logic are unit-tested on the host.
 test:
@@ -33,7 +41,10 @@ clippy:
 # FreeBSD host only, as root: boots the kernel with the system loader(8).
 # VERBOSE=1 boots verbose (boot -v); SELFTEST=pf|stack takes a fatal kernel
 # page fault or stack overflow on purpose.
-bhyve: kernel
+# It does not build: run `make` as yourself first, so that the kernel is
+# never built as root.
+bhyve:
+	@test -f ${KERNEL} || { echo "bhyve: ${KERNEL} not found; run make first" >&2; exit 1; }
 	VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" sh tools/bhyve/run.sh ${KERNEL}
 
 clean:

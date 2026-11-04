@@ -26,3 +26,10 @@ pub const MAXCPU: usize = 256;
 pub const PAGE_SHIFT: usize = 12;
 /// Base page size.
 pub const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
+
+/// Pages of each kernel thread stack (FreeBSD amd64's `KSTACK_PAGES`).
+pub const KSTACK_PAGES: usize = 4;
+
+/// Block orders of the physical page allocator (`VM_NFREEORDER` in
+/// FreeBSD amd64's `vmparam.h`): up to 2^12 pages, 16 MiB.
+pub const VM_NFREEORDER: usize = 13;

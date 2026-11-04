@@ -19,8 +19,8 @@
 //!
 //! * R1 dependencies only point to allowed layers (see [`may_depend`]);
 //! * R2 services do not see the `mdi` contract;
-//! * R3 `cfg(target_arch ...)` only in MD code, the framework, or files
-//!   under an `arch/` directory of a service;
+//! * R3 `cfg(target_arch ...)` only in MD code or in files under an
+//!   `arch/` directory (of the framework or of an ABI);
 //! * R4 `unsafe` only in the trusted base: every other crate root must
 //!   carry `#![forbid(unsafe_code)]` (`#![deny(unsafe_code)]` for `conf`,
 //!   whose entry macro opts in, and `mdi`, which declares `unsafe trait`s);
@@ -30,7 +30,9 @@
 //! * R7 intra-kernel dependencies use `workspace = true`; no external
 //!   crates unless listed in [`ALLOWED_EXTERNAL`];
 //! * R8 every `.rs` file starts with the MPL-2.0 header;
-//! * R9 personalities (`compat/*`) are leaves: only `conf` depends on them.
+//! * R9 personalities (`compat/*`) are leaves: only `conf` depends on them;
+//! * R13 no machine-dependent vocabulary (`apic`, `amd64`, `msr`, ...) in
+//!   identifiers of MI code, outside `arch/` directories.
 //!
 //! It is deliberately dependency-free and parses only the subset of TOML
 //! that sys/ uses. Source checks run on code with comments and string
@@ -286,10 +288,7 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
         let code = strip_comments_and_strings(&raw);
         for (i, line) in code.lines().enumerate() {
             let n = i + 1;
-            if line.contains("target_arch")
-                && !matches!(c.layer, Layer::Md | Layer::Framework)
-                && !in_arch_dir
-            {
+            if line.contains("target_arch") && c.layer != Layer::Md && !in_arch_dir {
                 report.err(
                     file,
                     n,
@@ -298,6 +297,20 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
             }
             if line.contains("asm!") && c.layer != Layer::Md {
                 report.err(file, n, "R5: assembly is only allowed in sys/arch");
+            }
+            if c.layer != Layer::Md && !in_arch_dir {
+                for ident in identifiers(line) {
+                    if let Some(word) = md_word(ident) {
+                        report.err(
+                            file,
+                            n,
+                            format!(
+                                "R13: `{ident}` names machine-dependent `{word}` in MI code; \
+                                 use an MI name, or move it to sys/arch or an `arch/` directory"
+                            ),
+                        );
+                    }
+                }
             }
             if line
                 .split_whitespace()
@@ -314,6 +327,54 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
         }
     }
     Ok(())
+}
+
+/// Words that name a particular machine, or a mechanism only some
+/// machines have (R13). MI code must not contain them in identifiers;
+/// comments and strings are not checked.
+const MD_WORDS: &[&str] = &[
+    // architectures
+    "x86", "amd64", "i386", "aarch64", "arm64", "riscv", "riscv64", "powerpc",
+    // x86 registers and tables
+    "rflags", "eflags", "rip", "rsp", "rbp", "rax", "cr0", "cr2", "cr3", "cr4", "msr", "rdmsr",
+    "wrmsr", "gdt", "idt", "ldt", "tss", "ist", "pml4", "pdp", "pdpe", "swapgs",
+    // x86 instructions and devices
+    "inb", "outb", "inl", "outl", "ioport", "hlt", "cli", "sti", "rdtsc", "tsc", "i8254",
+    "apic", "lapic", "ioapic", "xapic", "x2apic", "sipi", "madt", "smap", "e820", "ns8250",
+];
+
+/// The identifiers of a line of (comment- and string-free) code.
+fn identifiers(line: &str) -> impl Iterator<Item = &str> {
+    line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| {
+            w.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        })
+}
+
+/// The first MD word an identifier is made of, splitting snake_case and
+/// CamelCase (`cpu_apic_id` and `CpuApicId` both contain `apic`).
+fn md_word(ident: &str) -> Option<&'static str> {
+    let mut words: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for ch in ident.chars() {
+        if ch == '_' {
+            words.push(core::mem::take(&mut cur));
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && prev_lower {
+            words.push(core::mem::take(&mut cur));
+        }
+        prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        cur.push(ch.to_ascii_lowercase());
+    }
+    words.push(cur);
+    words
+        .iter()
+        .find_map(|w| MD_WORDS.iter().copied().find(|m| m == w))
 }
 
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -502,6 +563,19 @@ mod tests {
             !out.contains("target_arch") && !out.contains("asm!") && !out.contains("static mut")
         );
         assert!(out.contains('a') && out.contains('c') && out.contains('d'));
+    }
+
+    #[test]
+    fn md_words_are_found_in_identifiers() {
+        assert_eq!(md_word("cpu_apic_id"), Some("apic"));
+        assert_eq!(md_word("CpuApicId"), Some("apic"));
+        assert_eq!(md_word("ist_tops"), Some("ist"));
+        assert_eq!(md_word("MSR_GSBASE"), Some("msr"));
+        assert_eq!(md_word("list"), None);
+        assert_eq!(md_word("CpuId"), None);
+        assert_eq!(md_word("strip"), None);
+        let ids: Vec<&str> = identifiers("let x = a.b_c(1, 0x1f) + Md::foo;").collect();
+        assert_eq!(ids, ["let", "x", "a", "b_c", "Md", "foo"]);
     }
 
     #[test]

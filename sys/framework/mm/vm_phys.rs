@@ -27,9 +27,8 @@ use mdi::{DirectMap, PhysRange};
 use crate::sync::MtxSpin;
 use crate::{Md, PAGE_SIZE};
 
-/// Number of block orders: blocks of 1 page up to 2^12 pages (16 MiB),
-/// FreeBSD's `VM_NFREEORDER` on amd64.
-pub const VM_NFREEORDER: usize = 13;
+/// Number of block orders, from the machine (`VM_NFREEORDER`).
+pub const VM_NFREEORDER: usize = crate::VM_NFREEORDER;
 
 const PAGE_SHIFT: u32 = PAGE_SIZE.trailing_zeros();
 

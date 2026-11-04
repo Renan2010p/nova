@@ -19,6 +19,7 @@ members = [
     # md: machine-dependent code
     "arch/x86",
     "arch/amd64",
+    "arch/riscv64", # compile-only port: proves MI code is MI
     # framework: the framekernel's trusted core, the only bridge to MD
     "framework",
     # services: machine-independent kernel, 100% safe Rust
@@ -46,6 +47,7 @@ sys = { path = "sys" }
 mdi = { path = "mdi" }
 x86 = { path = "arch/x86" }
 amd64 = { path = "arch/amd64" }
+riscv64 = { path = "arch/riscv64" }
 framework = { path = "framework" }
 vm = { path = "vm" }
 kern = { path = "kern" }

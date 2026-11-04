@@ -11,18 +11,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! ACPI tables, just enough to find the CPUs before any driver exists
-//! (what FreeBSD's `x86/acpica/madt.c` reads, through ACPICA).
+//! ACPI tables before any driver exists: the machine-independent part of
+//! what FreeBSD's ACPICA offers early (`AcpiFindRootPointer`,
+//! `AcpiGetTable`).
 //!
-//! * the RSDP, found from the loader's `acpi.rsdp` or by scanning the BIOS
-//!   areas (`AcpiFindRootPointer`);
+//! * the RSDP, parsed and validated, and found by scanning a memory area;
 //! * the XSDT (or RSDT), which lists the other tables;
-//! * the MADT (signature `APIC`), whose local APIC and x2APIC entries are
-//!   the CPUs.
+//! * any table by signature, length- and checksum-checked.
 //!
-//! Physical memory is read through a closure the MD layer provides, so
-//! this module is plain, safe parsing, unit-tested on the host. Every
-//! table is checksummed and bounds-checked.
+//! What a table *means* is not here: the MADT's CPU entries, for example,
+//! differ per architecture and are parsed in `sys/arch` (FreeBSD's
+//! `x86/acpica/madt.c`). Physical memory is read through a closure the MD
+//! layer provides, so this module is plain, safe parsing, unit-tested on
+//! the host.
 
 use crate::bytes::{read_u32, read_u64};
 
@@ -32,15 +33,6 @@ pub const RSDP_SIG: &[u8; 8] = b"RSD PTR ";
 const RSDP_V1_LEN: usize = 20;
 /// Size of a system description table header.
 pub const SDT_HEADER_LEN: usize = 36;
-
-/// MADT entry: processor local APIC.
-const MADT_LOCAL_APIC: u8 = 0;
-/// MADT entry: processor local x2APIC.
-const MADT_LOCAL_X2APIC: u8 = 9;
-/// MADT CPU flags: enabled (usable now).
-const MADT_ENABLED: u32 = 1;
-/// Offset of the first MADT entry.
-const MADT_ENTRIES: usize = 44;
 
 /// Reads `len` bytes of physical memory at `pa`, or `None` if they cannot
 /// be reached.
@@ -127,45 +119,6 @@ pub fn find_table<'a>(rsdp: &Rsdp, sig: &[u8; 4], read: PhysRead<'a>) -> Option<
         })
 }
 
-/// A CPU listed in the MADT.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MadtCpu {
-    /// Its local APIC id.
-    pub apic_id: u32,
-}
-
-/// The enabled CPUs of a MADT, in table order (`madt_add_cpu`). Disabled
-/// entries (absent or hot-pluggable CPUs) are skipped, as FreeBSD does.
-pub fn madt_cpus(madt: &[u8]) -> impl Iterator<Item = MadtCpu> + '_ {
-    let mut off = MADT_ENTRIES;
-    core::iter::from_fn(move || {
-        loop {
-            let kind = *madt.get(off)?;
-            let len = *madt.get(off + 1)? as usize;
-            if len < 2 {
-                return None;
-            }
-            let e = madt.get(off..off + len)?;
-            off += len;
-            let cpu = match kind {
-                MADT_LOCAL_APIC if len >= 8 => {
-                    (read_u32(e, 4)? & MADT_ENABLED != 0).then(|| MadtCpu {
-                        apic_id: u32::from(e[3]),
-                    })
-                }
-                MADT_LOCAL_X2APIC if len >= 16 => {
-                    let apic_id = read_u32(e, 4)?;
-                    (read_u32(e, 8)? & MADT_ENABLED != 0).then_some(MadtCpu { apic_id })
-                }
-                _ => None,
-            };
-            if cpu.is_some() {
-                return cpu;
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,19 +140,9 @@ mod tests {
         t
     }
 
-    /// A tiny physical memory: RSDP (v2) -> XSDT -> MADT with 3 CPUs,
-    /// one of them disabled, plus an unrelated table.
+    /// A tiny physical memory: RSDP (v2) -> XSDT -> two tables.
     fn memory() -> BTreeMap<u64, Vec<u8>> {
-        let mut madt_body = vec![0u8; 8]; // local APIC address, flags
-        madt_body.extend([MADT_LOCAL_APIC, 8, 0, 0, 1, 0, 0, 0]); // apic 0, enabled
-        madt_body.extend([MADT_LOCAL_APIC, 8, 1, 2, 0, 0, 0, 0]); // apic 2, disabled
-        madt_body.extend([1, 12, 0, 0, 0, 0, 0xc0, 0xfe, 0, 0, 0, 0]); // I/O APIC: ignored
-        let mut x2 = vec![MADT_LOCAL_X2APIC, 16, 0, 0];
-        x2.extend(300u32.to_le_bytes());
-        x2.extend(1u32.to_le_bytes());
-        x2.extend(7u32.to_le_bytes());
-        madt_body.extend(x2);
-        let madt = table(b"APIC", &madt_body);
+        let srat = table(b"SRAT", &[1, 2, 3, 4]);
         let hpet = table(b"HPET", &[0; 20]);
         let mut xsdt_body = Vec::new();
         xsdt_body.extend(0x3000u64.to_le_bytes());
@@ -215,13 +158,13 @@ mod tests {
         BTreeMap::from([
             (0xf2400, rsdp),
             (0x1000, xsdt),
-            (0x2000, madt),
+            (0x2000, srat),
             (0x3000, hpet),
         ])
     }
 
     #[test]
-    fn finds_rsdp_and_madt_cpus() {
+    fn finds_rsdp_and_tables() {
         let mem = memory();
         let read = |pa: u64, len: usize| mem.get(&pa).and_then(|t| t.get(..len));
         let mut area = vec![0u8; 0x1000];
@@ -229,24 +172,21 @@ mod tests {
         assert_eq!(find_rsdp(&area, 0xf2000), Some(0xf2400));
         let rsdp = parse_rsdp(&mem[&0xf2400]).unwrap();
         assert_eq!((rsdp.revision, rsdp.xsdt), (2, 0x1000));
-        let madt = find_table(&rsdp, b"APIC", &read).unwrap();
-        let cpus: Vec<u32> = madt_cpus(madt).map(|c| c.apic_id).collect();
-        assert_eq!(cpus, [0, 300]);
+        let srat = find_table(&rsdp, b"SRAT", &read).unwrap();
+        assert_eq!(&srat[SDT_HEADER_LEN..], [1, 2, 3, 4]);
         assert!(find_table(&rsdp, b"FACP", &read).is_none());
     }
 
     #[test]
     fn rejects_bad_checksums_and_truncation() {
         let mut mem = memory();
-        mem.get_mut(&0x2000).unwrap()[40] ^= 1;
+        mem.get_mut(&0x2000).unwrap()[37] ^= 1;
         let read = |pa: u64, len: usize| mem.get(&pa).and_then(|t| t.get(..len));
         let rsdp = parse_rsdp(&mem[&0xf2400]).unwrap();
-        assert!(find_table(&rsdp, b"APIC", &read).is_none());
+        assert!(find_table(&rsdp, b"SRAT", &read).is_none());
         let mut bad = mem[&0xf2400].clone();
         bad[0] = b'X';
         assert!(parse_rsdp(&bad).is_none());
         assert!(parse_rsdp(&bad[..10]).is_none());
-        let madt = table(b"APIC", &[0u8; 8 + 5]);
-        assert_eq!(madt_cpus(&madt).count(), 0);
     }
 }

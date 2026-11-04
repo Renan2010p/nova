@@ -17,7 +17,7 @@
 //! `KSTACK_GUARD_PAGES` are left unmapped: a stack overflow hits the guard
 //! page and faults, instead of silently overwriting whatever lies below.
 //! (The fault cannot be handled on the overflowed stack, so it becomes a
-//! double fault, which runs on its own IST stack and is reported.)
+//! double fault, which runs on its own exception stack and is reported.)
 //!
 //! SMP: a freed stack's virtual addresses are never reused. Another CPU
 //! may still hold TLB entries for them, and reusing the addresses for new
@@ -36,8 +36,8 @@ use super::frame::{Frame, Segment};
 use crate::sync::MtxSpin;
 use crate::{Md, PAGE_SIZE};
 
-/// Pages of each kernel stack (FreeBSD amd64's `KSTACK_PAGES`).
-pub const KSTACK_PAGES: usize = 4;
+/// Pages of each kernel stack, from the machine (`KSTACK_PAGES`).
+pub const KSTACK_PAGES: usize = crate::KSTACK_PAGES;
 /// Unmapped pages below each stack (`KSTACK_GUARD_PAGES`).
 pub const KSTACK_GUARD_PAGES: usize = 1;
 

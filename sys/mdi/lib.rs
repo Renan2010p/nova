@@ -119,7 +119,7 @@ pub enum StackFrame {
     Trap {
         /// An interrupt rather than an exception.
         interrupt: bool,
-        /// FreeBSD's `T_*` trap code (exceptions only).
+        /// The MD trap code (exceptions only), printed as is.
         trapno: u64,
         /// Interrupted instruction.
         pc: usize,
@@ -272,17 +272,25 @@ pub trait Smp {
     /// core, as FreeBSD's `cpu_mp_announce` reports them.
     fn cpu_topology() -> (u32, u32, u32);
 
-    /// The local APIC (or equivalent) id of CPU `cpuid`.
-    fn cpu_apic_id(cpuid: u32) -> u32;
+    /// How many extra stacks each AP needs for exceptions that cannot run
+    /// on the interrupted stack (double fault, NMI...). The framework
+    /// allocates them and passes them to [`Smp::cpu_start_ap`].
+    const AP_EXCEPTION_STACKS: usize;
 
-    /// OEM id (6 bytes) and OEM table id (8 bytes) of the ACPI MADT the
-    /// CPUs were found in, for FreeBSD's `ACPI APIC Table: <...>` line.
-    fn acpi_madt_ident() -> Option<[u8; 14]>;
+    /// The hardware id of CPU `cpuid` (FreeBSD's `cpu_hwid`): what the
+    /// interrupt controller calls it.
+    fn cpu_hwid(cpuid: u32) -> u32;
+
+    /// Writes what FreeBSD prints when it probes the CPUs from firmware
+    /// tables (on x86, `ACPI APIC Table: <...>`), if anything.
+    fn cpu_mp_print_probe(w: &mut dyn fmt::Write) -> fmt::Result;
 
     /// Starts CPU `cpuid` (`start_ap`). It sets itself up (per-CPU area,
-    /// descriptor tables with the given IST stacks, interrupt controller)
-    /// on the stack ending at `stack_top`, then calls [`ApStartupUpcall`].
-    /// Returns false if it did not come up.
+    /// descriptor tables, interrupt controller) on the stack ending at
+    /// `stack_top`, with `exception_stack_tops` (exactly
+    /// [`Smp::AP_EXCEPTION_STACKS`] of them) for the exceptions that need
+    /// their own stack, then calls [`ApStartupUpcall`]. Returns false if
+    /// it did not come up.
     ///
     /// # Safety
     ///
@@ -290,7 +298,7 @@ pub trait Smp {
     /// stacks must be 16-byte aligned tops of mapped, writable stacks that
     /// stay valid forever and are used by nothing else. Calls must be
     /// serialized.
-    unsafe fn cpu_start_ap(cpuid: u32, stack_top: usize, ist_tops: [usize; 3]) -> bool;
+    unsafe fn cpu_start_ap(cpuid: u32, stack_top: usize, exception_stack_tops: &[usize]) -> bool;
 
     /// Sends `ipi` to CPU `cpuid` (`ipi_cpu`).
     fn ipi_send(cpuid: u32, ipi: Ipi);
@@ -333,6 +341,11 @@ pub trait Machine: Cpu + EarlyCons + DirectMap + KernelMap + Clock + Context + S
     const PAGE_SIZE: usize;
     /// Maximum number of CPUs (`MAXCPU`).
     const MAXCPU: usize;
+    /// Pages of each kernel thread stack (`KSTACK_PAGES`).
+    const KSTACK_PAGES: usize;
+    /// Block orders of the physical page allocator (`VM_NFREEORDER`): it
+    /// hands out blocks of 1 to 2^(n-1) contiguous pages.
+    const VM_NFREEORDER: usize;
 
     /// True when running under a hypervisor (FreeBSD's `vm_guest`).
     fn vm_guest() -> bool;

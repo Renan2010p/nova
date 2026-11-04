@@ -228,17 +228,24 @@ impl mdi::Smp for Machine {
         mp_machdep::cpu_topology()
     }
 
-    fn cpu_apic_id(cpuid: u32) -> u32 {
+    /// Double fault, NMI and machine check each run on their own stack
+    /// (IST1, IST2, IST3).
+    const AP_EXCEPTION_STACKS: usize = 3;
+
+    fn cpu_hwid(cpuid: u32) -> u32 {
         mp_machdep::cpu_apic_id(cpuid)
     }
 
-    fn acpi_madt_ident() -> Option<[u8; 14]> {
-        mp_machdep::madt_ident()
+    fn cpu_mp_print_probe(w: &mut dyn fmt::Write) -> fmt::Result {
+        mp_machdep::print_madt(w)
     }
 
-    unsafe fn cpu_start_ap(cpuid: u32, stack_top: usize, ist_tops: [usize; 3]) -> bool {
+    unsafe fn cpu_start_ap(cpuid: u32, stack_top: usize, exception_stack_tops: &[usize]) -> bool {
+        let ist: [usize; 3] = exception_stack_tops
+            .try_into()
+            .expect("cpu_start_ap: need exactly 3 exception stacks");
         // SAFETY: forwarded to the caller (same contract).
-        unsafe { mp_machdep::cpu_start_ap(cpuid, stack_top, ist_tops) }
+        unsafe { mp_machdep::cpu_start_ap(cpuid, stack_top, ist) }
     }
 
     fn ipi_send(cpuid: u32, ipi: mdi::Ipi) {
@@ -255,6 +262,8 @@ impl mdi::Machine for Machine {
     const MACHINE_ARCH: &'static str = param::MACHINE_ARCH;
     const PAGE_SIZE: usize = param::PAGE_SIZE;
     const MAXCPU: usize = param::MAXCPU;
+    const KSTACK_PAGES: usize = param::KSTACK_PAGES;
+    const VM_NFREEORDER: usize = param::VM_NFREEORDER;
 
     fn vm_guest() -> bool {
         identcpu::vm_guest()

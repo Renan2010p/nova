@@ -131,11 +131,20 @@ or hooks declared in `mdi` and bound by the kernel binary:
 1. Write `sys/arch/<arch>` implementing all of `mdi`. The compiler lists
    anything missing.
 2. Add one dependency line to `framework/Cargo.toml` and one `use` line to
-   `framework/lib.rs`.
+   `framework/arch/mod.rs`, the only file in the MI kernel that names a
+   machine.
 3. Add `sys/conf/ldscript.<arch>` and its case in `conf/build.rs`.
+4. Give each ABI its MD half: `compat/<abi>/arch/<arch>/`.
 
 No service changes. If a service needs changes, the MD/MI split leaked
 and the fix belongs in `mdi`/`framework`.
+
+This is not a promise, it is checked: `sys/arch/riscv64` is a
+compile-only port (every operation panics) and `make check` builds the
+whole kernel for it (rule R14). It was added with no change to any MI
+file, after rule R13 had found and removed the last x86 terms from MI
+code (`cpu_apic_id`, three "IST" stacks in the contract, the MADT parser
+and its boot message, the kernel stack size and allocator orders).
 
 ## SMP
 

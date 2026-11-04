@@ -1,0 +1,18 @@
+[package]
+name = "riscv64"
+description = "Nova: a compile-only riscv64 port, proof that MI code is machine-independent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+mdi = { workspace = true }
+
+[lints]
+workspace = true
