@@ -256,13 +256,36 @@ pub(crate) fn unpark(task: Arc<Task>) {
 pub(crate) fn preempt_point() {
     if NEED_RESCHED.get_on(curcpu()).swap(false, Ordering::Relaxed) {
         let g = intr_guard();
-        reschedule(&g);
+        reschedule_why(&g, Switch::Involuntary);
     }
+}
+
+/// Why a thread switches away.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Switch {
+    /// It yielded, blocked or exited (FreeBSD's `SW_VOL`).
+    Voluntary,
+    /// The clock preempted it (`SW_INVOL`).
+    Involuntary,
+}
+
+/// Involuntary context switches so far, all threads, all CPUs (the sum of
+/// FreeBSD's `ru_nivcsw`).
+static NIVCSW: AtomicU64 = AtomicU64::new(0);
+
+/// Involuntary context switches so far: how many times a running thread
+/// was preempted and another one run instead.
+pub fn involuntary_switches() -> u64 {
+    NIVCSW.load(Ordering::Relaxed)
 }
 
 /// Picks the next thread and switches to it (`mi_switch`). The caller
 /// holds `guard`, which must be the only interrupt guard alive.
 pub(crate) fn reschedule(guard: &IntrGuard) {
+    reschedule_why(guard, Switch::Voluntary);
+}
+
+fn reschedule_why(guard: &IntrGuard, why: Switch) {
     assert_eq!(
         cpu::intr_depth(),
         1,
@@ -317,6 +340,9 @@ pub(crate) fn reschedule(guard: &IntrGuard) {
         // one has finished the switch.
         *p.prev.borrow_mut() = Some(cur);
         *p.current.borrow_mut() = Some(next);
+    }
+    if why == Switch::Involuntary {
+        NIVCSW.fetch_add(1, Ordering::Relaxed);
     }
     // SAFETY: interrupts are off (we hold a guard). `old` is the running
     // thread's PCB, kept alive by `prev` until it is resumed and by its

@@ -65,5 +65,10 @@ fn main() {
     for f in ["HEAD", "index", "logs/HEAD"] {
         println!("cargo:rerun-if-changed=../../.git/{f}");
     }
+    // Editing a source file must also refresh `-dirty`. (Not `sys/` as a
+    // whole: that would include `target/`, which every build changes.)
+    for d in ["arch", "compat", "conf", "framework", "kern", "libkern", "mdi", "sys", "vm"] {
+        println!("cargo:rerun-if-changed=../{d}");
+    }
     println!("cargo:rerun-if-changed=build.rs");
 }

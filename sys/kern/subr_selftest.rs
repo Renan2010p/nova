@@ -182,23 +182,38 @@ fn preemption(verbose: bool, hz: u32) {
         task::yield_now();
     }
     let start = kern_clock::ticks();
+    let nivcsw = task::involuntary_switches();
     // While this thread sleeps the last spinner takes this CPU too. Waking
     // up only lets us run again if the clock preempts one of them.
     pause("preempt", 1);
     let back = kern_clock::ticks();
+    let preempted = task::involuntary_switches() - nivcsw;
     stop.store(true, Ordering::Release);
     spinners.iter().for_each(join);
     assert!(
         spins.load(Ordering::Relaxed) > 0,
-        "selftest: preemption: the spinner never ran"
+        "selftest: preemption: the spinners never ran"
+    );
+    assert!(
+        preempted > 0,
+        "selftest: preemption: back without any involuntary switch"
+    );
+    // Every CPU's slice ends within one quantum, so the first one to end
+    // lets this thread back in at most that long after it woke up.
+    let quantum = u64::from((hz / 10).max(1));
+    assert!(
+        back - start <= quantum + 1,
+        "selftest: preemption: waited {} ticks",
+        back - start
     );
     if verbose {
         printf!(
-            "selftest: preemption: {} busy thread(s) on {} CPU(s), one preempted after {} ticks (quantum {})\n",
+            "selftest: preemption: {} busy thread(s) on {} CPU(s); back after {} tick(s) through {} involuntary switch(es) (quantum {})\n",
             spinners.len(),
             framework::cpu::mp_ncpus(),
             back - start,
-            (hz / 10).max(1)
+            preempted,
+            quantum
         );
     }
 }
