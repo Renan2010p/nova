@@ -31,13 +31,18 @@
 //! | `freebsd_types.rs`      | `#[repr(C)]` structs (`stat`, `timespec`, `sigaction`...) with `const` layout checks |
 //! | `freebsd_sysctl.rs`     | `kern.osreldate`, `hw.pagesize`, `kern.proc.*`...        |
 //! | `freebsd_ioctl.rs`      | ioctl command translation                                |
-//! | `arch/amd64.rs`         | the MD half: syscall register convention (error in `%rax` with carry flag set), signal frame, initial stack |
+//! | `arch/amd64/`           | the MD half (`elf_machdep.rs`): ELF machine, later the syscall register convention (error in `%rax` with carry flag set), signal frame, initial stack |
 //!
 //! `arch/` is the only place in this crate allowed to use
 //! `cfg(target_arch)` (see docs/LAYERING.md, rule R3).
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+mod arch;
+mod freebsd_sysvec;
+
+pub use freebsd_sysvec::ELF64_FREEBSD_SYSVEC;
 
 /// `__FreeBSD_version` of the ABI this personality implements
 /// (`kern.osreldate`; FreeBSD 15.1-RELEASE).

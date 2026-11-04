@@ -38,6 +38,7 @@
 extern crate alloc;
 
 pub mod init_main;
+pub mod kern_abi;
 pub mod kern_clock;
 pub mod kern_cons;
 pub mod kern_environment;
