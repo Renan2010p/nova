@@ -35,8 +35,16 @@ pub const ELFDATA2LSB: u8 = 1;
 pub const ET_EXEC: u16 = 2;
 /// `e_type` of position-independent executables and shared objects.
 pub const ET_DYN: u16 = 3;
+/// `p_type` of a loadable segment.
+pub const PT_LOAD: u32 = 1;
 /// `p_type` of a note segment.
 pub const PT_NOTE: u32 = 4;
+/// `p_flags`: executable.
+pub const PF_X: u32 = 1;
+/// `p_flags`: writable.
+pub const PF_W: u32 = 2;
+/// `p_flags`: readable.
+pub const PF_R: u32 = 4;
 /// Size of an `Elf64_Ehdr`.
 pub const ELF64_EHDR_SIZE: usize = 64;
 /// Size of an `Elf64_Phdr`.
@@ -78,6 +86,39 @@ impl Ehdr {
             phnum: u16_at(56)?,
         })
     }
+}
+
+/// The fields of an `Elf64_Phdr`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Phdr {
+    /// `p_type`.
+    pub kind: u32,
+    /// `p_flags` (`PF_*`).
+    pub flags: u32,
+    /// `p_offset`: where the segment's bytes are in the file.
+    pub offset: u64,
+    /// `p_vaddr`.
+    pub vaddr: u64,
+    /// `p_filesz`.
+    pub filesz: u64,
+    /// `p_memsz` (the rest, up to it, is zero-filled).
+    pub memsz: u64,
+}
+
+/// The program headers of `image`, as far as they lie inside it.
+pub fn phdrs<'a>(image: &'a [u8], ehdr: &Ehdr) -> impl Iterator<Item = Phdr> + 'a {
+    let (phoff, phnum, phentsize) = (ehdr.phoff as usize, ehdr.phnum as usize, ehdr.phentsize as usize);
+    (0..phnum).filter_map(move |i| {
+        let ph = image.get(phoff.checked_add(i.checked_mul(phentsize)?)?..)?.get(..ELF64_PHDR_SIZE)?;
+        Some(Phdr {
+            kind: read_u32(ph, 0)?,
+            flags: read_u32(ph, 4)?,
+            offset: read_u64(ph, 8)?,
+            vaddr: read_u64(ph, 16)?,
+            filesz: read_u64(ph, 32)?,
+            memsz: read_u64(ph, 40)?,
+        })
+    })
 }
 
 /// One ELF note (`Elf_Note` with its name and descriptor).
@@ -278,6 +319,16 @@ mod tests {
             (&b"FreeBSD"[..], 1, &1501000u32.to_le_bytes()[..])
         );
         assert_eq!((n[1].name, n[1].desc.len()), (&b"GNU"[..], 5));
+    }
+
+    #[test]
+    fn lists_program_headers() {
+        let b = exe(9, 62, &[(b"FreeBSD", 1, &[0; 4])]);
+        let e = Ehdr::parse(&b).unwrap();
+        let p: Vec<Phdr> = phdrs(&b, &e).collect();
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].kind, p[0].offset), (PT_NOTE, b.len() as u64 - p[0].filesz));
+        assert_eq!(phdrs(&b[..70], &e).count(), 0);
     }
 
     #[test]

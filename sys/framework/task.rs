@@ -48,6 +48,7 @@ use crate::cpu::{self, IntrGuard, curcpu, intr_guard};
 use crate::mm::kstack::KernelStack;
 use crate::pcpu::CpuLocal;
 use crate::sync::{MtxSpin, OnceLock};
+use crate::user::{self, VmSpace};
 use crate::{MAXCPU, Md};
 
 const RUNNING: u8 = 0;
@@ -72,6 +73,8 @@ pub struct Task {
     state: AtomicU8,
     on_cpu: AtomicBool,
     idle: bool,
+    /// The user address space the thread runs in, if any.
+    vmspace: MtxSpin<Option<Arc<VmSpace>>>,
 }
 
 // SAFETY: every field but `pcb` is Sync. `pcb` is written only by
@@ -116,6 +119,7 @@ impl Task {
             state: AtomicU8::new(RUNNABLE),
             on_cpu: AtomicBool::new(false),
             idle,
+            vmspace: MtxSpin::new(None),
         })
     }
 
@@ -153,6 +157,11 @@ struct PerCpu {
     idle: RefCell<Option<Arc<Task>>>,
     /// The thread this CPU just switched away from, until `finish_switch`.
     prev: RefCell<Option<Arc<Task>>>,
+    /// The user address space active on this CPU. Kernel threads run in
+    /// whatever space is active (the kernel half is the same in all), so
+    /// it changes only when a thread with another space runs. Holding it
+    /// here keeps it alive while the CPU uses it.
+    vmspace: RefCell<Option<Arc<VmSpace>>>,
 }
 
 static PCPU: CpuLocal<PerCpu> = CpuLocal::new(
@@ -161,6 +170,7 @@ static PCPU: CpuLocal<PerCpu> = CpuLocal::new(
             current: RefCell::new(None),
             idle: RefCell::new(None),
             prev: RefCell::new(None),
+            vmspace: RefCell::new(None),
         }
     }; MAXCPU],
 );
@@ -179,6 +189,7 @@ pub(crate) fn init() {
         state: AtomicU8::new(RUNNING),
         on_cpu: AtomicBool::new(true),
         idle: false,
+        vmspace: MtxSpin::new(None),
     });
     let idle =
         Task::new("idle: cpu0", None, true).expect("task::init: no memory for the idle thread");
@@ -332,6 +343,7 @@ fn reschedule_why(guard: &IntrGuard, why: Switch) {
     }
     next.on_cpu.store(true, Ordering::Relaxed);
     next.state.store(RUNNING, Ordering::Relaxed);
+    activate_vmspace(guard, &next);
     let old = cur.pcb.get();
     let new = next.pcb.get() as *const _;
     {
@@ -353,6 +365,41 @@ fn reschedule_why(guard: &IntrGuard, why: Switch) {
 
     // We are `cur` again, maybe on another CPU: per-CPU state is read anew.
     finish_switch(guard);
+}
+
+/// Activates `task`'s address space on this CPU if it has one that is not
+/// active already. Returns false if it has none. A space replaced here may
+/// be freed here, with interrupts disabled.
+fn activate_vmspace(guard: &IntrGuard, task: &Task) -> bool {
+    let Some(vm) = task.vmspace.lock().clone() else {
+        return false;
+    };
+    let mut active = PCPU.get(guard).vmspace.borrow_mut();
+    if !active.as_ref().is_some_and(|a| Arc::ptr_eq(a, &vm)) {
+        user::activate(Some(&vm));
+        // The old space is no longer active here: release our reference.
+        let old = active.replace(vm);
+        drop(active);
+        drop(old);
+    }
+    true
+}
+
+/// `user::set_vmspace`.
+pub(crate) fn set_current_vmspace(vm: Option<Arc<VmSpace>>) {
+    let cur = current();
+    let old = core::mem::replace(&mut *cur.vmspace.lock(), vm);
+    // If `old` is active on this CPU, the CPU's own reference keeps it
+    // alive until another space replaces it; the kernel half it maps is
+    // all a thread without a space uses.
+    drop(old);
+}
+
+/// Activates the current thread's address space on this CPU; false if it
+/// has none. For `user::enter`.
+pub(crate) fn activate_current_vmspace(guard: &IntrGuard) -> bool {
+    let cur = PCPU.get(guard).current.borrow().clone().expect("no current thread");
+    activate_vmspace(guard, &cur)
 }
 
 /// The second half of every switch, run by the thread switched to: lets

@@ -58,6 +58,22 @@ pub(crate) fn vprintf_unlocked(args: fmt::Arguments<'_>) {
     let _ = ConsUnlocked.write_fmt(args);
 }
 
+/// Writes raw bytes to the console as one message: what a program writes
+/// to the console device.
+pub fn cnwrite(buf: &[u8]) {
+    let _guard = PRF_LOCK.lock();
+    buf.iter().copied().for_each(crate::kern_cons::cnputc);
+}
+
+/// Logs a message (`log(9)`). With no `syslogd` reading the log, which is
+/// always the case for now, it goes to the console, as in FreeBSD.
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {
+        $crate::subr_prf::vprintf(::core::format_args!($($arg)*))
+    };
+}
+
 /// Prints to the kernel console, like `format!`.
 #[macro_export]
 macro_rules! printf {

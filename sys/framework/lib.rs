@@ -55,6 +55,7 @@ pub mod pcpu;
 pub mod smp;
 pub mod sync;
 pub mod task;
+pub mod user;
 
 /// Seals the framework's marker traits (`PinnedToCpu`): services can use
 /// them as bounds but cannot implement them.

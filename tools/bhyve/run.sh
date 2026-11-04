@@ -19,7 +19,9 @@
 # Environment: VM (default nova), MEM (default 512M), CPUS (default 2),
 # VERBOSE=1 (boot_verbose, like "boot -v": diagnostics and self-test
 # results), SELFTEST=pf|stack (a fatal kernel page fault or stack overflow
-# on purpose, to check that traps are caught and reported).
+# on purpose, to check that traps are caught and reported), INIT=program
+# (preloaded as /sbin/init, which Nova executes as process 1; there is no
+# root file system yet).
 #
 # Nova halts like FreeBSD: "Please press any key to reboot." Press a key
 # (or wait for the panic countdown) and bhyve exits.
@@ -32,6 +34,7 @@ MEM=${MEM:-512M}
 CPUS=${CPUS:-2}
 SELFTEST=${SELFTEST:-}
 VERBOSE=${VERBOSE:-}
+INIT=${INIT:-}
 
 if [ "$(uname -s)" != FreeBSD ]; then
 	echo "run.sh: bhyve needs a FreeBSD host" >&2
@@ -69,6 +72,15 @@ boot_mute="NO"
 EOF
 if [ -n "$VERBOSE" ]; then
 	echo 'boot_verbose="YES"' >> "$ROOT/boot/loader.conf"
+fi
+if [ -n "$INIT" ]; then
+	mkdir -p "$ROOT/sbin"
+	cp "$INIT" "$ROOT/sbin/init"
+	cat >> "$ROOT/boot/loader.conf" <<EOF
+nova_init_load="YES"
+nova_init_type="nova_exec"
+nova_init_name="/sbin/init"
+EOF
 fi
 if [ -n "$SELFTEST" ]; then
 	echo "debug.nova.selftest=\"$SELFTEST\"" >> "$ROOT/boot/loader.conf"

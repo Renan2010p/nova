@@ -116,6 +116,10 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
         _ => &[],
     };
 
+    // The kernel image itself is live memory, not boot data: start after it.
+    let loaded_base = kernel_image_end() - KERNBASE;
+    let loaded = boot_data(loaded_base, kernend);
+
     let boot = BootInfo {
         firmware,
         physmem: physmap.as_slice(),
@@ -126,6 +130,8 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
         },
         howto,
         envp,
+        loaded,
+        loaded_base,
         ksyms,
         preload,
     };
@@ -136,6 +142,15 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     // interrupts disabled, the early console ready, traps handled and the
     // direct map in place, as it requires.
     unsafe { __nova_mi_startup(&boot) }
+}
+
+/// Virtual address of the end of the kernel image (`end` in the linker
+/// script).
+fn kernel_image_end() -> u64 {
+    unsafe extern "C" {
+        static end: u8;
+    }
+    core::ptr::addr_of!(end) as u64
 }
 
 /// Physical `[start, kernend)`, the tail of what the loader placed after

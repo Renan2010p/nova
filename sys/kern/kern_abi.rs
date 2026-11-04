@@ -26,14 +26,25 @@
 //! this trait. `checklayers` enforces the other half (rule R9): nothing but
 //! `sys/conf` may depend on a `sys/compat` crate.
 //!
-//! TODO(exec): with user mode (milestone 4) the trait grows the rest of
-//! `sysentvec`: setting up a new image (initial stack, auxv), dispatching
-//! syscalls from a trap frame, delivering signals, translating errors.
+//! What an ABI does, and what the kernel does for it:
+//!
+//! | The ABI (`sys/compat/<abi>`)                 | The kernel (`sys/kern`)                     |
+//! |----------------------------------------------|---------------------------------------------|
+//! | recognizes its images ([`SysEntVec::accepts`]) | loads `PT_LOAD` segments, maps the stack  |
+//! | lays out argv, envp, auxv and the registers  | runs the program ([`crate::subr_trap`])     |
+//! | decodes a system call, encodes its result    | implements it (`kern_write`, `exit1`, ...)  |
+//! | numbers errors and signals                   | decides which error, and acts on signals    |
+//! | says which signal a fault raises             | delivers it (for now: kills the process)    |
 
 use alloc::vec::Vec;
 
 use framework::sync::MtxSpin;
+use framework::user::{UserFault, UserRegs, VmSpace};
 use sys::elf::Ehdr;
+use sys::errno::KResult;
+use sys::signal::Signal;
+
+use crate::kern_proc::Proc;
 
 /// The first bytes of a file being executed, as the image activator
 /// reads them (`struct image_params`, `image_header`).
@@ -55,6 +66,39 @@ impl<'a> ExecImage<'a> {
     }
 }
 
+/// A loaded image, for the ABI to start (FreeBSD's `image_params` after
+/// the activator ran).
+#[derive(Clone, Copy, Debug)]
+pub struct ImageParams<'a> {
+    /// Entry point (`e_entry`).
+    pub entry: u64,
+    /// User address of the program headers (`AT_PHDR`), 0 if not loaded.
+    pub phdr: u64,
+    /// Size of a program header (`AT_PHENT`).
+    pub phent: u16,
+    /// Number of program headers (`AT_PHNUM`).
+    pub phnum: u16,
+    /// The path executed (`AT_EXECPATH`).
+    pub execpath: &'a str,
+    /// Arguments, `argv[0]` first.
+    pub argv: &'a [&'a str],
+    /// Environment strings, `name=value`.
+    pub envv: &'a [&'a str],
+}
+
+/// What follows a system call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyscallOutcome {
+    /// Return to the program (with the result the ABI stored in its
+    /// registers).
+    Return,
+    /// The program called `exit` with this status.
+    Exit(i32),
+    /// The call raises this signal (e.g. `SIGSYS` for a number the ABI
+    /// does not have).
+    Signal(Signal),
+}
+
 /// A userland ABI (FreeBSD's `struct sysentvec`). Implemented only in
 /// `sys/compat/*`.
 pub trait SysEntVec: Sync {
@@ -63,6 +107,28 @@ pub trait SysEntVec: Sync {
 
     /// Whether this ABI runs `image` (`brandinfo` matching).
     fn accepts(&self, image: &ExecImage<'_>) -> bool;
+
+    /// Top of the user stack (`sv_usrstack`). The kernel maps the stack
+    /// below it.
+    fn usrstack(&self) -> u64;
+
+    /// Writes the new image's strings, argument vectors and auxiliary
+    /// vector below `usrstack` in `vm`, and sets the registers the program
+    /// starts with (`sv_copyout_strings` and `sv_setregs`).
+    fn exec_setregs(&self, vm: &VmSpace, image: &ImageParams<'_>, regs: &mut UserRegs) -> KResult<()>;
+
+    /// Handles the system call the program made with `regs`: decodes it,
+    /// calls the kernel, and stores the result or error in `regs`
+    /// (`sv_fetch_syscall_args`, `sv_table`, `sv_set_syscall_retval`).
+    fn syscall(&self, p: &Proc, regs: &mut UserRegs) -> SyscallOutcome;
+
+    /// The signal a user fault raises. ABIs differ (a protection fault is
+    /// `SIGBUS` for FreeBSD, `SIGSEGV` elsewhere), so it is theirs to say
+    /// (FreeBSD's MD `trap()` and `sv_transtrap`).
+    fn trapsignal(&self, fault: &UserFault) -> Signal;
+
+    /// The ABI's number for `sig` (FreeBSD's signal numbers, `sv_sigtbl`).
+    fn signal_number(&self, sig: Signal) -> i32;
 }
 
 /// The ABIs this kernel is built with, in the order they were registered.

@@ -28,11 +28,14 @@
 //! later (hardware frame, error, trap number, 15 registers) the stack is
 //! still aligned when `trap` is called, as the ABI requires.
 //!
-//! TODO(user): `swapgs` on entry from and exit to user mode.
+//! A trap from user mode (`%cs` with RPL 3) instead goes to
+//! `alltraps_user`, which swaps `%gs` to the kernel's and calls
+//! `usermode::user_trap`; it never returns this way (see `usermode`).
 
 use core::arch::global_asm;
 
 use crate::trap::trap;
+use crate::usermode::user_trap;
 
 /// A stub for a vector without a CPU error code.
 macro_rules! idtvec {
@@ -119,6 +122,8 @@ global_asm!(
     ".globl alltraps",
     ".type alltraps, @function",
     "alltraps:",
+    "    test byte ptr [rsp + 24], 3", // the interrupted %cs
+    "    jnz alltraps_user",
     "    push r15",
     "    push r14",
     "    push r13",
@@ -163,7 +168,33 @@ global_asm!(
     "    add rsp, 16", // trap number and error code
     "    iretq",
     ".size calltrap, . - calltrap",
+    "",
+    ".globl alltraps_user",
+    ".type alltraps_user, @function",
+    "alltraps_user:",
+    "    swapgs",
+    "    push r15",
+    "    push r14",
+    "    push r13",
+    "    push r12",
+    "    push r11",
+    "    push r10",
+    "    push r9",
+    "    push r8",
+    "    push rbp",
+    "    push rdi",
+    "    push rsi",
+    "    push rdx",
+    "    push rcx",
+    "    push rbx",
+    "    push rax",
+    "    cld",
+    "    mov rdi, rsp",
+    "    call {user_trap}",
+    "    ud2",
+    ".size alltraps_user, . - alltraps_user",
     trap = sym trap,
+    user_trap = sym user_trap,
 );
 
 #[allow(missing_docs)]

@@ -21,6 +21,17 @@ pub const APICBASE_ENABLED: u64 = 1 << 11;
 /// `MSR_APICBASE`: the local APIC is in x2APIC mode.
 pub const APICBASE_X2APIC: u64 = 1 << 10;
 
+/// Extended features: `EFER_SCE` (syscall), `EFER_LME`, `EFER_NXE`.
+pub const MSR_EFER: u32 = 0xc000_0080;
+/// `EFER`: `syscall`/`sysret` enabled.
+pub const EFER_SCE: u64 = 1 << 0;
+/// Segment selectors of `syscall` (bits 47:32) and `sysret` (63:48).
+pub const MSR_STAR: u32 = 0xc000_0081;
+/// 64-bit `syscall` entry point.
+pub const MSR_LSTAR: u32 = 0xc000_0082;
+/// `%rflags` bits cleared on `syscall`.
+pub const MSR_SF_MASK: u32 = 0xc000_0084;
+
 /// Base of the `%fs` segment.
 pub const MSR_FSBASE: u32 = 0xc000_0100;
 /// Base of the `%gs` segment: the current CPU's per-CPU area in the kernel.

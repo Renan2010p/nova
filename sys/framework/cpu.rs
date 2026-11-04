@@ -110,6 +110,14 @@ impl Drop for IntrGuard {
     }
 }
 
+/// Forgets `g` without restoring the interrupt state: interrupts stay
+/// disabled, but no guard is counted any more. For `user::enter`, whose
+/// MD half enables interrupts itself on the way to user mode.
+pub(crate) fn guard_forget(g: IntrGuard) {
+    INTR_DEPTH[curcpu().index()].fetch_sub(1, Ordering::Relaxed);
+    core::mem::forget(g);
+}
+
 /// Interrupt guards alive on this CPU.
 pub(crate) fn intr_depth() -> u32 {
     INTR_DEPTH[curcpu().index()].load(Ordering::Relaxed)

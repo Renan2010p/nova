@@ -10,7 +10,7 @@
 
 [workspace]
 resolver = "3"
-members = ["checklayers"]
+members = ["checklayers", "makesyscalls"]
 
 [workspace.package]
 version = "0.1.0"

@@ -153,4 +153,20 @@ impl Frame {
     pub fn write_bytes(&mut self, offset: usize, buf: &[u8]) {
         self.0.write_bytes(offset, buf)
     }
+
+    /// Gives the page up, returning its physical address (see
+    /// [`Segment::leak`]). For page-table pages handed to the MD layer.
+    pub(crate) fn leak(self) -> u64 {
+        self.0.leak()
+    }
+
+    /// Re-takes ownership of a page given up by [`Frame::leak`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Segment::from_leaked`].
+    pub(crate) unsafe fn from_leaked(pa: u64) -> Self {
+        // SAFETY: forwarded to the caller.
+        Frame(unsafe { Segment::from_leaked(pa, 0) })
+    }
 }

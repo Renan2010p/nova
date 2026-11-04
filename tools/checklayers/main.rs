@@ -32,7 +32,10 @@
 //! * R8 every `.rs` file starts with the MPL-2.0 header;
 //! * R9 personalities (`compat/*`) are leaves: only `conf` depends on them;
 //! * R13 no machine-dependent vocabulary (`apic`, `amd64`, `msr`, ...) in
-//!   identifiers of MI code, outside `arch/` directories.
+//!   identifiers of MI code, outside `arch/` directories;
+//! * R15 no ABI vocabulary (`freebsd`, `linux`, ...) in identifiers
+//!   outside the personalities (`compat/*`) and `conf`: the kernel knows
+//!   no ABI, so running another one only takes a new `sys/compat/<abi>`.
 //!
 //! It is deliberately dependency-free and parses only the subset of TOML
 //! that sys/ uses. Source checks run on code with comments and string
@@ -312,6 +315,21 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
                     }
                 }
             }
+            if !c.path.starts_with("compat/") && c.layer != Layer::Conf {
+                for ident in identifiers(line) {
+                    if let Some(word) = abi_word(ident) {
+                        report.err(
+                            file,
+                            n,
+                            format!(
+                                "R15: `{ident}` names the `{word}` ABI outside sys/compat; \
+                                 the kernel knows no ABI: put it in the personality, behind \
+                                 `kern::kern_abi::SysEntVec`"
+                            ),
+                        );
+                    }
+                }
+            }
             if line
                 .split_whitespace()
                 .collect::<Vec<_>>()
@@ -343,6 +361,14 @@ const MD_WORDS: &[&str] = &[
     "apic", "lapic", "ioapic", "xapic", "x2apic", "sipi", "madt", "smap", "e820", "ns8250",
 ];
 
+/// Words that name a userland ABI (R15). Only personalities and `conf`
+/// may contain them in identifiers; comments and strings are not checked,
+/// so the kernel may say where its designs come from.
+const ABI_WORDS: &[&str] = &[
+    "freebsd", "linux", "netbsd", "openbsd", "dragonfly", "illumos", "solaris", "sunos",
+    "darwin", "macos", "xnu", "svr4", "ibcs2", "cloudabi", "haiku", "redox",
+];
+
 /// The identifiers of a line of (comment- and string-free) code.
 fn identifiers(line: &str) -> impl Iterator<Item = &str> {
     line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -356,6 +382,18 @@ fn identifiers(line: &str) -> impl Iterator<Item = &str> {
 /// The first MD word an identifier is made of, splitting snake_case and
 /// CamelCase (`cpu_apic_id` and `CpuApicId` both contain `apic`).
 fn md_word(ident: &str) -> Option<&'static str> {
+    word_in(ident, MD_WORDS)
+}
+
+/// The first ABI word an identifier is made of (`FreebsdSysvec` and
+/// `ELF64_FREEBSD_SYSVEC` both contain `freebsd`).
+fn abi_word(ident: &str) -> Option<&'static str> {
+    word_in(ident, ABI_WORDS)
+}
+
+/// The first word of `list` an identifier is made of, splitting
+/// snake_case and CamelCase.
+fn word_in(ident: &str, list: &[&'static str]) -> Option<&'static str> {
     let mut words: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut prev_lower = false;
@@ -374,7 +412,7 @@ fn md_word(ident: &str) -> Option<&'static str> {
     words.push(cur);
     words
         .iter()
-        .find_map(|w| MD_WORDS.iter().copied().find(|m| m == w))
+        .find_map(|w| list.iter().copied().find(|m| m == w))
 }
 
 fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -576,6 +614,16 @@ mod tests {
         assert_eq!(md_word("strip"), None);
         let ids: Vec<&str> = identifiers("let x = a.b_c(1, 0x1f) + Md::foo;").collect();
         assert_eq!(ids, ["let", "x", "a", "b_c", "Md", "foo"]);
+    }
+
+    #[test]
+    fn abi_words_are_found_in_identifiers() {
+        assert_eq!(abi_word("FreebsdSysvec"), Some("freebsd"));
+        assert_eq!(abi_word("ELF64_FREEBSD_SYSVEC"), Some("freebsd"));
+        assert_eq!(abi_word("linux_syscall"), Some("linux"));
+        assert_eq!(abi_word("SysEntVec"), None);
+        assert_eq!(abi_word("SYSVECS"), None);
+        assert_eq!(abi_word("unlinkat"), None);
     }
 
     #[test]

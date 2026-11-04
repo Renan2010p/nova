@@ -26,8 +26,9 @@
 //! that a frame can later be mapped into user space without the kernel
 //! holding Rust references into memory that userland can change.
 //!
-//! TODO(vm): `VmSpace` over the MD `pmap` (user address spaces), the
-//! `vm_page` array, NUMA domains, and per-CPU page caches (smp).
+//! User address spaces are in [`crate::user`].
+//!
+//! TODO(vm): the `vm_page` array, NUMA domains, and per-CPU page caches (smp).
 
 pub mod frame;
 pub mod kmem;

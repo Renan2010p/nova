@@ -51,6 +51,7 @@ mod pmap;
 mod segments;
 mod swtch;
 mod trap;
+pub mod usermode;
 mod vm_machdep;
 pub mod vmparam;
 
@@ -267,5 +268,44 @@ impl mdi::Machine for Machine {
 
     fn vm_guest() -> bool {
         identcpu::vm_guest()
+    }
+}
+
+// SAFETY: `usermode::cpu_user_enter` enters user mode only with user
+// selectors, IOPL 0 and user-half %rip/%rsp, and every way back (system
+// call, interrupt, exception) ends in its return; the pmap functions build
+// page tables whose kernel half is the kernel's.
+unsafe impl mdi::UserMode for Machine {
+    type UserRegs = usermode::UserRegs;
+    const VM_MAXUSER_ADDRESS: u64 = usermode::VM_MAXUSER_ADDRESS;
+
+    fn pmap_pinit(alloc: &mut dyn FnMut() -> Option<u64>) -> Option<u64> {
+        pmap::pmap_pinit(alloc)
+    }
+
+    unsafe fn pmap_enter_user(
+        root: u64,
+        va: u64,
+        pa: u64,
+        prot: mdi::Prot,
+        alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> bool {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { pmap::pmap_enter_user(root, va, pa, prot, alloc) }
+    }
+
+    unsafe fn pmap_release(root: u64, free: &mut dyn FnMut(u64)) {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { pmap::pmap_release(root, free) }
+    }
+
+    unsafe fn pmap_activate(root: u64) {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { pmap::pmap_activate(root) }
+    }
+
+    unsafe fn cpu_user_enter(regs: &mut Self::UserRegs) -> mdi::UserExit {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { usermode::cpu_user_enter(regs) }
     }
 }

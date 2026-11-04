@@ -14,5 +14,11 @@
 //! FreeBSD/amd64 (FreeBSD's `amd64/amd64/elf_machdep.c` and friends).
 
 mod elf_machdep;
+mod exec_machdep;
+mod trap;
+mod vm_machdep;
 
 pub(crate) use elf_machdep::*;
+pub(crate) use exec_machdep::*;
+pub(crate) use trap::*;
+pub(crate) use vm_machdep::*;

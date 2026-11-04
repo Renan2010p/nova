@@ -38,17 +38,31 @@
 //! the point where FreeBSD would start `init(8)`.
 
 use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use framework::{BootInfo, PAGE_SIZE};
 use sys::copyright::{COPYRIGHT, OSTYPE};
-use sys::reboot::{RB_HALT, RB_VERBOSE};
+use sys::reboot::{RB_SINGLE, RB_VERBOSE};
 
 use crate::kern_environment::StaticEnv;
 use crate::subr_prf::Cons;
 use crate::vers::{COMPILER, KERN_IDENT, OSRELEASE, VCS};
+use crate::kern_proc::Proc;
 use crate::{
-    kern_clock, kern_linker, kern_shutdown, printf, sched_4bsd, subr_param, subr_selftest,
+    kern_clock, kern_exec, kern_kthread, kern_linker, kern_shutdown, kern_synch, printf,
+    sched_4bsd, subr_param, subr_selftest, subr_trap,
 };
+
+/// `bootverbose`: the loader was asked for a verbose boot (`boot -v`).
+static BOOTVERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// True for a verbose boot: messages FreeBSD prints only then, or Nova's
+/// own diagnostics, are printed.
+pub fn bootverbose() -> bool {
+    BOOTVERBOSE.load(Ordering::Relaxed)
+}
 
 /// The MI entry point (`mdi::MiStartup`). Called once by the MD bootstrap
 /// on the boot CPU, with interrupts disabled; the framework (page
@@ -56,6 +70,7 @@ use crate::{
 pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     let kenv = StaticEnv::new(boot.envp);
     let bootverbose = boot.howto & RB_VERBOSE != 0;
+    BOOTVERBOSE.store(bootverbose, Ordering::Relaxed);
     let param = subr_param::init_param1(&kenv);
     kern_shutdown::set_panic_reboot_wait_time(param.panic_reboot_wait_time);
     kern_linker::linker_init(boot);
@@ -77,8 +92,54 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     subr_selftest::trap_selftest(&kenv);
 
     // This is where FreeBSD would start init(8).
-    printf!("Nova: no userland yet; halting.\n");
-    kern_shutdown::kern_reboot(RB_HALT)
+    start_init(boot, &kenv, bootverbose);
+    swapper(param.hz)
+}
+
+/// Paths tried for `init`, unless `init_path` is set (FreeBSD's default).
+const INIT_PATH: &str = "/sbin/init:/sbin/oinit:/sbin/init.bak:/rescue/init";
+
+/// Starts the initial user process: execs the first file of `init_path`
+/// that the loader preloaded (`start_init`; there is no root file system
+/// yet, so "found" means preloaded, e.g. with `init_load="YES"`,
+/// `init_type="nova_exec"` and `init_name="/sbin/init"` in loader.conf).
+fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
+    let init_path = kenv.getenv("init_path").unwrap_or(INIT_PATH);
+    for path in init_path.split(':') {
+        if bootverbose {
+            printf!("start_init: trying {}\n", path);
+        }
+        let Some(file) = kern_linker::preload_file(boot, path) else {
+            continue; // ENOENT
+        };
+        let mut argv = vec![path];
+        if boot.howto & RB_SINGLE != 0 {
+            argv.push("-s");
+        }
+        match kern_exec::kern_execve(file, path, &argv, &[]) {
+            Ok(image) => {
+                let path = String::from(path);
+                let td = kern_kthread::kthread_add("init", move || {
+                    let p = Proc::new(&path, image.vm, image.abi);
+                    subr_trap::userret_loop(&p, image.regs);
+                });
+                assert!(td.is_some(), "start_init: no memory for init");
+                return;
+            }
+            // The kernel has no error numbers; the ABI that would have
+            // given one is the one that failed.
+            Err(e) => printf!("exec {}: error {:?}\n", path, e),
+        }
+    }
+    printf!("init: not found in path {}\n", init_path);
+    panic!("no init");
+}
+
+/// What the boot thread becomes once the system is up (`swapper`).
+fn swapper(hz: u32) -> ! {
+    loop {
+        kern_synch::pause("swapin", hz);
+    }
 }
 
 /// The copyright notice and version (`print_caddr_t(copyright)`,

@@ -71,7 +71,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selectors_match_freebsd() {
+    // User selectors are visible to programs (signal frames, %cs), so they
+    // are fixed: those of FreeBSD's GDT layout.
+    fn selectors_are_fixed() {
         assert_eq!(gsel(4, SEL_KPL), 0x20);
         assert_eq!(gsel(8, SEL_UPL), 0x43);
     }

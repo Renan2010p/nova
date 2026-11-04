@@ -177,3 +177,45 @@ impl mdi::Machine for Machine {
         false
     }
 }
+
+/// The riscv64 user register file (`x1`..`x31` and `sepc`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UserRegs {
+    /// General registers `x1`..`x31` (`x[0]` is `ra`).
+    pub x: [u64; 31],
+    /// The user program counter.
+    pub sepc: u64,
+}
+
+// SAFETY: nothing here enters user mode yet; every function panics.
+unsafe impl mdi::UserMode for Machine {
+    type UserRegs = UserRegs;
+    /// `VM_MAXUSER_ADDRESS` for Sv39, as in FreeBSD.
+    const VM_MAXUSER_ADDRESS: u64 = 0x0000_0040_0000_0000;
+
+    fn pmap_pinit(_alloc: &mut dyn FnMut() -> Option<u64>) -> Option<u64> {
+        todo("pmap_pinit")
+    }
+
+    unsafe fn pmap_enter_user(
+        _root: u64,
+        _va: u64,
+        _pa: u64,
+        _prot: mdi::Prot,
+        _alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> bool {
+        todo("pmap_enter_user")
+    }
+
+    unsafe fn pmap_release(_root: u64, _free: &mut dyn FnMut(u64)) {
+        todo("pmap_release")
+    }
+
+    unsafe fn pmap_activate(_root: u64) {
+        todo("pmap_activate")
+    }
+
+    unsafe fn cpu_user_enter(_regs: &mut Self::UserRegs) -> mdi::UserExit {
+        todo("cpu_user_enter")
+    }
+}

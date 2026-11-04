@@ -197,26 +197,95 @@ for user address spaces), stopping CPUs with an NMI, per-CPU run queues
 (`sched_ule`), per-CPU caches in `uma`, and xAPIC for CPUs without
 x2APIC.
 
-## The FreeBSD personality
+## ABIs: the kernel knows none
 
-FreeBSD binaries are Nova's native userland, but the ABI is still kept in
-one place, `sys/compat/freebsd`, the way FreeBSD keeps its Linux ABI in
-`sys/compat/linux`:
+The kernel does not know any userland ABI. It knows one interface,
+`kern::kern_abi::SysEntVec` (FreeBSD's `struct sysentvec` as a trait), and
+every ABI lives in `sys/compat/<abi>`, with its MD half in
+`sys/compat/<abi>/arch/<arch>/`. Only `sys/conf` registers ABIs.
 
-* the syscall table, **generated** from FreeBSD's
-  `sys/kern/syscalls.master` by `tools/makesyscalls`;
-* the `sysentvec`: syscall dispatch, errno translation, signal delivery,
-  initial stack and auxv;
-* `#[repr(C)]` structs with `const` layout assertions, whose expected
-  values come from a dump made on a real FreeBSD 15.1;
-* the MD part (`arch/amd64.rs`): the syscall register convention (errors
-  are returned in `%rax` with the carry flag set, unlike Linux), the signal
-  frame.
+| The ABI (`sys/compat/<abi>`) | The kernel (`sys/kern`) |
+|---|---|
+| recognizes its images (`accepts`: brand, note, `EI_OSABI`) | loads `PT_LOAD` segments, maps the stack (`kern_execve`) |
+| lays out argv, envp, auxv and the start registers (`exec_setregs`) | runs the program (`subr_trap::userret_loop`) |
+| decodes a system call, encodes the result (`syscall`) | implements it (`kern_write`, `exit1`, ...) |
+| says which signal a fault raises (`trapsignal`) | delivers it (for now: kills, with FreeBSD's log line) |
+| numbers errors and signals (`signal_number`, its errno map) | names them only: `Errno`, `Signal` |
 
-The MI kernel has its own internal interfaces and errno. Only the
-personality translates. That keeps the kernel free to evolve, and leaves
-room for other personalities next to FreeBSD's (a native Nova ABI, Linux).
-Only `conf` links personalities in (rule R9).
+`checklayers` rule R15 keeps ABI names out of every other crate, and the
+`Errno` and `Signal` enums are exhaustive, so a new kernel error does not
+compile until every ABI has a number for it. A Linux, NetBSD or native
+Nova ABI is "just" a new `sys/compat/<abi>`.
+
+Still to generalize when a second ABI arrives: the image format (the
+kernel loads ELF itself, as FreeBSD's `imgact_elf` serves several ELF
+ABIs; a non-ELF ABI would bring its own image activator, FreeBSD's
+`execsw`), and the set of signals and errors (grown as needed).
+
+### The FreeBSD personality
+
+FreeBSD binaries are Nova's native userland, through `sys/compat/freebsd`:
+
+* `freebsd_syscalls.rs`: numbers and names, **generated** from FreeBSD's
+  `sys/kern/syscalls.master` by `tools/makesyscalls` (`make sysent`); its
+  output is identical to FreeBSD's own `syscalls.c` and `syscall.h`;
+* `freebsd_sysent.rs`: the table: decodes arguments, calls the kernel. A
+  number FreeBSD lacks is `nosys` (`SIGSYS`); one Nova lacks yet is
+  `ENOSYS`, logged on a verbose boot;
+* `freebsd_sysvec.rs`: brand matching, start-up, syscall entry;
+* `freebsd_exec.rs`: the initial stack, laid out as FreeBSD's
+  `exec_copyout_strings` and `freebsd_copyout_auxargs` do;
+* `freebsd_errno.rs`, `freebsd_signal.rs`: numbers, and `trap()`'s
+  fault-to-signal policy;
+* `arch/amd64/`: `USRSTACK`, `exec_setregs` (`%rdi` = stack base, `%rsp`
+  as after a call), arguments in `%rdi %rsi %rdx %r10 %r8 %r9`, errors in
+  `%rax` with the carry flag set; `arch/riscv64/`: `t0`/`a0`-`a7`.
+
+Planned: `#[repr(C)]` structs with `const` layout assertions checked
+against a dump made on a real FreeBSD 15.1 (`tools/abidump`), sysctls,
+ioctls, the signal frame.
+
+## User mode
+
+```
+ kern::subr_trap::userret_loop(proc, regs)
+   loop: framework::user::enter(&mut regs)          (no guard held)
+           Md::cpu_user_enter ─► nova_user_enter: save kernel context,
+                                 TSS.rsp0, swapgs, iretq to user mode
+           ◄─ syscall      Xfast_syscall: swapgs, save user registers,
+                           return to cpu_user_enter         ─► abi.syscall
+           ◄─ interrupt    alltraps_user ─► user_trap: save registers,
+                           trap() (may preempt), return     ─► loop
+           ◄─ exception    alltraps_user ─► user_trap: FaultKind
+                                                       ─► abi.trapsignal
+```
+
+Entering user mode is a function call that returns when the program comes
+back, so the kernel side of a process is plain Rust code on its thread's
+stack. `framework::user::VmSpace` owns every page it maps; the kernel
+reads and writes user memory only by copying (`copyin`, `copyout`), never
+through a user pointer. The scheduler activates a thread's address space
+when it runs it; kernel threads run in whichever is active (the kernel
+half is shared), and each CPU holds a reference to its active space, so a
+space is freed only when no CPU can use it.
+
+`init` is the first file of `init_path` (FreeBSD's default
+`/sbin/init:/sbin/oinit:/sbin/init.bak:/rescue/init`) that the loader
+preloaded, since there is no root file system yet. As in FreeBSD, its exit
+is fatal: `init died (signal 0, exit 0)`, `panic: Going nowhere without my
+init!`.
+
+## Drivers
+
+Drivers will be framekernel **services** in `sys/dev`, with
+`#![forbid(unsafe_code)]` like the rest: they reach the hardware only
+through framework abstractions (MMIO, I/O ports, DMA, interrupts), so a
+buggy driver cannot corrupt kernel memory. Because a driver sees only that
+interface, it can later be served by a userspace driver host as well, for
+untrusted or third-party drivers, once Nova has fast IPC, an IOMMU and
+interrupts delivered to user mode. The GUI is userland already, as on
+FreeBSD (Xorg, Wayland); the kernel will provide the interfaces it needs
+(DRM/KMS, evdev, devfs).
 
 ## Memory
 
@@ -239,8 +308,8 @@ code is sound only because of that contract, which is why it is an
 `unsafe trait`.
 
 Frame contents are reached by copying (`read_bytes`/`write_bytes`), never
-through `&[u8]`, so that once frames can be mapped into user space, the
-kernel never holds Rust references into memory userland can change.
+through `&[u8]`, so the kernel never holds Rust references into memory
+userland can change (see "User mode").
 
 ## Traps and interrupts
 

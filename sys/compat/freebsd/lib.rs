@@ -21,17 +21,20 @@
 //! crate translates. That keeps the kernel free to evolve, and leaves room
 //! for other personalities (a native Nova ABI, Linux) next to this one.
 //!
-//! Planned layout (milestone 4 onwards):
+//! Layout (planned files in italics):
 //!
 //! | File                    | Role                                                     |
 //! |-------------------------|----------------------------------------------------------|
-//! | `freebsd_sysent.rs`     | GENERATED from FreeBSD's `sys/kern/syscalls.master` by `tools/makesyscalls` |
-//! | `freebsd_sysvec.rs`     | the `sysentvec`: syscall table, errno translation, signal delivery, auxv |
-//! | `freebsd_errno.rs`      | Nova errno → FreeBSD errno                               |
-//! | `freebsd_types.rs`      | `#[repr(C)]` structs (`stat`, `timespec`, `sigaction`...) with `const` layout checks |
-//! | `freebsd_sysctl.rs`     | `kern.osreldate`, `hw.pagesize`, `kern.proc.*`...        |
-//! | `freebsd_ioctl.rs`      | ioctl command translation                                |
-//! | `arch/amd64/`           | the MD half (`elf_machdep.rs`): ELF machine, later the syscall register convention (error in `%rax` with carry flag set), signal frame, initial stack |
+//! | `freebsd_syscalls.rs`   | GENERATED from FreeBSD's `sys/kern/syscalls.master` by `tools/makesyscalls`: numbers and names |
+//! | `freebsd_sysent.rs`     | the system call table: decodes arguments, calls the kernel |
+//! | `freebsd_sysvec.rs`     | the `sysentvec`: brand matching, start-up, syscall entry |
+//! | `freebsd_exec.rs`       | the initial stack: strings, `ps_strings`, auxv           |
+//! | `freebsd_errno.rs`      | kernel `Errno` → FreeBSD errno                           |
+//! | `freebsd_signal.rs`     | kernel `Signal` → FreeBSD signal number                  |
+//! | *`freebsd_types.rs`*    | `#[repr(C)]` structs (`stat`, `timespec`, `sigaction`...) with `const` layout checks |
+//! | *`freebsd_sysctl.rs`*   | `kern.osreldate`, `hw.pagesize`, `kern.proc.*`...        |
+//! | *`freebsd_ioctl.rs`*    | ioctl command translation                                |
+//! | `arch/amd64/`           | the MD half: ELF machine (`elf_machdep.rs`), `USRSTACK` and start registers (`exec_machdep.rs`), syscall arguments (`trap.rs`) and results, error with the carry flag set (`vm_machdep.rs`); later the signal frame |
 //!
 //! `arch/` is the only place in this crate allowed to use
 //! `cfg(target_arch)` (see docs/LAYERING.md, rule R3).
@@ -40,7 +43,14 @@
 #![forbid(unsafe_code)]
 
 mod arch;
+mod freebsd_errno;
+mod freebsd_exec;
+mod freebsd_signal;
+mod freebsd_syscalls;
+mod freebsd_sysent;
 mod freebsd_sysvec;
+
+extern crate alloc;
 
 pub use freebsd_sysvec::ELF64_FREEBSD_SYSVEC;
 

@@ -18,12 +18,15 @@
 //! the root of all SMP support: the framework's `curcpu()` and
 //! `CpuLocal<T>` are built on it.
 //!
-//! The area will grow fields FreeBSD keeps here too (`curthread`, the TSS,
-//! the kernel stack for syscalls); they are read in assembly at fixed
-//! offsets, hence `#[repr(C)]`.
+//! It also holds what the user-mode entry and exit code needs while
+//! `%gs` is the only register it can trust (`usermode.rs`): where the
+//! thread's kernel context is saved, where the user registers go, and
+//! this CPU's TSS. Assembly reads them at fixed offsets, hence
+//! `#[repr(C)]`.
 
 use core::arch::asm;
 use core::mem::offset_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use x86::cpufunc::wrmsr;
 use x86::specialreg::MSR_GSBASE;
@@ -35,11 +38,37 @@ use crate::param::MAXCPU;
 pub struct Pcpu {
     /// This CPU's id (`pc_cpuid`).
     cpuid: u32,
+    _pad: u32,
+    /// While a thread runs in user mode on this CPU: its saved kernel
+    /// stack pointer, where user mode "returns" to.
+    pub(crate) kern_rsp: AtomicU64,
+    /// While a thread runs in user mode on this CPU: where its user
+    /// registers are saved on the way back.
+    pub(crate) user_regs: AtomicU64,
+    /// Scratch word for the `syscall` entry (the user `%rsp`).
+    pub(crate) scratch: AtomicU64,
+    /// Address of this CPU's `TSS.rsp0`.
+    pub(crate) tss_rsp0: AtomicU64,
 }
+
+/// Offsets into [`Pcpu`] for the assembly.
+pub(crate) const PC_KERN_RSP: usize = offset_of!(Pcpu, kern_rsp);
+pub(crate) const PC_USER_REGS: usize = offset_of!(Pcpu, user_regs);
+pub(crate) const PC_SCRATCH: usize = offset_of!(Pcpu, scratch);
+pub(crate) const PC_TSS_RSP0: usize = offset_of!(Pcpu, tss_rsp0);
 
 /// One area per possible CPU, with `cpuid` filled in at build time.
 static PCPU: [Pcpu; MAXCPU] = {
-    let mut a = [const { Pcpu { cpuid: 0 } }; MAXCPU];
+    let mut a = [const {
+        Pcpu {
+            cpuid: 0,
+            _pad: 0,
+            kern_rsp: AtomicU64::new(0),
+            user_regs: AtomicU64::new(0),
+            scratch: AtomicU64::new(0),
+            tss_rsp0: AtomicU64::new(0),
+        }
+    }; MAXCPU];
     let mut i = 0;
     while i < MAXCPU {
         a[i].cpuid = i as u32;
@@ -73,4 +102,14 @@ pub(crate) fn curcpu() -> u32 {
         )
     }
     id
+}
+
+/// Records where CPU `cpuid`'s `TSS.rsp0` is (from `cpu_tables_init`).
+pub(crate) fn pcpu_set_tss_rsp0(cpuid: u32, addr: u64) {
+    PCPU[cpuid as usize].tss_rsp0.store(addr, Ordering::Relaxed);
+}
+
+/// This CPU's area.
+pub(crate) fn pcpu_self() -> &'static Pcpu {
+    &PCPU[curcpu() as usize]
 }

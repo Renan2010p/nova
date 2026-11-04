@@ -32,6 +32,8 @@ use x86::segments::{
 };
 
 use crate::param::{MAXCPU, PAGE_SIZE};
+use crate::pcpu::pcpu_set_tss_rsp0;
+use crate::usermode::syscall_init;
 
 /// Null descriptor.
 pub const GNULL_SEL: usize = 0;
@@ -212,7 +214,8 @@ pub(crate) fn boot_ist_tops() -> [u64; 3] {
 
 /// Sets up and loads CPU `cpuid`'s GDT and TSS, with `ist_tops` as its
 /// double fault, NMI and machine check stacks, reloads the segment
-/// registers, and loads the shared IDT. Each CPU calls it on itself.
+/// registers, loads the shared IDT and sets up `syscall`. Each CPU calls
+/// it on itself.
 pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
     let id = cpuid as usize;
     let tss = COMMON_TSS.0[id].get();
@@ -273,4 +276,7 @@ pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
             base: IDT.0.get() as u64,
         });
     }
+    // `TSS.rsp0` follows the 32-bit reserved word at the start of the TSS.
+    pcpu_set_tss_rsp0(cpuid, tss as u64 + 4);
+    syscall_init();
 }

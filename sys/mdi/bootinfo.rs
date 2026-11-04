@@ -64,6 +64,13 @@ pub struct BootInfo<'a> {
     /// ending with an empty string. May run past that terminator; the
     /// consumer (`kern::kern_environment`) finds it.
     pub envp: &'a [u8],
+    /// What the loader placed in memory after the kernel image (preloaded
+    /// files, symbols, metadata), starting at physical `loaded_base`, so
+    /// that MI code can read a preloaded file from its `MODINFO_ADDR` and
+    /// `MODINFO_SIZE`.
+    pub loaded: &'static [u8],
+    /// Physical address of `loaded[0]`.
+    pub loaded_base: u64,
     /// The kernel symbol table preloaded by the loader, `[SSYM, ESYM)`, in
     /// the layout `sys::elf::KSymTab` reads; empty if absent.
     pub ksyms: &'static [u8],

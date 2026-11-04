@@ -13,7 +13,8 @@
 
 //! The kernel linker (FreeBSD's `kern/kern_linker.c`): for now, the
 //! kernel's own symbol table, which the loader preloaded, used to name the
-//! functions in backtraces (`linker_ddb_search_symbol`).
+//! functions in backtraces (`linker_ddb_search_symbol`), and the files the
+//! loader preloaded (`preload_search_by_name`).
 //!
 //! TODO(kld): loadable kernel modules.
 
@@ -30,6 +31,15 @@ pub fn linker_init(boot: &BootInfo<'_>) {
     if let Some(table) = KSymTab::new(boot.ksyms) {
         let _ = KSYMS.set(table);
     }
+}
+
+/// The contents of the file the loader preloaded as `name`
+/// (`preload_search_by_name` and `preload_fetch_addr`), if any.
+pub fn preload_file(boot: &BootInfo<'_>, name: &str) -> Option<&'static [u8]> {
+    let m = boot.preload.modules().find(|m| m.name() == Some(name))?;
+    let off = usize::try_from(m.addr()?.checked_sub(boot.loaded_base)?).ok()?;
+    let size = usize::try_from(m.size()?).ok()?;
+    boot.loaded.get(off..off.checked_add(size)?)
 }
 
 /// Writes `addr` as `function+0xoffset`, with Rust names demangled, or

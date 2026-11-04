@@ -32,8 +32,12 @@
 //! `KPML4BASE`) with `pmap_kenter`/`pmap_kremove`; kernel stacks with their
 //! guard pages live there. Page tables are reached through the direct map.
 //!
-//! TODO(vm): user address spaces (`pmap_pinit`, `pmap_enter`), PG_G for
-//! kernel pages, NX, PCID, and TLB shootdown IPIs (smp).
+//! A user address space (`pmap_pinit`) is a PML4 whose lower half is its
+//! own and whose upper half is a copy of the kernel's. Every kernel PML4
+//! entry exists from the bootstrap on and is never replaced, so the copies
+//! never go stale: the kernel map grows below them, in shared pages.
+//!
+//! TODO(vm): PG_G for kernel pages, NX, PCID, and TLB shootdown IPIs (smp).
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -51,6 +55,8 @@ use crate::vmparam::{
 const PG_V: u64 = 0x001;
 /// Writable.
 const PG_RW: u64 = 0x002;
+/// Accessible from user mode.
+const PG_U: u64 = 0x004;
 /// Large page (2 MiB in a PD, 1 GiB in a PDP).
 const PG_PS: u64 = 0x080;
 /// Physical frame bits of an entry.
@@ -165,6 +171,9 @@ pub(crate) fn pmap_bootstrap(physfree: &mut u64, physmem: &[PhysRange]) -> u64 {
     table(kpdp_pa)[KPDPI] = kpd_pa | PG_V | PG_RW;
     pml4[KPML4I] = kpdp_pa | PG_V | PG_RW;
 
+    // The kernel map's PDP page, so that its PML4 entry never changes.
+    pml4[pindex(VM_MIN_KERNEL_ADDRESS, 3)] = allocpages(physfree, 1) | PG_V | PG_RW;
+
     // The direct map: one PDP page per 512 GiB.
     let ndmpml4 = ndmpdp.div_ceil(NPTEPG);
     let dmpdp_pa = allocpages(physfree, ndmpml4);
@@ -230,7 +239,7 @@ pub(crate) unsafe fn pmap_kenter(
     assert!(
         (VM_MIN_KERNEL_ADDRESS..VM_MAX_KERNEL_MAP).contains(&va) && va.is_multiple_of(PAGE_SIZE)
     );
-    let mut table = dmap_table(rcr3());
+    let mut table = dmap_table(kernel_pml4());
     for level in (1..=3).rev() {
         // SAFETY: `table` is a live page-table page (the PML4, or one
         // reached from it), mapped by the direct map; the caller serializes
@@ -259,7 +268,7 @@ pub(crate) unsafe fn pmap_kenter(
 ///
 /// See `mdi::KernelMap::pmap_kremove`.
 pub(crate) unsafe fn pmap_kremove(va: usize) {
-    let mut table = dmap_table(rcr3());
+    let mut table = dmap_table(kernel_pml4());
     for level in (1..=3).rev() {
         // SAFETY: as in `pmap_kenter`; the caller says `va` is mapped, so
         // every level exists.
@@ -297,4 +306,98 @@ pub(crate) fn pmap_kextract(va: usize) -> Option<u64> {
         table = dmap_table(entry);
     }
     None
+}
+
+/// First PML4 slot of the kernel half.
+const NUPML4E: usize = NPTEPG as usize / 2;
+
+/// `mdi::UserMode::pmap_pinit`: a new, empty user address space.
+pub(crate) fn pmap_pinit(alloc: &mut dyn FnMut() -> Option<u64>) -> Option<u64> {
+    let root = alloc()?;
+    let (src, dst) = (dmap_table(kernel_pml4()), dmap_table(root));
+    for i in 0..NPTEPG as usize {
+        let e = if i < NUPML4E { 0 } else {
+            // SAFETY: the kernel's PML4, through the direct map; its upper
+            // half is fixed after the bootstrap.
+            unsafe { src.add(i).read() }
+        };
+        // SAFETY: `root` is a fresh page from `alloc`, ours alone.
+        unsafe { dst.add(i).write(e) };
+    }
+    Some(root)
+}
+
+/// `mdi::UserMode::pmap_enter_user`.
+///
+/// # Safety
+///
+/// See `mdi::UserMode::pmap_enter_user`.
+pub(crate) unsafe fn pmap_enter_user(
+    root: u64,
+    va: u64,
+    pa: u64,
+    prot: mdi::Prot,
+    alloc: &mut dyn FnMut() -> Option<u64>,
+) -> bool {
+    assert!(va < crate::usermode::VM_MAXUSER_ADDRESS && va.is_multiple_of(PAGE_SIZE as u64));
+    let va = va as usize;
+    let mut table = dmap_table(root);
+    for level in (1..=3).rev() {
+        // SAFETY: `table` is a page-table page of `root`'s user half,
+        // through the direct map; the caller serializes changes to `root`.
+        let entry = unsafe { &mut *table.add(pindex(va, level)) };
+        if *entry & PG_V == 0 {
+            let Some(pt_pa) = alloc() else { return false };
+            *entry = pt_pa | PG_V | PG_RW | PG_U;
+        }
+        table = dmap_table(*entry);
+    }
+    // SAFETY: as above, for the last-level table.
+    let pte = unsafe { &mut *table.add(pindex(va, 0)) };
+    let rw = if prot.write { PG_RW } else { 0 };
+    let old = *pte;
+    *pte = (pa & PG_FRAME) | PG_V | PG_U | rw;
+    if old & PG_V != 0 && rcr3() & PG_FRAME == root {
+        // TODO(smp): other CPUs running this address space.
+        invlpg(va);
+    }
+    true
+}
+
+/// `mdi::UserMode::pmap_release`: frees the user half's page-table pages
+/// and the root (not the pages they map: the caller owns those).
+///
+/// # Safety
+///
+/// See `mdi::UserMode::pmap_release`.
+pub(crate) unsafe fn pmap_release(root: u64, free: &mut dyn FnMut(u64)) {
+    fn release(pa: u64, level: u32, n: usize, free: &mut dyn FnMut(u64)) {
+        if level > 0 {
+            let table = dmap_table(pa);
+            for i in 0..n {
+                // SAFETY: a page-table page of the released space, which no
+                // CPU uses any more (the caller's contract).
+                let e = unsafe { table.add(i).read() };
+                if e & PG_V != 0 {
+                    release(e & PG_FRAME, level - 1, NPTEPG as usize, free);
+                }
+            }
+        }
+        free(pa);
+    }
+    // Level-0 tables hold leaf entries, the caller's pages: release(_, 0)
+    // frees only the table page itself.
+    release(root, 3, NUPML4E, free);
+}
+
+/// `mdi::UserMode::pmap_activate`.
+///
+/// # Safety
+///
+/// See `mdi::UserMode::pmap_activate`.
+pub(crate) unsafe fn pmap_activate(root: u64) {
+    let root = if root == 0 { kernel_pml4() } else { root };
+    // SAFETY: `root` is the kernel's PML4 or one made by `pmap_pinit`, whose
+    // kernel half is the kernel's: the kernel keeps running unchanged.
+    unsafe { load_cr3(root) };
 }

@@ -331,8 +331,134 @@ pub trait EarlyCons {
     fn checkc() -> Option<u8>;
 }
 
+/// Access rights of a user page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prot {
+    /// Writable.
+    pub write: bool,
+    /// Executable.
+    pub exec: bool,
+}
+
+/// Why user mode returned to the kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserExit {
+    /// The program asked for a system call. Which one, and its arguments,
+    /// are in the registers, which only the program's ABI interprets.
+    Syscall,
+    /// An interrupt was taken (and handled); nothing to do but go back.
+    Interrupt,
+    /// The program faulted.
+    Fault(UserFault),
+}
+
+/// A fault taken in user mode, in machine-independent terms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UserFault {
+    /// What happened.
+    pub kind: FaultKind,
+    /// The faulting address, for memory faults (else 0).
+    pub addr: u64,
+}
+
+/// Kinds of user faults (what FreeBSD's `trap()` turns into signals; the
+/// ABI decides which signal, if it has signals at all).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultKind {
+    /// Access to an unmapped address.
+    NotMapped {
+        /// It was a write.
+        write: bool,
+    },
+    /// Access that the mapping does not allow.
+    Protection {
+        /// It was a write.
+        write: bool,
+    },
+    /// Privileged or invalid instruction.
+    IllegalInstruction,
+    /// Arithmetic error (division by zero, overflow trap...).
+    Arithmetic,
+    /// Breakpoint or single-step trap.
+    Breakpoint,
+    /// Anything else (the MD trap code).
+    Other(u64),
+}
+
+/// User address spaces and user mode (FreeBSD's `pmap_pinit`,
+/// `pmap_enter`, `pmap_activate`, and the return to user mode).
+///
+/// # Safety
+///
+/// Implementations must keep user mode from reaching kernel memory: a
+/// user address space maps only what `pmap_enter_user` was given, below
+/// `VM_MAXUSER_ADDRESS`, plus the kernel half without user access; and
+/// `cpu_user_enter` must sanitize the registers (privilege bits, address
+/// validity) so that no register value makes the CPU leave user mode
+/// other than back through `cpu_user_enter`'s return.
+#[allow(unsafe_code)]
+pub unsafe trait UserMode {
+    /// The user register file of this machine: what a program sees in its
+    /// registers. Opaque to MI code; ABIs read and write it in their
+    /// `arch/<arch>/` half.
+    type UserRegs: Default + Send;
+
+    /// First address above user space.
+    const VM_MAXUSER_ADDRESS: u64;
+
+    /// Creates an empty user address space and returns its root page
+    /// table. `alloc` must return zeroed pages.
+    fn pmap_pinit(alloc: &mut dyn FnMut() -> Option<u64>) -> Option<u64>;
+
+    /// Maps user page `va` to physical page `pa` in the space `root`.
+    /// Returns false if `alloc` failed.
+    ///
+    /// # Safety
+    ///
+    /// `root` must come from `pmap_pinit` and not be released; `va` must be
+    /// page aligned, below `VM_MAXUSER_ADDRESS` and unmapped; `pa` must be
+    /// a page owned by the caller for as long as it is mapped. Calls on one
+    /// `root` must be serialized.
+    unsafe fn pmap_enter_user(
+        root: u64,
+        va: u64,
+        pa: u64,
+        prot: Prot,
+        alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> bool;
+
+    /// Frees the page tables of the space `root` (not the pages they map),
+    /// calling `free` with each.
+    ///
+    /// # Safety
+    ///
+    /// No CPU may be using `root`, and it must never be used again.
+    unsafe fn pmap_release(root: u64, free: &mut dyn FnMut(u64));
+
+    /// Makes `root` the current address space of this CPU (0: the kernel's
+    /// only), flushing its non-global TLB entries.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be 0 or a live space from `pmap_pinit`, and must stay
+    /// live while it is current on any CPU.
+    unsafe fn pmap_activate(root: u64);
+
+    /// Runs the current thread in user mode, in the current address space,
+    /// with `regs`, until it returns to the kernel; `regs` then holds the
+    /// program's registers at that point. Called and returns with
+    /// interrupts disabled; interrupts are enabled in user mode.
+    ///
+    /// # Safety
+    ///
+    /// The current address space must be the program's, and no interrupt
+    /// guard may be held (interrupts taken in user mode are handled, and may
+    /// switch threads, before this returns).
+    unsafe fn cpu_user_enter(regs: &mut Self::UserRegs) -> UserExit;
+}
+
 /// Everything an architecture must provide.
-pub trait Machine: Cpu + EarlyCons + DirectMap + KernelMap + Clock + Context + Smp {
+pub trait Machine: Cpu + EarlyCons + DirectMap + KernelMap + Clock + Context + Smp + UserMode {
     /// Machine name, `hw.machine` (e.g. `"amd64"`).
     const MACHINE: &'static str;
     /// Machine architecture, `hw.machine_arch` (e.g. `"amd64"`).
