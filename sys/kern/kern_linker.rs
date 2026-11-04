@@ -16,7 +16,9 @@
 //! functions in backtraces (`linker_ddb_search_symbol`), and the files the
 //! loader preloaded (`preload_search_by_name`).
 //!
-//! TODO(kld): loadable kernel modules.
+//! TODO(kld): loadable kernel modules (milestone 7b), which needs the
+//! kernel linked with `.dynamic` and `DT_HASH`, as the loader looks
+//! symbols up there.
 
 use core::fmt::{self, Write};
 

@@ -18,6 +18,7 @@ FreeBSD userland; real hardware comes after.
 | 5 | VFS, devfs, tmpfs/`md_image` root; `fork`/`exec`/`wait`; signals | `/rescue/sh` runs | |
 | 6 | Full `mmap`; the sysctls libc needs; `ld-elf.so.1` | dynamic FreeBSD binaries run | |
 | 7 | `bus_space`/`bus_dma`, PCI, virtio-blk, UFS | boots to `init` from a FreeBSD disk | |
+| 7b | Loadable kernel modules (kld): the kernel linked with `.dynamic` and a `DT_HASH` symbol table as FreeBSD's is, so loader(8) finds `kernphys`, `__start_set_modmetadata_set` and friends (today it prints `elf64_lookup_symbol: corrupt symbol table` and carries on); module metadata; preloaded and `kldload`ed modules | the loader is silent, a preloaded module initializes | |
 | 8 | Network (virtio-net, TCP/IP) | `fetch` works | |
 | 9+ | FreeBSD test suite (`/usr/tests`, kyua) as the compatibility score; real hardware; Renux "Nova" | | |
 
