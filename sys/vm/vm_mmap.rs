@@ -16,7 +16,7 @@
 //!
 //! TODO(vfs): file mappings; TODO(vm): `mprotect`, copy-on-write sharing.
 
-use framework::user::{MapPlace, Prot, VmError, VmSpace};
+use framework::user::{Inherit, MapPlace, Prot, VmError, VmSpace};
 use sys::errno::{Errno, KResult};
 
 /// Where mappings without an address go, by default: above the program's
@@ -76,4 +76,9 @@ pub fn kern_munmap(vm: &VmSpace, addr: u64, len: u64) -> KResult<()> {
         return Err(Errno::EINVAL);
     }
     vm.unmap(addr, len).map_err(vm_errno)
+}
+
+/// Sets what a child gets of a range at `fork` (`kern_minherit`).
+pub fn kern_minherit(vm: &VmSpace, addr: u64, len: u64, inherit: Inherit) -> KResult<()> {
+    vm.set_inherit(addr, len, inherit).map_err(vm_errno)
 }

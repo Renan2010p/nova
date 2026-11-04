@@ -86,6 +86,21 @@ pub enum MapPlace {
     FixedNoReplace,
 }
 
+/// What a child gets of a region at `fork` (`vm_inherit_t`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Inherit {
+    /// The same memory, shared (`VM_INHERIT_SHARE`).
+    Share,
+    /// A copy (`VM_INHERIT_COPY`), the default.
+    #[default]
+    Copy,
+    /// Nothing: the range is unmapped in the child (`VM_INHERIT_NONE`).
+    None,
+    /// Fresh zeroed memory (`VM_INHERIT_ZERO`), e.g. a random generator's
+    /// state, so parent and child never repeat each other.
+    Zero,
+}
+
 /// A range of the address space that may be used (FreeBSD's
 /// `vm_map_entry`): pages in it are allocated when first touched.
 #[derive(Clone, Copy, Debug)]
@@ -93,6 +108,8 @@ struct Region {
     start: u64,
     end: u64,
     prot: Prot,
+    #[expect(dead_code, reason = "fork reads it (milestone 5e)")]
+    inherit: Inherit,
 }
 
 /// A page that is present.
@@ -207,7 +224,7 @@ impl VmSpace {
         if map.overlaps(va, end) {
             return Err(VmError::Exists);
         }
-        map.add_region(Region { start: va, end, prot })?;
+        map.add_region(Region { start: va, end, prot, inherit: Inherit::Copy })?;
         for page in (va..end).step_by(PAGE_SIZE) {
             self.page_in(&mut map, page, prot)?;
         }
@@ -228,7 +245,7 @@ impl VmSpace {
             MapPlace::Fixed => {
                 let end = Self::check(addr, len)?;
                 self.unmap(addr, len)?;
-                self.map.lock().add_region(Region { start: addr, end, prot })?;
+                self.map.lock().add_region(Region { start: addr, end, prot, inherit: Inherit::Copy })?;
                 return Ok(addr);
             }
             MapPlace::FixedNoReplace => {
@@ -237,7 +254,7 @@ impl VmSpace {
                 if map.overlaps(addr, end) {
                     return Err(VmError::Exists);
                 }
-                map.add_region(Region { start: addr, end, prot })?;
+                map.add_region(Region { start: addr, end, prot, inherit: Inherit::Copy })?;
                 return Ok(addr);
             }
             MapPlace::Hint { align_shift } => align_shift,
@@ -259,7 +276,7 @@ impl VmSpace {
             }
         }
         let end = Self::check(start, len)?;
-        map.add_region(Region { start, end, prot })?;
+        map.add_region(Region { start, end, prot, inherit: Inherit::Copy })?;
         Ok(start)
     }
 
@@ -305,6 +322,37 @@ impl VmSpace {
             // needs a TLB shootdown; for now a space runs one thread, and
             // other CPUs reload it (see `generation`) before running it.
             self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        Ok(())
+    }
+
+    /// Sets what a child gets of `[va, va + len)` at `fork` (`vm_map_inherit`),
+    /// splitting regions at the edges. Pages outside every region are
+    /// ignored, as in FreeBSD.
+    pub fn set_inherit(&self, va: u64, len: u64, inherit: Inherit) -> Result<(), VmError> {
+        if !va.is_multiple_of(PAGE) {
+            return Err(VmError::Invalid);
+        }
+        let len = len.checked_next_multiple_of(PAGE).ok_or(VmError::Invalid)?;
+        let end = Self::check(va, len)?;
+        let mut map = self.map.lock();
+        let mut i = map.regions.partition_point(|r| r.end <= va);
+        while let Some(&r) = map.regions.get(i) {
+            if r.start >= end {
+                break;
+            }
+            map.regions.remove(i);
+            if r.start < va {
+                map.regions.insert(i, Region { end: va, ..r }, M_WAITOK)?;
+                i += 1;
+            }
+            let mid = Region { start: r.start.max(va), end: r.end.min(end), inherit, ..r };
+            map.regions.insert(i, mid, M_WAITOK)?;
+            i += 1;
+            if r.end > end {
+                map.regions.insert(i, Region { start: end, ..r }, M_WAITOK)?;
+                i += 1;
+            }
         }
         Ok(())
     }

@@ -49,7 +49,7 @@ use crate::subr_prf::Cons;
 use crate::vers::{COMPILER, KERN_IDENT, OSRELEASE, VCS};
 use crate::kern_proc::Proc;
 use crate::{
-    kern_clock, kern_exec, kern_kthread, kern_linker, kern_shutdown, kern_synch, printf,
+    kern_clock, kern_exec, kern_kthread, kern_linker, kern_random, kern_shutdown, kern_synch, printf,
     sched_4bsd, subr_param, subr_selftest, subr_trap,
 };
 
@@ -82,6 +82,7 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     if bootverbose {
         linker_preload(boot);
     }
+    kern_random::random_init(bootverbose);
     sched_4bsd::sched_init(param.hz);
     kern_clock::initclocks(param.hz);
     mp_start();

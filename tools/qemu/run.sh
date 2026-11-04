@@ -15,7 +15,8 @@
 #     sh tools/qemu/run.sh sys/target/x86_64-unknown-none/release/kernel
 #
 # Environment: MEM (default 512M), CPUS (default 2), VERBOSE=1 (boot -v),
-# SELFTEST=pf|stack, INIT=program (preloaded as /sbin/init), TIMEOUT=secs
+# SELFTEST=pf|stack, INIT=program (preloaded as /sbin/init, or as
+# INIT_NAME), TIMEOUT=secs
 # (stop QEMU after that long; default none), CPU (QEMU CPU model, default
 # max), UEFI=1 (boot with QEMU's edk2 firmware and the host's loader.efi
 # from an EFI system partition; the console is then the screen, mirrored
@@ -77,12 +78,16 @@ if [ -n "$SELFTEST" ]; then
 	echo "debug.nova.selftest=\"$SELFTEST\"" >> "$ROOT/boot/loader.conf"
 fi
 if [ -n "$INIT" ]; then
-	mkdir -p "$ROOT/sbin"
-	cp "$INIT" "$ROOT/sbin/init"
+	# INIT_NAME: the path init is loaded as, and so its argv[0] (crunched
+	# binaries such as /rescue/rescue choose the program by it).
+	INIT_NAME=${INIT_NAME:-/sbin/init}
+	mkdir -p "$ROOT$(dirname "$INIT_NAME")"
+	cp "$INIT" "$ROOT$INIT_NAME"
 	cat >> "$ROOT/boot/loader.conf" <<CONF
 nova_init_load="YES"
 nova_init_type="nova_exec"
-nova_init_name="/sbin/init"
+nova_init_name="$INIT_NAME"
+init_path="$INIT_NAME"
 CONF
 fi
 

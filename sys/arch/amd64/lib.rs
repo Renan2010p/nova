@@ -270,6 +270,23 @@ impl mdi::Machine for Machine {
     fn vm_guest() -> bool {
         identcpu::vm_guest()
     }
+
+    /// `rdseed` (a true entropy source) if present, else `rdrand` (its
+    /// conditioned output), retried as Intel recommends.
+    fn cpu_random(out: &mut [u8]) -> bool {
+        let source: fn() -> Option<u64> = if identcpu::has_rdseed() {
+            x86::cpufunc::rdseed
+        } else if identcpu::has_rdrand() {
+            x86::cpufunc::rdrand
+        } else {
+            return false;
+        };
+        for chunk in out.chunks_mut(8) {
+            let Some(v) = (0..100).find_map(|_| source()) else { return false };
+            chunk.copy_from_slice(&v.to_le_bytes()[..chunk.len()]);
+        }
+        true
+    }
 }
 
 // SAFETY: `usermode::cpu_user_enter` enters user mode only with user

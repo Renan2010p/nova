@@ -487,6 +487,10 @@ pub trait Machine: Cpu + EarlyCons + DirectMap + KernelMap + Clock + Context + S
 
     /// True when running under a hypervisor (FreeBSD's `vm_guest`).
     fn vm_guest() -> bool;
+
+    /// Fills `out` from the machine's hardware random source, if it has
+    /// one (FreeBSD's `random_ivy`/`rdseed` sources); false otherwise.
+    fn cpu_random(out: &mut [u8]) -> bool;
 }
 
 /// Signature of the MI entry point, `kern::init_main::mi_startup`. The MD

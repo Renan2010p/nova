@@ -29,7 +29,9 @@ use kern::{kern_prot, kern_thr, printf, sys_generic, vfs_syscalls};
 use libkern::conv::{trunc_i32, usize_from_u32};
 use sys::errno::{Errno, KResult};
 use sys::signal::Signal;
-use vm::vm_mmap::{MmapAt, kern_mmap_anon, kern_munmap};
+use framework::user::Inherit;
+use kern::kern_sig::{SelfSignal, kern_sigself};
+use vm::vm_mmap::{MmapAt, kern_minherit, kern_mmap_anon, kern_munmap};
 
 use crate::arch::sysarch;
 use crate::freebsd_sysctl;
@@ -37,7 +39,7 @@ use crate::freebsd_signal::{
     SIGACTION_SIZE, SIGSET_SIZE, from_signo, sigaction_in, sigaction_out, sigset_in, sigset_out,
 };
 use crate::freebsd_syscalls::{
-    SYS___sysctl, SYS__exit, SYS_MAXSYSCALL, SYS_clock_gettime, SYS_getpid, SYS_issetugid, SYS_madvise, SYS_mmap, SYS_munmap,
+    SYS___sysctl, SYS___sysctlbyname, SYS__exit, SYS_cpuset_getaffinity, SYS_getrandom, SYS_minherit, SYS_thr_kill, SYS_MAXSYSCALL, SYS_clock_gettime, SYS_getpid, SYS_issetugid, SYS_madvise, SYS_mmap, SYS_munmap,
     SYS_readlink, SYS_sigaction, SYS_sigprocmask, SYS_sysarch, SYS_thr_self, SYS_write, SYSCALLNAMES,
 };
 
@@ -87,6 +89,11 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_sysarch => sysarch(p, regs, int(0), args[1]).into(),
         SYS_clock_gettime => sys_clock_gettime(p, int(0), args[1]).into(),
         SYS___sysctl => freebsd_sysctl::sys_sysctl(p, args).into(),
+        SYS___sysctlbyname => freebsd_sysctl::sys_sysctlbyname(p, args).into(),
+        SYS_getrandom => sys_getrandom(p, args[0], args[1]).into(),
+        SYS_minherit => sys_minherit(p, args[0], args[1], int(2)).into(),
+        SYS_cpuset_getaffinity => sys_cpuset_getaffinity(p, args[3], args[4]).into(),
+        SYS_thr_kill => sys_thr_kill(p, args[0], int(1)),
         c if c >= SYS_MAXSYSCALL || is_nosys(SYSCALLNAMES[usize_from_u32(c)]) => nosys(p, u64::from(c)),
         c => {
             if kern::init_main::bootverbose() {
@@ -228,4 +235,70 @@ fn sys_clock_gettime(p: &Proc, id: i32, tp: u64) -> KResult<[u64; 2]> {
     b[8..].copy_from_slice(&ts.nsec.to_le_bytes());
     p.vm.copyout(tp, &b).map_err(vm_errno)?;
     Ok([0, 0])
+}
+
+/// `getrandom(buf, buflen, flags)`: the kernel's generator never blocks
+/// once seeded, so the flags change nothing.
+fn sys_getrandom(p: &Proc, buf: u64, len: u64) -> KResult<[u64; 2]> {
+    let mut chunk = [0u8; 256];
+    let mut done = 0u64;
+    while done < len {
+        let n = usize::try_from((len - done).min(256)).map_err(|_| Errno::EINVAL)?;
+        kern::kern_random::arc4random_buf(&mut chunk[..n]);
+        p.vm.copyout(buf + done, &chunk[..n]).map_err(vm_errno)?;
+        done += u64::try_from(n).map_err(|_| Errno::EINVAL)?;
+    }
+    Ok([len, 0])
+}
+
+/// `minherit(addr, len, inherit)`.
+fn sys_minherit(p: &Proc, addr: u64, len: u64, inherit: i32) -> KResult<[u64; 2]> {
+    let inherit = match inherit {
+        0 => Inherit::Share,
+        1 => Inherit::Copy,
+        2 => Inherit::None,
+        3 => Inherit::Zero,
+        _ => return Err(Errno::EINVAL),
+    };
+    kern_minherit(&p.vm, addr, len, inherit)?;
+    Ok([0, 0])
+}
+
+/// `cpuset_getaffinity(level, which, id, cpusetsize, mask)`: every CPU,
+/// until there are cpusets.
+fn sys_cpuset_getaffinity(p: &Proc, size: u64, mask: u64) -> KResult<[u64; 2]> {
+    let ncpus = framework::cpu::mp_ncpus();
+    let need = u64::from(ncpus.div_ceil(8));
+    if size < need || size > 1024 {
+        return Err(Errno::ERANGE);
+    }
+    let mut set = [0u8; 1024];
+    for cpu in 0..ncpus {
+        let byte = usize_from_u32(cpu / 8);
+        set[byte] |= 1 << (cpu % 8);
+    }
+    p.vm.copyout(mask, &set[..usize::try_from(size).map_err(|_| Errno::EINVAL)?]).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// `thr_kill(id, sig)`: only to the calling thread, the only one there is.
+fn sys_thr_kill(p: &Proc, id: u64, sig: i32) -> SyscallResult {
+    if id != kern_thr::kern_thr_self() {
+        return SyscallResult::Err(Errno::ESRCH);
+    }
+    if sig == 0 {
+        return SyscallResult::Ok([0, 0]);
+    }
+    let Some(sig) = from_signo(sig) else {
+        return SyscallResult::Err(Errno::EINVAL);
+    };
+    match kern_sigself(p, sig) {
+        SelfSignal::Kill(sig) => SyscallResult::Signal(sig),
+        other => {
+            if kern::init_main::bootverbose() && other != SelfSignal::Nothing {
+                printf!("pid {} comm {}: signal {:?}: {:?} (not implemented yet)\n", p.pid, p.comm(), sig, other);
+            }
+            SyscallResult::Ok([0, 0])
+        }
+    }
 }

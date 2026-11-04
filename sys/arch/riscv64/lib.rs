@@ -176,6 +176,10 @@ impl mdi::Machine for Machine {
     fn vm_guest() -> bool {
         false
     }
+
+    fn cpu_random(_out: &mut [u8]) -> bool {
+        false // TODO(riscv): the Zkr `seed` CSR
+    }
 }
 
 /// The riscv64 user register file (`x1`..`x31` and `sepc`).

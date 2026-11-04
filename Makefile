@@ -103,7 +103,7 @@ kani:
 # never built as root.
 bhyve:
 	@test -f ${KERNEL} || { echo "bhyve: ${KERNEL} not found; run make first" >&2; exit 1; }
-	VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" \
+	VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" INIT_NAME="${INIT_NAME}" \
 	    sh tools/bhyve/run.sh ${KERNEL}
 
 # Boots the kernel under QEMU as a real PC (BIOS, gptboot, the host's
@@ -113,7 +113,7 @@ bhyve:
 # over VNC.
 qemu:
 	@test -f ${KERNEL} || { echo "qemu: ${KERNEL} not found; run make first" >&2; exit 1; }
-	CPUS="${CPUS}" VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" TIMEOUT="${TIMEOUT}" \
+	CPUS="${CPUS}" VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" INIT_NAME="${INIT_NAME}" TIMEOUT="${TIMEOUT}" \
 	    UEFI="${UEFI}" GUI="${GUI}" VNC="${VNC}" \
 	    sh tools/qemu/run.sh ${KERNEL}
 

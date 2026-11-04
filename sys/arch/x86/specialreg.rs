@@ -57,6 +57,10 @@ pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
 
 /// `cpuid(1).ecx`: x2APIC.
 pub const CPUID2_X2APIC: u32 = 1 << 21;
+/// `cpuid(1).ecx`: `rdrand`.
+pub const CPUID2_RDRAND: u32 = 1 << 30;
+/// `cpuid(7).ebx`: `rdseed`.
+pub const CPUID_STDEXT_RDSEED: u32 = 1 << 18;
 /// `cpuid(1).ecx`: running under a hypervisor.
 pub const CPUID2_HV: u32 = 1 << 31;
 /// `cpuid(0x80000001).edx`: 1 GiB pages.

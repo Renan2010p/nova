@@ -35,6 +35,7 @@ CPUS=${CPUS:-2}
 SELFTEST=${SELFTEST:-}
 VERBOSE=${VERBOSE:-}
 INIT=${INIT:-}
+INIT_NAME=${INIT_NAME:-}
 
 if [ "$(uname -s)" != FreeBSD ]; then
 	echo "run.sh: bhyve needs a FreeBSD host" >&2
@@ -74,12 +75,16 @@ if [ -n "$VERBOSE" ]; then
 	echo 'boot_verbose="YES"' >> "$ROOT/boot/loader.conf"
 fi
 if [ -n "$INIT" ]; then
-	mkdir -p "$ROOT/sbin"
-	cp "$INIT" "$ROOT/sbin/init"
+	# INIT_NAME: the path init is loaded as, and so its argv[0] (crunched
+	# binaries such as /rescue/rescue choose the program by it).
+	INIT_NAME=${INIT_NAME:-/sbin/init}
+	mkdir -p "$ROOT$(dirname "$INIT_NAME")"
+	cp "$INIT" "$ROOT$INIT_NAME"
 	cat >> "$ROOT/boot/loader.conf" <<EOF
 nova_init_load="YES"
 nova_init_type="nova_exec"
-nova_init_name="/sbin/init"
+nova_init_name="$INIT_NAME"
+init_path="$INIT_NAME"
 EOF
 fi
 if [ -n "$SELFTEST" ]; then

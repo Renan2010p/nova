@@ -29,7 +29,7 @@
 use core::fmt::{self, Write};
 
 use crate::cpufunc::cpuid;
-use crate::specialreg::{AMDID_PAGE1GB, CPUID2_HV, CPUID2_X2APIC};
+use crate::specialreg::{AMDID_PAGE1GB, CPUID_STDEXT_RDSEED, CPUID2_HV, CPUID2_RDRAND, CPUID2_X2APIC};
 
 /// `cpuid(1).ecx` (FreeBSD's `cpu_feature2`).
 pub fn cpu_feature2() -> u32 {
@@ -50,6 +50,21 @@ pub fn amd_feature() -> u32 {
     } else {
         0
     }
+}
+
+/// `cpuid(7, 0).ebx` (FreeBSD's `cpu_stdext_feature`), or 0.
+pub fn cpu_stdext_feature() -> u32 {
+    if cpuid(0, 0)[0] >= 7 { cpuid(7, 0)[1] } else { 0 }
+}
+
+/// The CPU has `rdrand`.
+pub fn has_rdrand() -> bool {
+    cpu_feature2() & CPUID2_RDRAND != 0
+}
+
+/// The CPU has `rdseed`.
+pub fn has_rdseed() -> bool {
+    cpu_stdext_feature() & CPUID_STDEXT_RDSEED != 0
 }
 
 /// The CPU supports x2APIC mode.

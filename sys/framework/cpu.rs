@@ -182,6 +182,12 @@ pub fn cpu_selftest_fault() -> ! {
     Md::cpu_selftest_fault()
 }
 
+/// Fills `out` from the machine's hardware random source; false if there
+/// is none. For seeding the kernel's generator, not for direct use.
+pub fn cpu_random(out: &mut [u8]) -> bool {
+    <Md as mdi::Machine>::cpu_random(out)
+}
+
 /// True when running under a hypervisor (FreeBSD's `vm_guest`).
 pub fn vm_guest() -> bool {
     <Md as mdi::Machine>::vm_guest()

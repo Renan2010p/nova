@@ -100,10 +100,12 @@ pub(crate) fn copyout_strings(vm: &VmSpace, img: &ImageParams<'_>) -> KResult<u6
     put(execpathp, img.execpath.as_bytes())?;
     put(execpathp + path_len - 1, &[0])?;
 
-    // TODO(random): `arc4rand`; there is no entropy source yet.
+    // The stack protector's canary (`arc4rand`).
+    let mut bytes = [0u8; usize_from_u64(CANARY_LEN)];
+    kern::kern_random::arc4random_buf(&mut bytes);
     destp -= CANARY_LEN;
     let canary = destp;
-    put(canary, &[0; usize_from_u64(CANARY_LEN)])?;
+    put(canary, &bytes)?;
 
     let pagesizeslen = u64_from_usize(PAGESIZES.len()) * PTR;
     destp = rounddown(destp - pagesizeslen, PTR);

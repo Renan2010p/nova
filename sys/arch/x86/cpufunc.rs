@@ -293,3 +293,23 @@ pub unsafe fn load_cr0(v: u64) {
     // SAFETY: forwarded to the caller.
     unsafe { asm!("mov cr0, {}", in(reg) v, options(nostack, preserves_flags)) }
 }
+
+/// A random number from the CPU's conditioner (`rdseed`), if it had one
+/// ready. The caller checks the CPU has the instruction.
+pub fn rdseed() -> Option<u64> {
+    let (v, ok): (u64, u8);
+    // SAFETY: `rdseed` only writes its operand and the flags; the caller
+    // checked CPUID (the instruction would #UD otherwise, a kernel fault,
+    // not unsoundness).
+    unsafe { core::arch::asm!("rdseed {v}", "setc {ok}", v = out(reg) v, ok = out(reg_byte) ok, options(nomem, nostack)) };
+    (ok != 0).then_some(v)
+}
+
+/// A random number from the CPU's generator (`rdrand`), if it had one
+/// ready. The caller checks the CPU has the instruction.
+pub fn rdrand() -> Option<u64> {
+    let (v, ok): (u64, u8);
+    // SAFETY: as for `rdseed`.
+    unsafe { core::arch::asm!("rdrand {v}", "setc {ok}", v = out(reg) v, ok = out(reg_byte) ok, options(nomem, nostack)) };
+    (ok != 0).then_some(v)
+}

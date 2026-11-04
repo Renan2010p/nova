@@ -23,7 +23,7 @@
 //! TODO(signal): delivery to handlers, `kill`, pending signals, core dumps.
 
 use sys::errno::{Errno, KResult};
-use sys::signal::{SigAction, SigHandler, SigSet, Signal};
+use sys::signal::{SigAction, SigDefault, SigHandler, SigSet, Signal};
 
 use crate::kern_exit::ExitStatus;
 use crate::kern_proc::Proc;
@@ -96,4 +96,38 @@ pub fn kern_sigaction(p: &Proc, sig: Signal, new: Option<SigAction>) -> KResult<
         *slot = a;
     }
     Ok(old)
+}
+
+/// What sending a signal to oneself does now (`kern_thr_kill` on oneself,
+/// `raise`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfSignal {
+    /// Nothing happens (ignored, or its default is to ignore).
+    Nothing,
+    /// The process is killed by it.
+    Kill(Signal),
+    /// A handler must run. TODO(signal): delivery.
+    Catch,
+    /// It is blocked; it would stay pending. TODO(signal): pending signals.
+    Blocked,
+    /// It stops or continues the process. TODO(signal): job control.
+    StopOrContinue,
+}
+
+/// Sends `sig` to the calling process and says what follows.
+pub fn kern_sigself(p: &Proc, sig: Signal) -> SelfSignal {
+    let st = p.sig.lock();
+    if st.mask.contains(sig) {
+        return SelfSignal::Blocked;
+    }
+    let action = st.actions.get(sig.index()).copied().unwrap_or_default();
+    match action.handler {
+        SigHandler::Ignore => SelfSignal::Nothing,
+        SigHandler::Catch(_) => SelfSignal::Catch,
+        SigHandler::Default => match sig.default_action() {
+            SigDefault::Kill | SigDefault::Core => SelfSignal::Kill(sig),
+            SigDefault::Ignore => SelfSignal::Nothing,
+            SigDefault::Stop | SigDefault::Continue => SelfSignal::StopOrContinue,
+        },
+    }
 }
