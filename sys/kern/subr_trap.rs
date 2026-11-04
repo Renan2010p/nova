@@ -36,7 +36,13 @@ pub fn userret_loop(p: &Proc, mut regs: UserRegs) -> ExitStatus {
                 SyscallOutcome::Signal(sig) => break sigexit(p, sig),
             },
             UserExit::Interrupt => {}
-            UserExit::Fault(fault) => break sigexit(p, p.abi.trapsignal(&fault)),
+            UserExit::Fault(fault) => {
+                // Memory mapped but not present yet is paged in.
+                if vm::vm_fault::vm_fault_trap(&p.vm, &fault) {
+                    continue;
+                }
+                break sigexit(p, p.abi.trapsignal(p, &fault, &regs));
+            }
         }
     };
     exit1(p, status);

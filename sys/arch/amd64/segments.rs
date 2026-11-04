@@ -215,7 +215,8 @@ pub(crate) fn boot_ist_tops() -> [u64; 3] {
 
 /// Sets up and loads CPU `cpuid`'s GDT and TSS, with `ist_tops` as its
 /// double fault, NMI and machine check stacks, reloads the segment
-/// registers, loads the shared IDT and sets up `syscall`. Each CPU calls
+/// registers, loads the shared IDT, and sets up `syscall` and the FPU.
+/// Each CPU calls
 /// it on itself.
 pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
     let id = usize_from_u32(cpuid);
@@ -280,4 +281,5 @@ pub(crate) fn cpu_tables_init(cpuid: u32, ist_tops: [u64; 3]) {
     // `TSS.rsp0` follows the 32-bit reserved word at the start of the TSS.
     pcpu_set_tss_rsp0(cpuid, u64_from_usize(tss.addr()) + 4);
     syscall_init();
+    crate::fpu::fpuinit();
 }

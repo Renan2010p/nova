@@ -14,7 +14,8 @@
 //! FreeBSD/riscv system call arguments (`cpu_fetch_syscall_args`,
 //! `riscv/riscv/trap.c`): the number in `t0`, the arguments in `a0`-`a7`.
 
-use framework::user::UserRegs;
+use framework::user::{UserFault, UserRegs};
+use kern::kern_proc::Proc;
 
 use super::exec_machdep::A0;
 use crate::freebsd_syscalls::{SYS___syscall, SYS_syscall};
@@ -32,3 +33,6 @@ pub(crate) fn cpu_fetch_syscall_args(regs: &UserRegs) -> (u64, [u64; 6]) {
         (code, [a(0), a(1), a(2), a(3), a(4), a(5)])
     }
 }
+
+/// FreeBSD's `trap_uprintf_signal`: not written for riscv yet.
+pub(crate) fn trap_uprintf_signal(_p: &Proc, _regs: &UserRegs, _fault: &UserFault, _signo: i32) {}

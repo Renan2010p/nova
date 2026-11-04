@@ -15,7 +15,9 @@
 //! `amd64/amd64/trap.c`): the number in `%rax`, the arguments in `%rdi`,
 //! `%rsi`, `%rdx`, `%r10`, `%r8`, `%r9`, as `syscall` clobbers `%rcx`.
 
-use framework::user::UserRegs;
+use framework::user::{UserFault, UserRegs};
+use kern::kern_proc::Proc;
+use kern::printf;
 
 use crate::freebsd_syscalls::{SYS___syscall, SYS_syscall};
 
@@ -28,5 +30,36 @@ pub(crate) fn cpu_fetch_syscall_args(regs: &UserRegs) -> (u64, [u64; 6]) {
         (args[0], [args[1], args[2], args[3], args[4], args[5], 0])
     } else {
         (code, args)
+    }
+}
+
+/// FreeBSD's `trap_uprintf_signal` (with `machdep.uprintf_signal=1`): what
+/// the program was doing when a fault killed it, in FreeBSD's format. Nova
+/// prints it on a verbose boot.
+pub(crate) fn trap_uprintf_signal(p: &Proc, regs: &UserRegs, fault: &UserFault, signo: i32) {
+    let mut code = [0u8; 8];
+    let shown = p.vm.copyin(regs.rip, &mut code).is_ok();
+    printf!(
+        "pid {} comm {}: signal {} err {:#x} code {} type {} addr {:#x} rsp {:#x} rip {:#x} rax {:#x} fsb {:#x} gsb {:#x} ",
+        p.pid,
+        p.comm(),
+        signo,
+        regs.err,
+        0,
+        regs.trapno,
+        fault.addr,
+        regs.rsp,
+        regs.rip,
+        regs.rax,
+        regs.fsbase,
+        0
+    );
+    if shown {
+        printf!(
+            "<{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}>\n",
+            code[0], code[1], code[2], code[3], code[4], code[5], code[6], code[7]
+        );
+    } else {
+        printf!("<?>\n");
     }
 }

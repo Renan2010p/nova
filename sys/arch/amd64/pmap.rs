@@ -365,6 +365,39 @@ pub(crate) unsafe fn pmap_enter_user(
     true
 }
 
+/// `mdi::UserMode::pmap_remove_user`.
+///
+/// # Safety
+///
+/// See `mdi::UserMode::pmap_remove_user`.
+pub(crate) unsafe fn pmap_remove_user(root: u64, va: u64) -> Option<u64> {
+    if va >= crate::usermode::VM_MAXUSER_ADDRESS || !va.is_multiple_of(u64_from_usize(PAGE_SIZE)) {
+        return None;
+    }
+    let va = usize_from_u64(va);
+    let mut table = dmap_table(root);
+    for level in (1..=3).rev() {
+        // SAFETY: a page-table page of `root`'s user half, through the
+        // direct map; the caller serializes changes to `root`.
+        let entry = unsafe { table.add(pindex(va, level)).read() };
+        if entry & PG_V == 0 {
+            return None;
+        }
+        table = dmap_table(entry);
+    }
+    // SAFETY: as above, for the last-level table.
+    let pte = unsafe { &mut *table.add(pindex(va, 0)) };
+    let old = *pte;
+    if old & PG_V == 0 {
+        return None;
+    }
+    *pte = 0;
+    if rcr3() & PG_FRAME == root {
+        invlpg(va);
+    }
+    Some(old & PG_FRAME)
+}
+
 /// `mdi::UserMode::pmap_release`: frees the user half's page-table pages
 /// and the root (not the pages they map: the caller owns those).
 ///

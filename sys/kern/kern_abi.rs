@@ -123,7 +123,9 @@ pub trait SysEntVec: Sync {
     /// The signal a user fault raises. ABIs differ (a protection fault is
     /// `SIGBUS` for FreeBSD, `SIGSEGV` elsewhere), so it is theirs to say
     /// (FreeBSD's MD `trap()` and `sv_transtrap`).
-    fn trapsignal(&self, fault: &UserFault) -> Signal;
+    /// `p` is the process and `regs` its registers at the fault, for the
+    /// ABI's diagnostics (FreeBSD's `machdep.uprintf_signal`).
+    fn trapsignal(&self, p: &Proc, fault: &UserFault, regs: &UserRegs) -> Signal;
 
     /// The ABI's number for `sig` (FreeBSD's signal numbers, `sv_sigtbl`).
     fn signal_number(&self, sig: Signal) -> i32;

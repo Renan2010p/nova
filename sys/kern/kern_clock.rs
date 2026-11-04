@@ -72,3 +72,40 @@ pub fn uptime_secs() -> u64 {
         hz => ticks() / u64::from(hz),
     }
 }
+
+/// A clock a program can read (`clockid_t`, by name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockId {
+    /// Wall-clock time (`CLOCK_REALTIME`).
+    Realtime,
+    /// Time since an arbitrary point, never set back (`CLOCK_MONOTONIC`,
+    /// `CLOCK_UPTIME`: no suspend yet, so they are the same).
+    Monotonic,
+    /// Whole seconds of wall-clock time (`CLOCK_SECOND`).
+    Second,
+}
+
+/// A point in time (`struct timespec`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timespec {
+    /// Seconds.
+    pub sec: i64,
+    /// Nanoseconds, `0..1_000_000_000`.
+    pub nsec: i64,
+}
+
+/// Reads `clock` (`kern_clock_gettime`).
+///
+/// TODO(timecounter): a precise timecounter (TSC) instead of ticks, and
+/// wall-clock time from the RTC: until then the clocks count from boot,
+/// in steps of one tick, and the wall clock starts at the Epoch.
+pub fn kern_clock_gettime(clock: ClockId) -> Timespec {
+    let hz = u64::from(hz().max(1));
+    let t = ticks();
+    let sec = i64::try_from(t / hz).unwrap_or(i64::MAX);
+    let nsec = i64::try_from((t % hz) * (1_000_000_000 / hz)).unwrap_or(0);
+    match clock {
+        ClockId::Realtime | ClockId::Monotonic => Timespec { sec, nsec },
+        ClockId::Second => Timespec { sec, nsec: 0 },
+    }
+}

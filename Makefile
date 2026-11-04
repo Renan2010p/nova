@@ -37,12 +37,18 @@ check:
 
 # Test programs for the FreeBSD ABI, built with the host's binutils (no
 # libc): ${USERLAND}/hello is the default init under bhyve.
-userland: ${USERLAND}/hello
+userland: ${USERLAND}/hello ${USERLAND}/hello_libc
 
 ${USERLAND}/hello: tools/userland/hello.S
 	@mkdir -p ${USERLAND}
 	as --64 -o ${USERLAND}/hello.o tools/userland/hello.S
 	ld -static -nostdlib -z noexecstack -o ${USERLAND}/hello ${USERLAND}/hello.o
+
+# An ordinary static FreeBSD program, with the host's cc and libc (on
+# FreeBSD, /usr/bin/clang is the base system's).
+${USERLAND}/hello_libc: tools/userland/hello_libc.c
+	@mkdir -p ${USERLAND}
+	/usr/bin/clang -static -O2 -Wall -o ${USERLAND}/hello_libc tools/userland/hello_libc.c
 
 # Regenerates the FreeBSD ABI's syscall numbers and names from FreeBSD's
 # syscalls.master. Run when Nova follows a new FreeBSD release.

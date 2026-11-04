@@ -334,6 +334,9 @@ pub trait EarlyCons {
 /// Access rights of a user page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prot {
+    /// Readable. A page that is not is not mapped at all (machines may not
+    /// support write- or execute-only pages; reads are then allowed).
+    pub read: bool,
     /// Writable.
     pub write: bool,
     /// Executable.
@@ -426,6 +429,15 @@ pub unsafe trait UserMode {
         prot: Prot,
         alloc: &mut dyn FnMut() -> Option<u64>,
     ) -> bool;
+
+    /// Unmaps user page `va` of the space `root` and returns the physical
+    /// page it mapped, if any. The TLB of this CPU is updated if `root` is
+    /// active here; other CPUs must reload `root` before running it again.
+    ///
+    /// # Safety
+    ///
+    /// As for `pmap_enter_user`: `root` live, calls serialized.
+    unsafe fn pmap_remove_user(root: u64, va: u64) -> Option<u64>;
 
     /// Frees the page tables of the space `root` (not the pages they map),
     /// calling `free` with each.

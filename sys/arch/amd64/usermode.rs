@@ -39,7 +39,7 @@ use mdi::{FaultKind, UserExit, UserFault};
 use x86::cpufunc::{rcr2, rdmsr, wrmsr};
 use x86::psl::user_rflags;
 use x86::segments::{SEL_KPL, SEL_UPL, gsel};
-use x86::specialreg::{EFER_SCE, MSR_EFER, MSR_LSTAR, MSR_SF_MASK, MSR_STAR};
+use x86::specialreg::{EFER_SCE, MSR_EFER, MSR_FSBASE, MSR_LSTAR, MSR_SF_MASK, MSR_STAR};
 
 use crate::pcpu::{PC_KERN_RSP, PC_SCRATCH, PC_TSS_RSP0, PC_USER_REGS, pcpu_self};
 use crate::segments::{GCODE_SEL, GUCODE_SEL, GUCODE32_SEL, GUDATA_SEL};
@@ -49,7 +49,7 @@ use crate::trap::{T_INTR, TrapFrame, trap};
 /// registers. ABIs read and write it in their `arch/amd64/` half.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-#[allow(missing_docs)]
+#[allow(missing_docs)] // the registers are their own documentation
 pub struct UserRegs {
     pub rax: u64,
     pub rbx: u64,
@@ -69,10 +69,22 @@ pub struct UserRegs {
     pub rip: u64,
     pub rflags: u64,
     pub rsp: u64,
+    /// Base of `%fs`: the thread pointer of FreeBSD's amd64 TLS, set with
+    /// `sysarch(AMD64_SET_FSBASE)`.
+    pub fsbase: u64,
+    /// The TLS base the program registered (`sysarch(AMD64_SET_TLSBASE)`,
+    /// FreeBSD's `pcb_tlsbase`), restored in signal handlers; meaningful
+    /// only if `tlsbase_set` (two fields: the layout is shared with asm).
+    pub tlsbase: u64,
+    /// True once a TLS base was registered (`PCB_TLSBASE`).
+    pub tlsbase_set: bool,
     /// Filled in on a fault: FreeBSD's `T_*` code, error code, address.
-    trapno: u64,
-    err: u64,
-    fault_addr: u64,
+    /// Set by the kernel on a fault (FreeBSD's `tf_trapno`).
+    pub trapno: u64,
+    /// The CPU's error code of that fault (`tf_err`).
+    pub err: u64,
+    /// The faulting address, for a page fault (`%cr2`).
+    pub fault_addr: u64,
 }
 
 /// `nova_user_enter`'s return codes.
@@ -244,6 +256,12 @@ pub(crate) unsafe fn cpu_user_enter(regs: &mut UserRegs) -> UserExit {
         return UserExit::Fault(UserFault { kind: FaultKind::Protection { write: false }, addr });
     }
     regs.rflags = user_rflags(regs.rflags);
+    if !user_address(regs.fsbase) {
+        regs.fsbase = 0; // a kernel or non-canonical base would #GP or leak
+    }
+    // SAFETY: MSR_FSBASE exists on every amd64 CPU; the kernel does not use
+    // %fs, and the base is a user address (checked above).
+    unsafe { wrmsr(MSR_FSBASE, regs.fsbase) };
     // SAFETY: interrupts are off (caller's contract), the current address
     // space is the program's, and the registers are sanitized above: user
     // %cs/%ss, IOPL 0, interrupts on, user-half %rip/%rsp. User mode can
@@ -284,6 +302,10 @@ pub(crate) extern "C" fn user_trap(frame: &mut TrapFrame) -> ! {
     let pc = pcpu_self();
     let kern_rsp = pc.kern_rsp.load(core::sync::atomic::Ordering::Relaxed);
     let regs = core::ptr::with_exposed_provenance_mut::<UserRegs>(usize_from_u64(pc.user_regs.load(core::sync::atomic::Ordering::Relaxed)));
+    // SAFETY: the pointer is the one `cpu_user_enter` passed; what the
+    // frame does not hold (the `%fs` base, which the program cannot change
+    // with FSGSBASE off, and the TLS base) is kept from it.
+    let kept = unsafe { regs.read() };
     let saved = UserRegs {
         rax: frame.tf_rax,
         rbx: frame.tf_rbx,
@@ -303,6 +325,9 @@ pub(crate) extern "C" fn user_trap(frame: &mut TrapFrame) -> ! {
         rip: frame.tf_rip,
         rflags: frame.tf_rflags,
         rsp: frame.tf_rsp,
+        fsbase: kept.fsbase,
+        tlsbase: kept.tlsbase,
+        tlsbase_set: kept.tlsbase_set,
         trapno: frame.tf_trapno,
         err: frame.tf_err,
         fault_addr: if frame.tf_trapno == 12 { rcr2() } else { 0 },

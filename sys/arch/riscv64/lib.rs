@@ -207,6 +207,10 @@ unsafe impl mdi::UserMode for Machine {
         todo("pmap_enter_user")
     }
 
+    unsafe fn pmap_remove_user(_root: u64, _va: u64) -> Option<u64> {
+        todo("pmap_remove_user")
+    }
+
     unsafe fn pmap_release(_root: u64, _free: &mut dyn FnMut(u64)) {
         todo("pmap_release")
     }

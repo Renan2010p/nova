@@ -21,7 +21,9 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use framework::mm::KArc;
+use framework::sync::MtxSpin;
 use framework::user::VmSpace;
+use sys::signal::{NSIG, SigAction, SigSet};
 
 use crate::kern_abi::SysEntVec;
 
@@ -46,6 +48,31 @@ pub struct Proc {
     pub vm: KArc<VmSpace>,
     /// The ABI the image runs under (`p_sysent`).
     pub abi: &'static dyn SysEntVec,
+    /// Signal mask and actions (`td_sigmask`, `p_sigacts`).
+    pub sig: MtxSpin<SigState>,
+}
+
+/// A process's signal state. One thread per process for now, so the mask
+/// is the process's.
+#[derive(Clone, Copy, Debug)]
+pub struct SigState {
+    /// Blocked signals (`td_sigmask`).
+    pub mask: SigSet,
+    /// What each signal does, by `Signal::index` (`ps_sigact`).
+    pub actions: [SigAction; NSIG],
+}
+
+impl SigState {
+    /// Nothing blocked, every action the default (a new image).
+    pub const fn new() -> Self {
+        Self { mask: SigSet::EMPTY, actions: [SigAction::DEFAULT; NSIG] }
+    }
+}
+
+impl Default for SigState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Proc {
@@ -75,6 +102,7 @@ impl Proc {
             jid: 0,
             vm,
             abi,
+            sig: MtxSpin::new(SigState::new()),
         }
     }
 }

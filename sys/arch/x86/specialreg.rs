@@ -39,8 +39,21 @@ pub const MSR_GSBASE: u32 = 0xc000_0101;
 /// Value swapped into `MSR_GSBASE` by `swapgs` on kernel entry/exit.
 pub const MSR_KGSBASE: u32 = 0xc000_0102;
 
+/// `%cr0`: monitor coprocessor (`wait` honours `TS`).
+pub const CR0_MP: u64 = 1 << 1;
+/// `%cr0`: emulate the FPU (traps every FPU instruction).
+pub const CR0_EM: u64 = 1 << 2;
+/// `%cr0`: task switched (the next FPU instruction traps).
+pub const CR0_TS: u64 = 1 << 3;
+/// `%cr0`: native FPU error reporting.
+pub const CR0_NE: u64 = 1 << 5;
+
 /// `%cr4`: global pages.
 pub const CR4_PGE: u64 = 1 << 7;
+/// `%cr4`: the OS saves SSE state with `fxsave`/`fxrstor`.
+pub const CR4_OSFXSR: u64 = 1 << 9;
+/// `%cr4`: the OS handles SIMD floating-point exceptions (`#XM`).
+pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
 
 /// `cpuid(1).ecx`: x2APIC.
 pub const CPUID2_X2APIC: u32 = 1 << 21;

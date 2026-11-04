@@ -17,25 +17,29 @@
 //! A switch only has to preserve what the ABI says survives a call: the
 //! callee-saved registers and the stack pointer. `cpu_switch` pushes them
 //! on the old thread's stack, saves `%rsp` in its [`Pcb`], loads the new
-//! thread's `%rsp` and pops its registers. The kernel uses no SSE/x87
-//! (soft-float target), so there is no FPU state to switch.
+//! thread's `%rsp` and pops its registers. It also switches the FPU/SSE
+//! state, which only user code uses (see `fpu`).
 //!
-//! TODO(user): FPU/XSAVE state, `%fs`/`%gs` bases and the TSS `rsp0` once
-//! threads run user code.
+//! TODO(user): `%fs`/`%gs` bases.
 
 use libkern::conv::u64_from_usize;
 use core::arch::global_asm;
+use core::mem::offset_of;
+
+use crate::fpu::SaveFpu;
 
 /// Saved context of a thread that is not running (FreeBSD's `struct pcb`,
 /// reduced to what `cpu_switch` needs).
 #[repr(C)]
 pub struct Pcb {
+    /// FPU/SSE state while the thread is off the CPU (`pcb_save`).
+    fpu: SaveFpu,
     rsp: u64,
 }
 
 impl Pcb {
     /// A PCB that has never run.
-    pub const INIT: Pcb = Pcb { rsp: 0 };
+    pub const INIT: Pcb = Pcb { fpu: SaveFpu::INIT, rsp: 0 };
 }
 
 global_asm!(
@@ -48,8 +52,10 @@ global_asm!(
     "    push r13",
     "    push r14",
     "    push r15",
-    "    mov [rdi], rsp",
-    "    mov rsp, [rsi]",
+    "    mov [rdi + {pcb_rsp}], rsp",
+    "    fxsave64 [rdi + {pcb_fpu}]",
+    "    fxrstor64 [rsi + {pcb_fpu}]",
+    "    mov rsp, [rsi + {pcb_rsp}]",
     "    pop r15",
     "    pop r14",
     "    pop r13",
@@ -64,6 +70,8 @@ global_asm!(
     "fork_trampoline:",
     "    call r12",
     "    ud2",
+    pcb_rsp = const offset_of!(Pcb, rsp),
+    pcb_fpu = const offset_of!(Pcb, fpu),
 );
 
 unsafe extern "C" {

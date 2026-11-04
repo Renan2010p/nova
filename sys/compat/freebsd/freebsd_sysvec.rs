@@ -22,7 +22,10 @@ use sys::elf::notes;
 use sys::errno::KResult;
 use sys::signal::Signal;
 
-use crate::arch::{ELF_ARCH, SV_NAME, USRSTACK, cpu_fetch_syscall_args, cpu_set_syscall_retval, exec_setregs};
+use crate::arch::{
+    ELF_ARCH, SV_NAME, USRSTACK, cpu_fetch_syscall_args, cpu_set_syscall_retval, exec_setregs,
+    trap_uprintf_signal,
+};
 use crate::freebsd_sysent::{SyscallResult, syscall};
 use crate::{freebsd_errno, freebsd_exec, freebsd_signal};
 
@@ -64,7 +67,7 @@ impl SysEntVec for FreebsdSysvec {
 
     fn syscall(&self, p: &Proc, regs: &mut UserRegs) -> SyscallOutcome {
         let (code, args) = cpu_fetch_syscall_args(regs);
-        match syscall(p, code, &args) {
+        match syscall(p, regs, code, &args) {
             SyscallResult::Ok(rv) => cpu_set_syscall_retval(regs, Ok(rv)),
             SyscallResult::Err(e) => cpu_set_syscall_retval(regs, Err(freebsd_errno::errno(e))),
             SyscallResult::Exit(rv) => return SyscallOutcome::Exit(rv),
@@ -73,8 +76,12 @@ impl SysEntVec for FreebsdSysvec {
         SyscallOutcome::Return
     }
 
-    fn trapsignal(&self, fault: &UserFault) -> Signal {
-        freebsd_signal::trapsignal(fault)
+    fn trapsignal(&self, p: &Proc, fault: &UserFault, regs: &UserRegs) -> Signal {
+        let sig = freebsd_signal::trapsignal(fault);
+        if kern::init_main::bootverbose() {
+            trap_uprintf_signal(p, regs, fault, freebsd_signal::signo(sig));
+        }
+        sig
     }
 
     fn signal_number(&self, sig: Signal) -> i32 {

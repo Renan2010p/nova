@@ -40,6 +40,7 @@
 
 mod db_trace;
 mod exception;
+mod fpu;
 mod locore;
 mod machdep;
 pub mod metadata;
@@ -292,6 +293,11 @@ unsafe impl mdi::UserMode for Machine {
     ) -> bool {
         // SAFETY: forwarded to the caller (same contract).
         unsafe { pmap::pmap_enter_user(root, va, pa, prot, alloc) }
+    }
+
+    unsafe fn pmap_remove_user(root: u64, va: u64) -> Option<u64> {
+        // SAFETY: forwarded to the caller (same contract).
+        unsafe { pmap::pmap_remove_user(root, va) }
     }
 
     unsafe fn pmap_release(root: u64, free: &mut dyn FnMut(u64)) {

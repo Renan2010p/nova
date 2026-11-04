@@ -15,10 +15,12 @@
 
 mod elf_machdep;
 mod exec_machdep;
+mod sys_machdep;
 mod trap;
 mod vm_machdep;
 
 pub(crate) use elf_machdep::*;
 pub(crate) use exec_machdep::*;
+pub(crate) use sys_machdep::*;
 pub(crate) use trap::*;
 pub(crate) use vm_machdep::*;

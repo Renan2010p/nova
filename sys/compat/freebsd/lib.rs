@@ -47,6 +47,7 @@ mod freebsd_errno;
 mod freebsd_exec;
 mod freebsd_signal;
 mod freebsd_syscalls;
+mod freebsd_sysctl;
 mod freebsd_sysent;
 mod freebsd_sysvec;
 

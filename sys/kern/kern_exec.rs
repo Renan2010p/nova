@@ -25,7 +25,7 @@
 use libkern::conv::{u64_from_usize, usize_from_u64};
 use framework::PAGE_SIZE;
 use framework::mm::{KArc, KVec, M_WAITOK};
-use framework::user::{Prot, UserRegs, VM_MAXUSER_ADDRESS, VmError, VmSpace};
+use framework::user::{Prot, UserRegs, VM_MAXUSER_ADDRESS, VmSpace};
 use sys::elf::{ET_EXEC, PF_W, PF_X, PT_LOAD, phdrs};
 use sys::errno::{Errno, KResult};
 
@@ -47,14 +47,7 @@ pub struct Image {
     pub abi: &'static dyn SysEntVec,
 }
 
-/// Maps a [`VmError`] to the error a system call reports.
-pub fn vm_errno(e: VmError) -> Errno {
-    match e {
-        VmError::NoMemory => Errno::ENOMEM,
-        VmError::Invalid | VmError::Exists => Errno::EINVAL,
-        VmError::Fault => Errno::EFAULT,
-    }
-}
+pub use vm::vm_mmap::vm_errno;
 
 /// Builds a new image from the ELF file `file` (`kern_execve`).
 pub fn kern_execve(file: &[u8], path: &str, argv: &[&str], envv: &[&str]) -> KResult<Image> {
@@ -84,7 +77,7 @@ pub fn kern_execve(file: &[u8], path: &str, argv: &[&str], envv: &[&str]) -> KRe
             let i = match pages.binary_search_by_key(&va, |&(v, _)| v) {
                 Ok(i) => i,
                 Err(i) => {
-                    pages.insert(i, (va, Prot { write: false, exec: false }), M_WAITOK)?;
+                    pages.insert(i, (va, Prot { read: true, write: false, exec: false }), M_WAITOK)?;
                     i
                 }
             };
@@ -109,7 +102,7 @@ pub fn kern_execve(file: &[u8], path: &str, argv: &[&str], envv: &[&str]) -> KRe
     }
 
     let top = abi.usrstack();
-    vm.map_zeroed(top - SGROWSIZ_INITIAL, SGROWSIZ_INITIAL, Prot { write: true, exec: false })
+    vm.map_zeroed(top - SGROWSIZ_INITIAL, SGROWSIZ_INITIAL, Prot { read: true, write: true, exec: false })
         .map_err(vm_errno)?;
     let params = ImageParams {
         entry: ehdr.entry,

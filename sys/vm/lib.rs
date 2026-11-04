@@ -12,9 +12,10 @@
  */
 
 //! `vm`: the machine-independent virtual memory system (FreeBSD's
-//! `sys/vm`). Empty for now; milestone 2 fills it in. The physical page
-//! allocator (`vm_phys`) and the global heap hook live in the framework,
-//! because handing out memory is where soundness is decided.
+//! `sys/vm`): the policy over the framework's `VmSpace`, which owns the
+//! mechanisms (pages, page tables) because that is where soundness is
+//! decided. Today: [`vm_mmap`] (anonymous mappings) and [`vm_fault`]
+//! (demand-zero paging).
 //!
 //! Planned files, with their FreeBSD names:
 //!
@@ -37,3 +38,6 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+pub mod vm_fault;
+pub mod vm_mmap;

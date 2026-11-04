@@ -293,6 +293,9 @@ struct PerCpu {
     /// it changes only when a thread with another space runs. Holding it
     /// here keeps it alive while the CPU uses it.
     vmspace: RefCell<Option<KArc<VmSpace>>>,
+    /// The generation of `vmspace` this CPU loaded: if the space unmapped
+    /// pages since, this CPU's TLB may be stale for it.
+    vmspace_gen: Cell<u64>,
 }
 
 static PCPU: CpuLocal<PerCpu> = CpuLocal::new(
@@ -302,6 +305,7 @@ static PCPU: CpuLocal<PerCpu> = CpuLocal::new(
             idle: RefCell::new(None),
             prev: RefCell::new(None),
             prev_requeue: Cell::new(false),
+            vmspace_gen: Cell::new(0),
             vmspace: RefCell::new(None),
         }
     }; MAXCPU],
@@ -526,9 +530,14 @@ fn activate_vmspace(guard: &IntrGuard, task: &Task) -> bool {
     let Some(vm) = task.vmspace.lock().clone() else {
         return false;
     };
-    let mut active = PCPU.get(guard).vmspace.borrow_mut();
-    if !active.as_ref().is_some_and(|a| KArc::ptr_eq(a, &vm)) {
+    let p = PCPU.get(guard);
+    let generation = vm.generation();
+    let mut active = p.vmspace.borrow_mut();
+    let same = active.as_ref().is_some_and(|a| KArc::ptr_eq(a, &vm));
+    if !same || p.vmspace_gen.get() != generation {
+        // Loading the space also flushes its old translations.
         user::activate(Some(&vm));
+        p.vmspace_gen.set(generation);
         // The old space is no longer active here: release our reference.
         let old = active.replace(vm);
         drop(active);

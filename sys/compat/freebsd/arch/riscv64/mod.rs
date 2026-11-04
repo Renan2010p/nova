@@ -15,10 +15,12 @@
 
 mod elf_machdep;
 mod exec_machdep;
+mod sys_machdep;
 mod trap;
 mod vm_machdep;
 
 pub(crate) use elf_machdep::*;
 pub(crate) use exec_machdep::{PAGESIZES, USRSTACK, exec_setregs};
-pub(crate) use trap::cpu_fetch_syscall_args;
+pub(crate) use sys_machdep::sysarch;
+pub(crate) use trap::{cpu_fetch_syscall_args, trap_uprintf_signal};
 pub(crate) use vm_machdep::*;

@@ -17,10 +17,13 @@
 //! process is killed. Which signal a fault raises, and its number, are the
 //! ABI's (`SysEntVec::trapsignal`, `SysEntVec::signal_number`).
 //!
-//! TODO(signal): handlers, masks, `kill`, signal frames (the ABI's
-//! `sv_sendsig`), core dumps.
+//! Masks and actions are kept (`sigprocmask`, `sigaction`); delivering a
+//! caught signal needs a signal frame, which is the ABI's (`sv_sendsig`).
+//!
+//! TODO(signal): delivery to handlers, `kill`, pending signals, core dumps.
 
-use sys::signal::Signal;
+use sys::errno::{Errno, KResult};
+use sys::signal::{SigAction, SigHandler, SigSet, Signal};
 
 use crate::kern_exit::ExitStatus;
 use crate::kern_proc::Proc;
@@ -50,4 +53,47 @@ pub fn sigexit(p: &Proc, sig: Signal) -> ExitStatus {
 /// it fails as FreeBSD's does without a dumper (`ENOSYS`).
 fn coredump(_p: &Proc) -> Result<(), &'static str> {
     Err("other error")
+}
+
+/// How `sigprocmask` changes the mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SigHow {
+    /// Add the set (`SIG_BLOCK`).
+    Block,
+    /// Remove the set (`SIG_UNBLOCK`).
+    Unblock,
+    /// Replace the mask (`SIG_SETMASK`).
+    SetMask,
+}
+
+/// Changes the signal mask and returns the old one (`kern_sigprocmask`).
+/// `SIGKILL` and `SIGSTOP` are never blocked.
+pub fn kern_sigprocmask(p: &Proc, how: SigHow, set: Option<SigSet>) -> SigSet {
+    let mut st = p.sig.lock();
+    let old = st.mask;
+    if let Some(set) = set {
+        st.mask = match how {
+            SigHow::Block => old.union(set),
+            SigHow::Unblock => old.difference(set),
+            SigHow::SetMask => set,
+        }
+        .blockable();
+    }
+    old
+}
+
+/// Sets the action of `sig` if `new` is given, and returns the old one
+/// (`kern_sigaction`). `SIGKILL` and `SIGSTOP` keep their default.
+pub fn kern_sigaction(p: &Proc, sig: Signal, new: Option<SigAction>) -> KResult<SigAction> {
+    if sig.is_uncatchable() && new.is_some_and(|a| a.handler != SigHandler::Default) {
+        return Err(Errno::EINVAL);
+    }
+    let mut st = p.sig.lock();
+    let slot = st.actions.get_mut(sig.index()).ok_or(Errno::EINVAL)?;
+    let old = *slot;
+    if let Some(mut a) = new {
+        a.mask = a.mask.blockable();
+        *slot = a;
+    }
+    Ok(old)
 }
