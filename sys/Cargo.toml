@@ -56,6 +56,8 @@ compat_freebsd = { path = "compat/freebsd" }
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
+# `cfg(kani)`: proof harnesses, built only by `make kani`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"

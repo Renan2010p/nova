@@ -58,6 +58,25 @@ test:
 clippy:
 	cd sys && ${CARGO} clippy --profile ${PROFILE}
 
+# Formal verification, phase 1 (docs/VERIFICATION.md). Neither builds the
+# kernel: they check its trusted building blocks on the host.
+#
+# miri: the host unit tests under Miri, which detects undefined behaviour.
+# Needs `rustup toolchain install nightly --component miri,rust-src`.
+miri:
+	cd sys && ${CARGO} +nightly miri test --target "$$(rustc -vV | sed -n 's/^host: //p')" \
+	    -p libkern -p sys -p x86
+
+# kani: the #[kani::proof] harnesses, one at a time, each limited to
+# KANI_MEM KiB of memory so a model that grows too big fails instead of
+# exhausting the machine. Needs `cargo install kani-verifier` and
+# `cargo kani setup`.
+KANI_MEM?=	2621440
+kani:
+	cd sys && ulimit -v ${KANI_MEM} && for p in libkern sys x86; do \
+	    ${CARGO} +stable kani -p $$p --output-format terse || exit 1; \
+	done
+
 # FreeBSD host only, as root: boots the kernel with the system loader(8).
 # VERBOSE=1 boots verbose (boot -v); SELFTEST=pf|stack takes a fatal kernel
 # page fault or stack overflow on purpose; INIT=program is preloaded as
@@ -73,4 +92,4 @@ clean:
 	cd sys && ${CARGO} clean
 	cd tools && ${CARGO} clean
 
-.PHONY: all kernel userland sysent check test clippy bhyve clean
+.PHONY: all kernel userland sysent check test clippy miri kani bhyve clean

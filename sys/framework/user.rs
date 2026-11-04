@@ -30,6 +30,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
+use libkern::range::{page_range_end, range_end};
 use mdi::UserMode;
 
 use crate::cpu::{self, intr_guard};
@@ -95,13 +96,9 @@ impl VmSpace {
     }
 
     fn check(va: u64, len: u64) -> Result<(), VmError> {
-        let page = PAGE_SIZE as u64;
-        match va.checked_add(len) {
-            Some(end) if va.is_multiple_of(page) && len.is_multiple_of(page) && end <= VM_MAXUSER_ADDRESS => {
-                Ok(())
-            }
-            _ => Err(VmError::Invalid),
-        }
+        page_range_end(va, len, VM_MAXUSER_ADDRESS, PAGE_SIZE as u64)
+            .map(|_| ())
+            .ok_or(VmError::Invalid)
     }
 
     /// Maps `[va, va + len)` to fresh zeroed pages with `prot`
@@ -136,7 +133,7 @@ impl VmSpace {
         need_write: bool,
         mut f: impl FnMut(&mut Page, usize, usize, usize),
     ) -> Result<(), VmError> {
-        let end = va.checked_add(len as u64).filter(|&e| e <= VM_MAXUSER_ADDRESS).ok_or(VmError::Fault)?;
+        let end = range_end(va, len as u64, VM_MAXUSER_ADDRESS).ok_or(VmError::Fault)?;
         let mask = PAGE_SIZE as u64 - 1;
         let mut a = va & !mask;
         while a < end {

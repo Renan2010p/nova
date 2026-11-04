@@ -256,3 +256,84 @@ mod tests {
         b.free(p, 0);
     }
 }
+
+/// Proofs (`make kani`) on a small zone, split in two so each fits in a
+/// few hundred megabytes: (a) for every range and every order, one block
+/// is aligned and in range, and freeing it coalesces back to exactly what
+/// `add_range` built; (b) on the whole zone, any two requests get disjoint
+/// blocks, no page is lost, and freeing both coalesces back.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const NPAGES: usize = 4;
+    const NORDER: usize = 3;
+
+    struct ArrayLinks([(u64, u64); NPAGES]);
+
+    impl Links for ArrayLinks {
+        fn get(&mut self, pfn: u64) -> (u64, u64) {
+            self.0[pfn as usize]
+        }
+        fn set(&mut self, pfn: u64, next: u64, prev: u64) {
+            self.0[pfn as usize] = (next, prev);
+        }
+    }
+
+    fn zone(state: &mut [u8; NPAGES], start: u64, end: u64) -> Buddy<'_, ArrayLinks, NORDER> {
+        let mut b = Buddy::new(state, ArrayLinks([(NIL, NIL); NPAGES]));
+        b.add_range(start, end);
+        b
+    }
+
+    fn assert_same_free_lists(b: &mut Buddy<'_, ArrayLinks, NORDER>, start: u64, end: u64) {
+        let mut st = [0u8; NPAGES];
+        let mut fresh = zone(&mut st, start, end);
+        assert_eq!(b.free_pages(), fresh.free_pages());
+        for o in 0..NORDER {
+            assert_eq!(b.free_blocks(o), fresh.free_blocks(o), "not coalesced");
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn one_block_any_range() {
+        let start: u64 = kani::any_where(|&s| s <= NPAGES as u64);
+        let end: u64 = kani::any_where(|&e| e >= start && e <= NPAGES as u64);
+        let mut st = [0u8; NPAGES];
+        let mut b = zone(&mut st, start, end);
+        assert_eq!(b.free_pages(), end - start);
+        let order: usize = kani::any_where(|&o| o < NORDER);
+        if let Some(pfn) = b.alloc(order) {
+            let n = 1u64 << order;
+            assert!(pfn.is_multiple_of(n), "misaligned block");
+            assert!(pfn >= start && pfn + n <= end, "block outside the zone");
+            assert_eq!(b.free_pages() + n, end - start, "pages lost");
+            b.free(pfn, order);
+        }
+        assert_same_free_lists(&mut b, start, end);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn two_blocks_are_disjoint() {
+        let end = NPAGES as u64;
+        let mut st = [0u8; NPAGES];
+        let mut b = zone(&mut st, 0, end);
+        let (o1, o2): (usize, usize) = (kani::any_where(|&o| o < NORDER), kani::any_where(|&o| o < NORDER));
+        let p1 = b.alloc(o1);
+        let p2 = b.alloc(o2);
+        let used = p1.map_or(0, |_| 1u64 << o1) + p2.map_or(0, |_| 1u64 << o2);
+        assert_eq!(b.free_pages() + used, end, "pages lost");
+        if let (Some(a), Some(c)) = (p1, p2) {
+            assert!(a + (1 << o1) <= c || c + (1 << o2) <= a, "blocks overlap");
+        }
+        if let Some(a) = p1 {
+            b.free(a, o1);
+        }
+        if let Some(c) = p2 {
+            b.free(c, o2);
+        }
+        assert_same_free_lists(&mut b, 0, end);
+    }
+}

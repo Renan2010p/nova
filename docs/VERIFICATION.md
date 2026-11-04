@@ -19,32 +19,49 @@ provided the trusted base's API is sound.
 | The FreeBSD syscall table is FreeBSD's | generated from `syscalls.master`; output identical to FreeBSD's `syscalls.c` and `syscall.h` |
 | The kernel never holds references into user memory | `VmSpace` only copies (`copyin`/`copyout`) |
 | Pure logic is tested | host unit tests (`make test`) of `libkern`, `sys`, `x86` |
+| No undefined behaviour in those tests | Miri (`make miri`) |
+| Allocator, range checks, ELF parsing and user flags are correct for every input | Kani (`make kani`), see below |
 
-## Phase 1: language-level guarantees (milestone 4b)
+## Phase 1: language-level guarantees (milestone 4b, done)
 
-* **Miri** runs the host unit tests under an interpreter that detects
-  undefined behaviour (invalid pointers, misalignment, data races, reads
-  of uninitialized memory). It cannot run the kernel itself (no hardware,
-  no `asm!`), but the crates it can run are the ones the trusted base is
-  built from: the buddy allocator, the ELF and boot-metadata parsers, the
-  demangler. Target: `make miri`.
-* **Kani** (bounded model checking) proves that a function cannot panic
-  or break an assertion for *every* input up to a bound. First proofs:
-  * `libkern::buddy`: blocks handed out never overlap, a freed block is
-    never handed out twice, coalescing preserves the free set;
-  * `sys::elf`: `Ehdr::parse`, `phdrs` and `notes` never read out of
-    bounds or panic, whatever the bytes;
-  * `framework::user::VmSpace`'s range checks: no overflow, nothing at or
-    above `VM_MAXUSER_ADDRESS` accepted;
-  * the amd64 `cpu_user_enter` checks: user mode is never entered with
-    IOPL ≠ 0, interrupts off, or a kernel `%rip`/`%rsp`.
+**Miri** (`make miri`) runs the host unit tests under an interpreter that
+detects undefined behaviour: invalid pointers, misalignment, data races,
+uninitialized reads. It cannot run the kernel itself (no hardware, no
+`asm!`), but it runs the crates the trusted base is built from: the buddy
+allocator, the ELF and boot-metadata parsers, the demangler. All 37
+tests of `libkern`, `sys` and `x86` pass with no undefined behaviour.
 
-  Target: `make kani`.
+**Kani** (`make kani`) proves, by bounded model checking, that a function
+cannot panic, overflow or break an assertion for *every* input (up to the
+stated bounds). The kernel builds with overflow checks on, so for the
+parsers "cannot panic" means "a crafted executable cannot panic the
+kernel".
 
-Both need tools outside the pinned toolchain (Miri ships only with
-nightly Rust; Kani is installed with `cargo install kani-verifier`). They
-verify the code; they never build the kernel, which stays on the pinned
-stable Rust.
+| Proof | What holds, for every input |
+|---|---|
+| `libkern::buddy` `one_block_any_range` | for any zone range and order, a block is aligned and inside the zone, no page is lost, and freeing it coalesces back to exactly the free lists `add_range` built |
+| `libkern::buddy` `two_blocks_are_disjoint` | any two requests get disjoint blocks, every page is accounted for, and freeing both coalesces back |
+| `libkern::range` `range_end_is_exact` | an accepted user range does not wrap and lies below the limit; every rejected one would |
+| `libkern::range` `page_range_end_is_aligned` | an accepted page range is page aligned at both ends (any power-of-two page) |
+| `sys::elf` `ehdr_parse_never_panics` | any bytes, any length: no panic, no truncated header accepted |
+| `sys::elf` `phdrs_never_panic` | any offsets, sizes and counts in the header: no panic, no out-of-bounds read |
+| `sys::elf` `segment_notes_never_panic` | any `PT_NOTE` contents: no panic or overflow, every note lies inside its segment |
+| `x86::psl` `user_rflags_is_safe` | whatever flags a program asks for, user mode runs with interrupts on, IOPL 0, no nested-task or virtual-8086 mode |
+| `x86::psl` `user_rflags_keeps_user_bits` | the flags a program may change are kept |
+
+`VmSpace` uses the proven range checks and `cpu_user_enter` the proven
+flag sanitization, so the proofs cover the code the kernel runs, not a
+copy. Zones and buffers are small (a 4-page buddy zone, 40- to 80-byte
+images) because the checker's memory grows fast with them; each proof
+runs alone, limited to `KANI_MEM` (2.5 GB by default), and the whole set
+takes about a minute.
+
+Neither tool builds the kernel, which stays on the pinned stable Rust:
+Miri ships with nightly Rust, and Kani brings its own toolchain.
+
+Next proofs: the free-list invariants of `buddy` (`free_blocks` agrees
+with `state`), `kenv` and preload metadata parsing, and the user range
+loop of `VmSpace::each_page` once it moves into `libkern`.
 
 ## Phase 2: functional correctness
 

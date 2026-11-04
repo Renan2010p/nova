@@ -135,40 +135,34 @@ pub struct Note<'a> {
 /// The notes of every `PT_NOTE` segment that lies inside `image` (the
 /// first bytes of the file; notes beyond them are not seen).
 pub fn notes<'a>(image: &'a [u8], ehdr: &Ehdr) -> impl Iterator<Item = Note<'a>> + 'a {
-    let (phoff, phnum, phentsize) = (
-        ehdr.phoff as usize,
-        ehdr.phnum as usize,
-        ehdr.phentsize as usize,
-    );
-    (0..phnum)
-        .filter_map(move |i| {
-            let ph = image
-                .get(phoff.checked_add(i.checked_mul(phentsize)?)?..)?
-                .get(..ELF64_PHDR_SIZE)?;
-            if read_u32(ph, 0)? != PT_NOTE {
-                return None;
-            }
-            let (off, size) = (read_u64(ph, 8)? as usize, read_u64(ph, 32)? as usize);
-            image.get(off..off.checked_add(size)?)
+    phdrs(image, ehdr)
+        .filter(|ph| ph.kind == PT_NOTE)
+        .filter_map(move |ph| {
+            let off = usize::try_from(ph.offset).ok()?;
+            image.get(off..off.checked_add(usize::try_from(ph.filesz).ok()?)?)
         })
-        .flat_map(|seg| {
-            let mut off = 0;
-            core::iter::from_fn(move || {
-                let align4 = |n: usize| n.checked_add(3).map(|n| n & !3);
-                let (namesz, descsz, kind) = (
-                    read_u32(seg, off)? as usize,
-                    read_u32(seg, off + 4)? as usize,
-                    read_u32(seg, off + 8)?,
-                );
-                let name_at = off + 12;
-                let desc_at = name_at.checked_add(align4(namesz)?)?;
-                let name = seg.get(name_at..name_at + namesz)?;
-                let desc = seg.get(desc_at..desc_at.checked_add(descsz)?)?;
-                off = desc_at + align4(descsz)?;
-                let name = name.strip_suffix(&[0]).unwrap_or(name);
-                Some(Note { name, kind, desc })
-            })
-        })
+        .flat_map(segment_notes)
+}
+
+/// The notes in one `PT_NOTE` segment, until the first one that does not
+/// fit in it.
+pub fn segment_notes(seg: &[u8]) -> impl Iterator<Item = Note<'_>> + '_ {
+    let mut off = 0usize;
+    core::iter::from_fn(move || {
+        let align4 = |n: usize| n.checked_add(3).map(|n| n & !3);
+        let (namesz, descsz, kind) = (
+            read_u32(seg, off)? as usize,
+            read_u32(seg, off.checked_add(4)?)? as usize,
+            read_u32(seg, off.checked_add(8)?)?,
+        );
+        let name_at = off.checked_add(12)?;
+        let desc_at = name_at.checked_add(align4(namesz)?)?;
+        let name = seg.get(name_at..name_at.checked_add(namesz)?)?;
+        let desc = seg.get(desc_at..desc_at.checked_add(descsz)?)?;
+        off = desc_at.checked_add(align4(descsz)?)?;
+        let name = name.strip_suffix(&[0]).unwrap_or(name);
+        Some(Note { name, kind, desc })
+    })
 }
 
 /// Size of an `Elf64_Sym`.
@@ -384,5 +378,60 @@ mod tests {
         a[0] = 0xff;
         assert!(KSymTab::new(&a).is_none());
         assert!(KSymTab::new(&[]).is_none());
+    }
+}
+
+/// Proofs (`make kani`): no byte sequence makes the parsers panic, which
+/// in the kernel (with overflow checks on) would be a panic on a crafted
+/// executable.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Any header fields: offsets and sizes are the attacker's.
+    fn any_ehdr() -> Ehdr {
+        Ehdr {
+            osabi: kani::any(),
+            kind: kani::any(),
+            machine: kani::any(),
+            entry: kani::any(),
+            phoff: kani::any(),
+            phentsize: kani::any(),
+            phnum: kani::any_where(|&n| n <= 2),
+        }
+    }
+
+    #[kani::proof]
+    fn ehdr_parse_never_panics() {
+        let buf: [u8; 64] = kani::any();
+        let len: usize = kani::any_where(|&l| l <= buf.len());
+        if let Some(e) = Ehdr::parse(&buf[..len]) {
+            assert!(len >= 58, "parsed a truncated header");
+            assert_eq!(e.kind, u16::from_le_bytes([buf[16], buf[17]]));
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn phdrs_never_panic() {
+        let image: [u8; 80] = kani::any();
+        let ehdr = any_ehdr();
+        for ph in phdrs(&image, &ehdr) {
+            // Every header returned was read from inside the image.
+            let _ = ph;
+        }
+    }
+
+    /// `notes` is `phdrs` (proven above), a bounds-checked `get`, and this:
+    /// walking the notes of any segment.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn segment_notes_never_panic() {
+        let seg: [u8; 40] = kani::any();
+        let len: usize = kani::any_where(|&l| l <= seg.len());
+        let seg = &seg[..len];
+        for n in segment_notes(seg) {
+            assert!(n.name.len() + n.desc.len() + 12 <= seg.len());
+        }
     }
 }

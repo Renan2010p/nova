@@ -51,5 +51,45 @@ pub const PSL_USERCHANGE: u64 =
 /// `%rflags` of a new user program (`PSL_USER`): interrupts on.
 pub const PSL_USER: u64 = PSL_RESERVED_DEFAULT | PSL_I;
 
+/// The `%rflags` user mode runs with, from what the program asked for
+/// (`regs->tf_rflags` checked by FreeBSD's `set_regs`/`sigreturn`): only
+/// [`PSL_USERCHANGE`] bits are taken from it; interrupts are on, IOPL is 0,
+/// and no nested-task or virtual-8086 mode.
+pub const fn user_rflags(requested: u64) -> u64 {
+    (requested & PSL_USERCHANGE) | PSL_USER
+}
+
 /// `%rflags` while running in the kernel: interrupts off, DF clear.
 pub const PSL_KERNEL: u64 = PSL_RESERVED_DEFAULT;
+
+/// Proofs (`make kani`).
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// Virtual-8086 mode.
+    const PSL_VM: u64 = 0x0002_0000;
+
+    /// Whatever a program puts in its flags, user mode runs with
+    /// interrupts on, IOPL 0 (no port access, no `cli`), outside nested-task
+    /// and virtual-8086 mode, with the reserved bit set and no bit above
+    /// those the CPU defines.
+    #[kani::proof]
+    fn user_rflags_is_safe() {
+        let r = user_rflags(kani::any());
+        assert!(r & PSL_I != 0);
+        assert!(r & PSL_IOPL == 0);
+        assert!(r & PSL_NT == 0);
+        assert!(r & PSL_VM == 0);
+        assert!(r & PSL_RF == 0);
+        assert!(r & PSL_RESERVED_DEFAULT != 0);
+        assert!(r >> 22 == 0);
+    }
+
+    /// The flags a program may set are kept.
+    #[kani::proof]
+    fn user_rflags_keeps_user_bits() {
+        let req: u64 = kani::any();
+        assert_eq!(user_rflags(req) & PSL_USERCHANGE, req & PSL_USERCHANGE);
+    }
+}

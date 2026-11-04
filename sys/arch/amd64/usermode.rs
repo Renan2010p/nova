@@ -36,7 +36,7 @@ use core::mem::offset_of;
 
 use mdi::{FaultKind, UserExit, UserFault};
 use x86::cpufunc::{rcr2, rdmsr, wrmsr};
-use x86::psl::{PSL_RESERVED_DEFAULT, PSL_USER, PSL_USERCHANGE};
+use x86::psl::user_rflags;
 use x86::segments::{SEL_KPL, SEL_UPL, gsel};
 use x86::specialreg::{EFER_SCE, MSR_EFER, MSR_LSTAR, MSR_SF_MASK, MSR_STAR};
 
@@ -242,7 +242,7 @@ pub(crate) unsafe fn cpu_user_enter(regs: &mut UserRegs) -> UserExit {
         let addr = if user_address(regs.rip) { regs.rsp } else { regs.rip };
         return UserExit::Fault(UserFault { kind: FaultKind::Protection { write: false }, addr });
     }
-    regs.rflags = (regs.rflags & PSL_USERCHANGE) | PSL_USER | PSL_RESERVED_DEFAULT;
+    regs.rflags = user_rflags(regs.rflags);
     // SAFETY: interrupts are off (caller's contract), the current address
     // space is the program's, and the registers are sanitized above: user
     // %cs/%ss, IOPL 0, interrupts on, user-half %rip/%rsp. User mode can
