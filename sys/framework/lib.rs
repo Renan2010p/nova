@@ -48,6 +48,7 @@ mod arch;
 pub mod clock;
 pub mod cons;
 pub mod cpu;
+pub mod fb;
 pub mod intr;
 pub mod mm;
 pub mod pcpu;
@@ -62,7 +63,7 @@ mod sealed {
     pub trait Sealed {}
 }
 
-pub use mdi::{BootInfo, Firmware, MiStartup, PhysRange, StackFrame};
+pub use mdi::{BootInfo, FbInfo, Firmware, MiStartup, PhysRange, StackFrame};
 
 /// The implementation of the `mdi` contract for this build.
 type Md = arch::Machine;
@@ -100,6 +101,7 @@ pub fn __init(boot: &BootInfo<'_>) {
         "framework initialized twice"
     );
     mm::vm_phys::init(boot.physavail);
+    fb::init(boot.framebuffer);
     task::init();
     smp::init();
 }

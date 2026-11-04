@@ -7,5 +7,9 @@ name = "checklayers"
 version = "0.1.0"
 
 [[package]]
+name = "makefont"
+version = "0.1.0"
+
+[[package]]
 name = "makesyscalls"
 version = "0.1.0"

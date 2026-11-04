@@ -1,0 +1,12 @@
+[package]
+name = "makefont"
+description = "Nova: converts FreeBSD's built-in vt font (vt_font_default.c) to Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "makefont"
+path = "main.rs"

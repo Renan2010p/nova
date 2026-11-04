@@ -17,6 +17,12 @@
 //! casting pointers to `#[repr(C)]` structs: a truncated or corrupted
 //! table yields `None` rather than undefined behaviour.
 
+/// Reads a native-endian `u16` at `off`, or `None` if out of bounds.
+pub fn read_u16(buf: &[u8], off: usize) -> Option<u16> {
+    let b = buf.get(off..off.checked_add(2)?)?;
+    Some(u16::from_ne_bytes(b.try_into().ok()?))
+}
+
 /// Reads a native-endian `u32` at `off`, or `None` if out of bounds.
 pub fn read_u32(buf: &[u8], off: usize) -> Option<u32> {
     let b = buf.get(off..off.checked_add(4)?)?;

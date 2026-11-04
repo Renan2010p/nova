@@ -56,6 +56,11 @@ sysent:
 	cd tools && ${CARGO} run -q -p makesyscalls -- \
 	    ${FREEBSD_SRC}/sys/kern/syscalls.master ../sys/compat/freebsd/freebsd_syscalls.rs
 
+# Regenerates the built-in console font from FreeBSD's vt_font_default.c.
+font:
+	cd tools && ${CARGO} run -q -p makefont -- \
+	    ${FREEBSD_SRC}/sys/dev/vt/font/vt_font_default.c ../sys/dev/vt/font/vt_font_default.rs
+
 # Crates that are plain logic are unit-tested on the host.
 test:
 	cd sys && ${CARGO} test --target "$$(rustc -vV | sed -n 's/^host: //p')" \
@@ -103,14 +108,17 @@ bhyve:
 
 # Boots the kernel under QEMU as a real PC (BIOS, gptboot, the host's
 # loader(8) from a UFS disk image); no root needed. Same options as bhyve,
-# plus TIMEOUT=secs.
+# plus TIMEOUT=secs and UEFI=1 (edk2 firmware, loader.efi, and the kernel
+# console on the screen too); GUI=1 shows the screen in a window, VNC=1
+# over VNC.
 qemu:
 	@test -f ${KERNEL} || { echo "qemu: ${KERNEL} not found; run make first" >&2; exit 1; }
 	CPUS="${CPUS}" VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" TIMEOUT="${TIMEOUT}" \
+	    UEFI="${UEFI}" GUI="${GUI}" VNC="${VNC}" \
 	    sh tools/qemu/run.sh ${KERNEL}
 
 clean:
 	cd sys && ${CARGO} clean
 	cd tools && ${CARGO} clean
 
-.PHONY: all kernel userland sysent check test clippy miri kani bhyve qemu clean
+.PHONY: all kernel userland sysent font check test clippy miri kani bhyve qemu clean

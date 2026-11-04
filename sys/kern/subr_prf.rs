@@ -62,7 +62,9 @@ pub(crate) fn vprintf_unlocked(args: fmt::Arguments<'_>) {
 /// to the console device.
 pub fn cnwrite(buf: &[u8]) {
     let _guard = PRF_LOCK.lock();
-    buf.iter().copied().for_each(crate::kern_cons::cnputc);
+    for &b in buf {
+        crate::kern_cons::cnputc_attr(b, vt::Attr::Normal);
+    }
 }
 
 /// Logs a message (`log(9)`). With no `syslogd` reading the log, which is

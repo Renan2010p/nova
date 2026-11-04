@@ -67,6 +67,14 @@ impl<T: ?Sized> MtxSpin<T> {
             _intr: intr,
         }
     }
+
+    /// Acquires the mutex only if it is free (`mtx_trylock_spin`), with
+    /// interrupts disabled while it is held.
+    pub fn try_lock(&self) -> Option<MtxSpinGuard<'_, T>> {
+        let intr = intr_guard();
+        let inner = self.lock.try_lock()?;
+        Some(MtxSpinGuard { inner, _intr: intr })
+    }
 }
 
 /// Proof that an [`MtxSpin`] is held (`mtx_unlock_spin` on drop). Also

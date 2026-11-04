@@ -66,6 +66,9 @@ pub fn bootverbose() -> bool {
 /// on the boot CPU, with interrupts disabled; the framework (page
 /// allocator, heap, thread 0) is already initialized.
 pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
+    // The video console first, as FreeBSD's `cninit`: everything printed
+    // from here on shows on the screen too.
+    vt::vt_init(boot);
     let kenv = StaticEnv::new(boot.envp);
     let bootverbose = boot.howto & RB_VERBOSE != 0;
     BOOTVERBOSE.store(bootverbose, Ordering::Relaxed);

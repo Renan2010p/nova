@@ -22,12 +22,20 @@
 //! default, so a drop-in kernel must keep the console quiet. Not done yet
 //! because during bring-up the output is all we have.
 
-/// Writes one byte to the console, turning `\n` into `\r\n` (`cnputc`).
+/// Writes one byte of a kernel message to every console, turning `\n`
+/// into `\r\n` on the serial line (`cnputc`).
 pub fn cnputc(c: u8) {
+    cnputc_attr(c, vt::Attr::Kernel);
+}
+
+/// Writes one byte to every console, drawn on the video console with
+/// `attr` (kernel messages and program output look different there).
+pub fn cnputc_attr(c: u8, attr: vt::Attr) {
     if c == b'\n' {
         framework::cons::early_putc(b'\r');
     }
     framework::cons::early_putc(c);
+    vt::vt_putc(c, attr);
 }
 
 /// Writes a string to the console (`cnputs`).

@@ -29,7 +29,9 @@
 //!   atomic or `CpuLocal`);
 //! * R7 intra-kernel dependencies use `workspace = true`; no external
 //!   crates unless listed in [`ALLOWED_EXTERNAL`];
-//! * R8 every `.rs` file starts with the MPL-2.0 header;
+//! * R8 every `.rs` file starts with the MPL-2.0 header, or, for code
+//!   from elsewhere kept under its author's terms, an SPDX header naming a
+//!   licence compatible with it ([`THIRD_PARTY_LICENSES`]);
 //! * R9 personalities (`compat/*`) are leaves: only `conf` depends on them;
 //! * R13 no machine-dependent vocabulary (`apic`, `amd64`, `msr`, ...) in
 //!   identifiers of MI code, outside `arch/` directories;
@@ -59,6 +61,19 @@ const ALLOWED_EXTERNAL: &[(&str, &str)] = &[];
 
 /// Required first lines of every Rust source file.
 const HEADER: &str = "/*-\n * SPDX-License-Identifier: MPL-2.0\n";
+
+/// Licences other files may carry (code from elsewhere, e.g. FreeBSD's
+/// console font): permissive, so they combine with MPL-2.0.
+const THIRD_PARTY_LICENSES: &[&str] = &["BSD-2-Clause", "BSD-3-Clause"];
+
+/// R8: the file starts with an acceptable licence header.
+fn has_license_header(raw: &str) -> bool {
+    raw.starts_with(HEADER)
+        || raw
+            .strip_prefix("/*-\n * SPDX-License-Identifier: ")
+            .and_then(|rest| rest.split('\n').next())
+            .is_some_and(|id| THIRD_PARTY_LICENSES.contains(&id.trim()))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Layer {
@@ -292,7 +307,7 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
 
     for file in &files {
         let raw = read(file)?;
-        if !raw.starts_with(HEADER) {
+        if !has_license_header(&raw) {
             report.err(file, 1, "R8: missing MPL-2.0 header (see docs/STYLE.md)");
         }
         let rel = file

@@ -24,6 +24,7 @@ members = [
     "framework",
     # services: machine-independent kernel, 100% safe Rust
     "vm",
+    "dev/vt",
     "kern",
     "compat/freebsd",
     # conf: the kernel binary
@@ -50,6 +51,7 @@ amd64 = { path = "arch/amd64" }
 riscv64 = { path = "arch/riscv64" }
 framework = { path = "framework" }
 vm = { path = "vm" }
+vt = { path = "dev/vt" }
 kern = { path = "kern" }
 compat_freebsd = { path = "compat/freebsd" }
 

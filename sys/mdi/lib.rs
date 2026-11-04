@@ -53,7 +53,7 @@ pub mod bootinfo;
 
 use core::fmt;
 
-pub use bootinfo::{BootInfo, Firmware};
+pub use bootinfo::{BootInfo, FbInfo, Firmware};
 pub use sys::physmem::PhysRange;
 
 /// CPU control.

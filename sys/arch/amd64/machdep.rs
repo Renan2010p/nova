@@ -30,7 +30,7 @@
 //! (`init_secondary`), repeating steps 1, 2 and 6 for themselves.
 
 use libkern::conv::{u64_from_usize, usize_from_u64};
-use mdi::{BootInfo, Firmware, PhysRange};
+use mdi::{BootInfo, FbInfo, Firmware, PhysRange};
 use sys::bytes::{read_u32, read_u64};
 use sys::linker::{
     MODINFOMD_ENVP, MODINFOMD_ESYM, MODINFOMD_HOWTO, MODINFOMD_SSYM, Module, Preload,
@@ -40,7 +40,7 @@ use sys::physmem::PhysMap;
 use crate::EARLY_CONS;
 use crate::metadata::{
     EFI_MAP_DESCRIPTOR_SIZE, EFI_MAP_HEADER_SIZE, EFI_MAP_MEMORY_SIZE, EFI_MD_PAGES, EFI_MD_PHYS,
-    EFI_MD_TYPE, EFI_MD_TYPE_USABLE, EFI_PAGE_SIZE, MODINFOMD_EFI_MAP, MODINFOMD_SMAP, SMAP_BASE,
+    EFI_MD_TYPE, EFI_MD_TYPE_USABLE, EFI_PAGE_SIZE, MODINFOMD_EFI_FB, MODINFOMD_EFI_MAP, MODINFOMD_SMAP, SMAP_BASE,
     SMAP_ENTRY_SIZE, SMAP_LENGTH, SMAP_TYPE, SMAP_TYPE_MEMORY,
 };
 use crate::mp_machdep::cpu_mp_setup;
@@ -123,6 +123,8 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     let loaded_base = kernel_image_end() - KERNBASE;
     let loaded = boot_data(loaded_base, kernend);
 
+    let framebuffer = md_raw(kmdp, MODINFOMD_EFI_FB).and_then(efi_fb);
+
     let boot = BootInfo {
         firmware,
         physmem: physmap.as_slice(),
@@ -135,6 +137,8 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
         envp,
         loaded,
         loaded_base,
+        preload_addr_relocate: KERNBASE,
+        framebuffer,
         ksyms,
         preload,
     };
@@ -145,6 +149,28 @@ pub(crate) extern "C" fn hammer_time(modulep: u64, kernend: u64) -> ! {
     // interrupts disabled, the early console ready, traps handled and the
     // direct map in place, as it requires.
     unsafe { __nova_mi_startup(&boot) }
+}
+
+/// The payload of the kernel's metadata record `kind`.
+fn md_raw(kmdp: Option<Module<'_>>, kind: u32) -> Option<&[u8]> {
+    kmdp.and_then(|k| k.md(kind)).map(|r| r.data)
+}
+
+/// The UEFI framebuffer from `struct efi_fb` (`x86/include/metadata.h`):
+/// address, size, height, width, stride (in pixels), then the red, green,
+/// blue and reserved masks.
+fn efi_fb(b: &[u8]) -> Option<FbInfo> {
+    let fb = FbInfo {
+        paddr: read_u64(b, 0)?,
+        size: read_u64(b, 8)?,
+        height: read_u32(b, 16)?,
+        width: read_u32(b, 20)?,
+        stride: read_u32(b, 24)?,
+        red_mask: read_u32(b, 28)?,
+        green_mask: read_u32(b, 32)?,
+        blue_mask: read_u32(b, 36)?,
+    };
+    (fb.paddr != 0 && fb.width > 0 && fb.height > 0 && fb.stride >= fb.width).then_some(fb)
 }
 
 /// Virtual address of the end of the kernel image (`end` in the linker

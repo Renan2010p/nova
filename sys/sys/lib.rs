@@ -31,6 +31,7 @@ pub mod bytes;
 pub mod copyright;
 pub mod elf;
 pub mod errno;
+pub mod font;
 pub mod kenv;
 pub mod linker;
 pub mod physmem;

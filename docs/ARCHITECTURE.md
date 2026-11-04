@@ -287,6 +287,15 @@ interrupts delivered to user mode. The GUI is userland already, as on
 FreeBSD (Xorg, Wayland); the kernel will provide the interfaces it needs
 (DRM/KMS, evdev, devfs).
 
+The first driver is `sys/dev/vt`, the video console: it draws kernel
+messages on the framebuffer the firmware left on (UEFI GOP, through
+`framework::fb`, which clips every access to the screen), as FreeBSD's
+`vt(4)` does: the loader's font or the built-in "Terminus BSD Console"
+8x16 (generated from FreeBSD's `vt_font_default.c` by `make font`, under
+its author's BSD-2-Clause licence), kernel messages in bold white and
+program output in light gray. It is a console unless the loader chose the
+serial line alone (`console="comconsole"`).
+
 ## Memory
 
 ```

@@ -42,6 +42,28 @@ impl Firmware {
     }
 }
 
+/// A linear framebuffer the firmware set up (UEFI GOP, VESA), in
+/// machine-independent terms: 32-bit pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FbInfo {
+    /// Physical address of the first pixel.
+    pub paddr: u64,
+    /// Size in bytes.
+    pub size: u64,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Pixels from one line to the next (at least `width`).
+    pub stride: u32,
+    /// Bits of a pixel holding red, green and blue.
+    pub red_mask: u32,
+    /// See `red_mask`.
+    pub green_mask: u32,
+    /// See `red_mask`.
+    pub blue_mask: u32,
+}
+
 /// The boot environment, in machine-independent terms.
 #[derive(Clone, Copy, Debug)]
 pub struct BootInfo<'a> {
@@ -71,6 +93,12 @@ pub struct BootInfo<'a> {
     pub loaded: &'static [u8],
     /// Physical address of `loaded[0]`.
     pub loaded_base: u64,
+    /// What to subtract from an address in the preload metadata (the
+    /// loader stores some as kernel virtual addresses) to get its physical
+    /// address (FreeBSD's `preload_addr_relocate`, negated).
+    pub preload_addr_relocate: u64,
+    /// The framebuffer, if the firmware set one up.
+    pub framebuffer: Option<FbInfo>,
     /// The kernel symbol table preloaded by the loader, `[SSYM, ESYM)`, in
     /// the layout `sys::elf::KSymTab` reads; empty if absent.
     pub ksyms: &'static [u8],
