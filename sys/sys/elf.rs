@@ -11,8 +11,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! ELF definitions (FreeBSD's `sys/elf64.h`) and the kernel symbol table
-//! the loader preloads (what FreeBSD's `db_fetch_ksymtab` reads).
+//! ELF definitions (FreeBSD's `sys/elf64.h`, `sys/elf_common.h`): the
+//! generic parts of an executable's headers, which `kern` reads without
+//! knowing any ABI, and the kernel symbol table the loader preloads (what
+//! FreeBSD's `db_fetch_ksymtab` reads).
 //!
 //! The loader copies the kernel's `.symtab` and `.strtab` after the image
 //! and reports the area as `[MODINFOMD_SSYM, MODINFOMD_ESYM)`, laid out as
@@ -22,6 +24,111 @@
 //! ```
 
 use crate::bytes::{read_u32, read_u64};
+
+/// `\x7fELF`.
+pub const ELFMAG: &[u8; 4] = b"\x7fELF";
+/// `EI_CLASS` value of 64-bit files.
+pub const ELFCLASS64: u8 = 2;
+/// `EI_DATA` value of little-endian files.
+pub const ELFDATA2LSB: u8 = 1;
+/// `e_type` of executables.
+pub const ET_EXEC: u16 = 2;
+/// `e_type` of position-independent executables and shared objects.
+pub const ET_DYN: u16 = 3;
+/// `p_type` of a note segment.
+pub const PT_NOTE: u32 = 4;
+/// Size of an `Elf64_Ehdr`.
+pub const ELF64_EHDR_SIZE: usize = 64;
+/// Size of an `Elf64_Phdr`.
+pub const ELF64_PHDR_SIZE: usize = 56;
+
+/// The generic fields of an `Elf64_Ehdr`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ehdr {
+    /// `e_ident[EI_OSABI]`.
+    pub osabi: u8,
+    /// `e_type`.
+    pub kind: u16,
+    /// `e_machine`.
+    pub machine: u16,
+    /// `e_entry`.
+    pub entry: u64,
+    /// `e_phoff`.
+    pub phoff: u64,
+    /// `e_phentsize`.
+    pub phentsize: u16,
+    /// `e_phnum`.
+    pub phnum: u16,
+}
+
+impl Ehdr {
+    /// Parses a 64-bit little-endian ELF header; `None` for anything else.
+    pub fn parse(b: &[u8]) -> Option<Self> {
+        if b.get(..4)? != ELFMAG || *b.get(4)? != ELFCLASS64 || *b.get(5)? != ELFDATA2LSB {
+            return None;
+        }
+        let u16_at = |off: usize| Some(u16::from_le_bytes(b.get(off..off + 2)?.try_into().ok()?));
+        Some(Self {
+            osabi: *b.get(7)?,
+            kind: u16_at(16)?,
+            machine: u16_at(18)?,
+            entry: read_u64(b, 24)?,
+            phoff: read_u64(b, 32)?,
+            phentsize: u16_at(54)?,
+            phnum: u16_at(56)?,
+        })
+    }
+}
+
+/// One ELF note (`Elf_Note` with its name and descriptor).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Note<'a> {
+    /// The note's owner, without the NUL (e.g. `FreeBSD`).
+    pub name: &'a [u8],
+    /// `n_type`.
+    pub kind: u32,
+    /// The descriptor.
+    pub desc: &'a [u8],
+}
+
+/// The notes of every `PT_NOTE` segment that lies inside `image` (the
+/// first bytes of the file; notes beyond them are not seen).
+pub fn notes<'a>(image: &'a [u8], ehdr: &Ehdr) -> impl Iterator<Item = Note<'a>> + 'a {
+    let (phoff, phnum, phentsize) = (
+        ehdr.phoff as usize,
+        ehdr.phnum as usize,
+        ehdr.phentsize as usize,
+    );
+    (0..phnum)
+        .filter_map(move |i| {
+            let ph = image
+                .get(phoff.checked_add(i.checked_mul(phentsize)?)?..)?
+                .get(..ELF64_PHDR_SIZE)?;
+            if read_u32(ph, 0)? != PT_NOTE {
+                return None;
+            }
+            let (off, size) = (read_u64(ph, 8)? as usize, read_u64(ph, 32)? as usize);
+            image.get(off..off.checked_add(size)?)
+        })
+        .flat_map(|seg| {
+            let mut off = 0;
+            core::iter::from_fn(move || {
+                let align4 = |n: usize| n.checked_add(3).map(|n| n & !3);
+                let (namesz, descsz, kind) = (
+                    read_u32(seg, off)? as usize,
+                    read_u32(seg, off + 4)? as usize,
+                    read_u32(seg, off + 8)?,
+                );
+                let name_at = off + 12;
+                let desc_at = name_at.checked_add(align4(namesz)?)?;
+                let name = seg.get(name_at..name_at + namesz)?;
+                let desc = seg.get(desc_at..desc_at.checked_add(descsz)?)?;
+                off = desc_at + align4(descsz)?;
+                let name = name.strip_suffix(&[0]).unwrap_or(name);
+                Some(Note { name, kind, desc })
+            })
+        })
+}
 
 /// Size of an `Elf64_Sym`.
 pub const ELF64_SYM_SIZE: usize = 24;
@@ -117,6 +224,74 @@ impl<'a> KSymTab<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal ELF64 executable header with one PT_NOTE segment holding
+    /// the notes in `notes` (name, type, desc).
+    pub(crate) fn exe(osabi: u8, machine: u16, notes: &[(&[u8], u32, &[u8])]) -> Vec<u8> {
+        let mut seg = Vec::new();
+        for (name, kind, desc) in notes {
+            let mut n = name.to_vec();
+            n.push(0);
+            seg.extend((n.len() as u32).to_le_bytes());
+            seg.extend((desc.len() as u32).to_le_bytes());
+            seg.extend(kind.to_le_bytes());
+            seg.extend(&n);
+            seg.resize(seg.len().next_multiple_of(4), 0);
+            seg.extend(*desc);
+            seg.resize(seg.len().next_multiple_of(4), 0);
+        }
+        let mut b = vec![0u8; ELF64_EHDR_SIZE + ELF64_PHDR_SIZE];
+        b[..4].copy_from_slice(ELFMAG);
+        b[4] = ELFCLASS64;
+        b[5] = ELFDATA2LSB;
+        b[7] = osabi;
+        b[16..18].copy_from_slice(&ET_EXEC.to_le_bytes());
+        b[18..20].copy_from_slice(&machine.to_le_bytes());
+        b[32..40].copy_from_slice(&(ELF64_EHDR_SIZE as u64).to_le_bytes());
+        b[54..56].copy_from_slice(&(ELF64_PHDR_SIZE as u16).to_le_bytes());
+        b[56..58].copy_from_slice(&1u16.to_le_bytes());
+        let ph = ELF64_EHDR_SIZE;
+        b[ph..ph + 4].copy_from_slice(&PT_NOTE.to_le_bytes());
+        let seg_off = b.len() as u64;
+        b[ph + 8..ph + 16].copy_from_slice(&seg_off.to_le_bytes());
+        b[ph + 32..ph + 40].copy_from_slice(&(seg.len() as u64).to_le_bytes());
+        b.extend(seg);
+        b
+    }
+
+    #[test]
+    fn parses_header_and_notes() {
+        let b = exe(
+            9,
+            62,
+            &[
+                (b"FreeBSD", 1, &1501000u32.to_le_bytes()),
+                (b"GNU", 3, &[1, 2, 3, 4, 5]),
+            ],
+        );
+        let e = Ehdr::parse(&b).unwrap();
+        assert_eq!((e.osabi, e.kind, e.machine, e.phnum), (9, ET_EXEC, 62, 1));
+        let n: Vec<_> = notes(&b, &e).collect();
+        assert_eq!(n.len(), 2);
+        assert_eq!(
+            (n[0].name, n[0].kind, n[0].desc),
+            (&b"FreeBSD"[..], 1, &1501000u32.to_le_bytes()[..])
+        );
+        assert_eq!((n[1].name, n[1].desc.len()), (&b"GNU"[..], 5));
+    }
+
+    #[test]
+    fn rejects_non_elf64_and_survives_truncation() {
+        let b = exe(0, 62, &[(b"Nova", 1, &[0; 4])]);
+        assert!(Ehdr::parse(&b[..10]).is_none());
+        let mut bad = b.clone();
+        bad[4] = 1; // ELFCLASS32
+        assert!(Ehdr::parse(&bad).is_none());
+        let e = Ehdr::parse(&b).unwrap();
+        for cut in 0..b.len() {
+            let _ = notes(&b[..cut], &e).count();
+        }
+    }
 
     fn sym(name: u32, info: u8, value: u64, size: u64) -> [u8; 24] {
         let mut e = [0u8; 24];
