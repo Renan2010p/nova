@@ -108,7 +108,6 @@ struct Region {
     start: u64,
     end: u64,
     prot: Prot,
-    #[expect(dead_code, reason = "fork reads it (milestone 5e)")]
     inherit: Inherit,
 }
 
@@ -116,6 +115,9 @@ struct Region {
 struct Page {
     va: u64,
     frame: Frame,
+    /// In the page tables; false while its region may not be read
+    /// (`PROT_NONE`), when touching it must fault.
+    mapped: bool,
 }
 
 /// The map of a space: its regions and its present pages, both sorted by
@@ -212,7 +214,7 @@ impl VmSpace {
             return Err(VmError::NoMemory);
         }
         // Room was reserved: this cannot fail after the page is mapped.
-        map.pages.insert(at, Page { va, frame }, M_WAITOK)?;
+        map.pages.insert(at, Page { va, frame, mapped: true }, M_WAITOK)?;
         Ok(at)
     }
 
@@ -310,10 +312,13 @@ impl VmSpace {
         let mut removed = false;
         while map.pages.get(first).is_some_and(|p| p.va < end) {
             let page = map.pages.remove(first);
-            // SAFETY: `root` is live and `page.va` was mapped by `page_in`,
-            // under this same lock. The frame is freed only after its PTE is
-            // gone (here) and this CPU's TLB updated (by the MD layer).
-            unsafe { Md::pmap_remove_user(self.root, page.va) };
+            if page.mapped {
+                // SAFETY: `root` is live and `page.va` was mapped by
+                // `page_in`, under this same lock. The frame is freed only
+                // after its PTE is gone (here) and this CPU's TLB updated (by
+                // the MD layer).
+                unsafe { Md::pmap_remove_user(self.root, page.va) };
+            }
             removed = true;
             drop(page);
         }
@@ -326,16 +331,9 @@ impl VmSpace {
         Ok(())
     }
 
-    /// Sets what a child gets of `[va, va + len)` at `fork` (`vm_map_inherit`),
-    /// splitting regions at the edges. Pages outside every region are
-    /// ignored, as in FreeBSD.
-    pub fn set_inherit(&self, va: u64, len: u64, inherit: Inherit) -> Result<(), VmError> {
-        if !va.is_multiple_of(PAGE) {
-            return Err(VmError::Invalid);
-        }
-        let len = len.checked_next_multiple_of(PAGE).ok_or(VmError::Invalid)?;
-        let end = Self::check(va, len)?;
-        let mut map = self.map.lock();
+    /// Applies `f` to the parts of the regions inside `[va, end)`, cutting
+    /// regions at `va` and `end` first (the `vm_map_clip_*` dance).
+    fn modify_regions(map: &mut Map, va: u64, end: u64, mut f: impl FnMut(&mut Region)) -> Result<(), VmError> {
         let mut i = map.regions.partition_point(|r| r.end <= va);
         while let Some(&r) = map.regions.get(i) {
             if r.start >= end {
@@ -346,13 +344,70 @@ impl VmSpace {
                 map.regions.insert(i, Region { end: va, ..r }, M_WAITOK)?;
                 i += 1;
             }
-            let mid = Region { start: r.start.max(va), end: r.end.min(end), inherit, ..r };
+            let mut mid = Region { start: r.start.max(va), end: r.end.min(end), ..r };
+            f(&mut mid);
             map.regions.insert(i, mid, M_WAITOK)?;
             i += 1;
             if r.end > end {
                 map.regions.insert(i, Region { start: end, ..r }, M_WAITOK)?;
                 i += 1;
             }
+        }
+        Ok(())
+    }
+
+    fn page_range(va: u64, len: u64) -> Result<u64, VmError> {
+        if !va.is_multiple_of(PAGE) {
+            return Err(VmError::Invalid);
+        }
+        let len = len.checked_next_multiple_of(PAGE).ok_or(VmError::Invalid)?;
+        Self::check(va, len)
+    }
+
+    /// Sets what a child gets of `[va, va + len)` at `fork` (`vm_map_inherit`).
+    /// Pages outside every region are ignored, as in FreeBSD.
+    pub fn set_inherit(&self, va: u64, len: u64, inherit: Inherit) -> Result<(), VmError> {
+        let end = Self::page_range(va, len)?;
+        Self::modify_regions(&mut self.map.lock(), va, end, |r| r.inherit = inherit)
+    }
+
+    /// Changes the protection of `[va, va + len)` (`vm_map_protect`),
+    /// including pages already present. `NoMemory` if part of the range
+    /// is not mapped, as FreeBSD's `ENOMEM`.
+    pub fn protect(&self, va: u64, len: u64, prot: Prot) -> Result<(), VmError> {
+        let end = Self::page_range(va, len)?;
+        let mut map = self.map.lock();
+        // The whole range must be mapped.
+        let mut a = va;
+        while a < end {
+            let r = map.region(a).ok_or(VmError::NoMemory)?;
+            a = r.end;
+        }
+        Self::modify_regions(&mut map, va, end, |r| r.prot = prot)?;
+        let first = map.pages.partition_point(|p| p.va < va);
+        let mut i = first;
+        while let Some(page) = map.pages.get_mut(i) {
+            if page.va >= end {
+                break;
+            }
+            // SAFETY: `root` is live and `page.va` is mapped to `page.frame`
+            // (by `page_in`), under this lock; the frame stays owned by
+            // `pages`, so remapping it with the new protection is sound. A
+            // page that may not be read stays unmapped: touching it faults.
+            unsafe {
+                Md::pmap_remove_user(self.root, page.va);
+                page.mapped = false;
+                if prot.read {
+                    if !Md::pmap_enter_user(self.root, page.va, page.frame.paddr(), prot, &mut pt_alloc) {
+                        return Err(VmError::NoMemory);
+                    }
+                    page.mapped = true;
+                }
+            }
+            i += 1;
+        }
+        if i > first {
+            self.generation.fetch_add(1, Ordering::AcqRel);
         }
         Ok(())
     }
@@ -367,9 +422,20 @@ impl VmSpace {
         if !r.prot.read || (write && !r.prot.write) {
             return Err(VmError::Fault);
         }
-        if map.find_page(page).is_ok() {
-            // Present already: a genuine protection fault.
-            return Err(VmError::Fault);
+        if let Ok(i) = map.find_page(page) {
+            // Present: either a genuine protection fault, or a page whose
+            // region was made accessible again after `protect` unmapped it.
+            let Some(p) = map.pages.get_mut(i) else { return Err(VmError::Fault) };
+            if p.mapped {
+                return Err(VmError::Fault);
+            }
+            // SAFETY: as in `page_in`: `root` live, `page` unmapped (not
+            // `mapped`), the frame owned by `pages`, under the lock.
+            if !unsafe { Md::pmap_enter_user(self.root, page, p.frame.paddr(), r.prot, &mut pt_alloc) } {
+                return Err(VmError::NoMemory);
+            }
+            p.mapped = true;
+            return Ok(());
         }
         self.page_in(&mut map, page, r.prot)?;
         Ok(())

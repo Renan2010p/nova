@@ -51,6 +51,7 @@ fn hardclock() {
     if framework::cpu::curcpu() == framework::cpu::CpuId::BSP {
         TICKS.fetch_add(1, Ordering::Relaxed);
         kern_synch::tick_wakeup();
+        crate::tty::tty_poll();
     }
     sched_4bsd::sched_clock();
 }

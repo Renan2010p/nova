@@ -38,6 +38,7 @@
 pub mod init_main;
 pub mod kern_abi;
 pub mod kern_clock;
+pub mod kern_descrip;
 pub mod kern_cons;
 pub mod kern_environment;
 pub mod kern_exec;
@@ -59,5 +60,6 @@ pub mod subr_prf;
 pub mod subr_selftest;
 pub mod subr_trap;
 pub mod sys_generic;
+pub mod tty;
 pub mod vfs_syscalls;
 pub mod vers;

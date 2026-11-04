@@ -120,7 +120,10 @@ fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
         let argv = args.get(..argc).unwrap_or(&args);
         match kern_exec::kern_execve(file, path, argv, &[]) {
             Ok(image) => {
-                let p = Proc::new(path, image.vm, image.abi);
+                let p = match Proc::new(path, image.vm, image.abi) {
+                    Ok(p) => p,
+                    Err(e) => panic!("start_init: cannot create init: {e:?}"),
+                };
                 let regs = image.regs;
                 if let Err(e) = kern_kthread::kthread_add("init", move || {
                     subr_trap::userret_loop(&p, regs);

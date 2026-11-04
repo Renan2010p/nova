@@ -37,3 +37,4 @@ pub mod linker;
 pub mod physmem;
 pub mod reboot;
 pub mod signal;
+pub mod termios;

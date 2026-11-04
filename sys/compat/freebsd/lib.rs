@@ -31,7 +31,7 @@
 //! | `freebsd_exec.rs`       | the initial stack: strings, `ps_strings`, auxv           |
 //! | `freebsd_errno.rs`      | kernel `Errno` → FreeBSD errno                           |
 //! | `freebsd_signal.rs`     | kernel `Signal` → FreeBSD signal number                  |
-//! | *`freebsd_types.rs`*    | `#[repr(C)]` structs (`stat`, `timespec`, `sigaction`...) with `const` layout checks |
+//! | `freebsd_types.rs`      | `#[repr(C)]` structs (`stat`, `timespec`, `sigaction`...) with `const` layout checks |
 //! | *`freebsd_sysctl.rs`*   | `kern.osreldate`, `hw.pagesize`, `kern.proc.*`...        |
 //! | *`freebsd_ioctl.rs`*    | ioctl command translation                                |
 //! | `arch/amd64/`           | the MD half: ELF machine (`elf_machdep.rs`), `USRSTACK` and start registers (`exec_machdep.rs`), syscall arguments (`trap.rs`) and results, error with the carry flag set (`vm_machdep.rs`); later the signal frame |
@@ -50,6 +50,7 @@ mod freebsd_syscalls;
 mod freebsd_sysctl;
 mod freebsd_sysent;
 mod freebsd_sysvec;
+mod freebsd_types;
 
 
 pub use freebsd_sysvec::ELF64_FREEBSD_SYSVEC;

@@ -56,6 +56,13 @@ sysent:
 	cd tools && ${CARGO} run -q -p makesyscalls -- \
 	    ${FREEBSD_SRC}/sys/kern/syscalls.master ../sys/compat/freebsd/freebsd_syscalls.rs
 
+# Prints the layout of FreeBSD's ABI structures as the host's compiler
+# sees them, to check sys/compat/freebsd against (run on FreeBSD).
+abidump:
+	@mkdir -p sys/target
+	/usr/bin/clang -O2 -Wall -o sys/target/abidump tools/abidump/abidump.c
+	sys/target/abidump
+
 # Regenerates the built-in console font from FreeBSD's vt_font_default.c.
 font:
 	cd tools && ${CARGO} run -q -p makefont -- \
@@ -121,4 +128,4 @@ clean:
 	cd sys && ${CARGO} clean
 	cd tools && ${CARGO} clean
 
-.PHONY: all kernel userland sysent font check test clippy miri kani bhyve qemu clean
+.PHONY: all kernel userland sysent font abidump check test clippy miri kani bhyve qemu clean

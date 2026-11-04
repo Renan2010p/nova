@@ -82,3 +82,12 @@ pub fn kern_munmap(vm: &VmSpace, addr: u64, len: u64) -> KResult<()> {
 pub fn kern_minherit(vm: &VmSpace, addr: u64, len: u64, inherit: Inherit) -> KResult<()> {
     vm.set_inherit(addr, len, inherit).map_err(vm_errno)
 }
+
+/// Changes the protection of a range (`kern_mprotect`): `ENOMEM` if part
+/// of it is not mapped.
+pub fn kern_mprotect(vm: &VmSpace, addr: u64, len: u64, prot: Prot) -> KResult<()> {
+    vm.protect(addr, len, prot).map_err(|e| match e {
+        VmError::NoMemory => Errno::ENOMEM,
+        other => vm_errno(other),
+    })
+}

@@ -13,10 +13,10 @@
 
 //! Processes (FreeBSD's `kern/kern_proc.c` and `struct proc`).
 //!
-//! For now a process is one thread running one image, with the console as
-//! its standard descriptors.
+//! For now a process is one thread running one image, as root, with the
+//! console as its standard descriptors.
 //!
-//! TODO(proc): process table, fork, wait, credentials, descriptor table.
+//! TODO(proc): process table, fork, wait, real credentials.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -25,7 +25,10 @@ use framework::sync::MtxSpin;
 use framework::user::VmSpace;
 use sys::signal::{NSIG, SigAction, SigSet};
 
+use sys::errno::KResult;
+
 use crate::kern_abi::SysEntVec;
+use crate::kern_descrip::Filedesc;
 
 /// The pid of `init`.
 pub const PID_INIT: u32 = 1;
@@ -40,7 +43,12 @@ pub struct Proc {
     /// at most [`MAXCOMLEN`] bytes, in a fixed buffer as in FreeBSD.
     comm: [u8; MAXCOMLEN],
     comm_len: usize,
-    /// User id (`cr_uid`).
+    /// Parent's pid (`p_pptr->p_pid`): 0 for init, whose parent is the
+    /// kernel.
+    pub ppid: u32,
+    /// Credentials (`p_ucred`).
+    pub cred: Cred,
+    /// User id (`cr_uid`), as in log messages.
     pub uid: u32,
     /// Jail id (`pr_id`): 0, the host.
     pub jid: u32,
@@ -50,6 +58,21 @@ pub struct Proc {
     pub abi: &'static dyn SysEntVec,
     /// Signal mask and actions (`td_sigmask`, `p_sigacts`).
     pub sig: MtxSpin<SigState>,
+    /// Open files (`p_fd`).
+    pub fd: Filedesc,
+}
+
+/// Who a process acts as (`struct ucred`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cred {
+    /// Real user id.
+    pub ruid: u32,
+    /// Effective user id.
+    pub euid: u32,
+    /// Real group id.
+    pub rgid: u32,
+    /// Effective group id.
+    pub egid: u32,
 }
 
 /// A process's signal state. One thread per process for now, so the mask
@@ -82,8 +105,9 @@ impl Proc {
         core::str::from_utf8(bytes).unwrap_or("?")
     }
 
-    /// A new process for an image just executed, with the next pid.
-    pub fn new(path: &str, vm: KArc<VmSpace>, abi: &'static dyn SysEntVec) -> Self {
+    /// A new process for an image just executed, with the next pid, as
+    /// root, with the console as descriptors 0, 1 and 2.
+    pub fn new(path: &str, vm: KArc<VmSpace>, abi: &'static dyn SysEntVec) -> KResult<Self> {
         let name = path.rsplit('/').next().unwrap_or(path);
         // Truncated at a character boundary, so `comm()` is valid UTF-8.
         let mut comm_len = name.len().min(MAXCOMLEN);
@@ -94,8 +118,10 @@ impl Proc {
         if let (Some(dst), Some(src)) = (comm.get_mut(..comm_len), name.as_bytes().get(..comm_len)) {
             dst.copy_from_slice(src);
         }
-        Self {
+        Ok(Self {
             pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
+            ppid: 0,
+            cred: Cred::default(),
             comm,
             comm_len,
             uid: 0,
@@ -103,7 +129,8 @@ impl Proc {
             vm,
             abi,
             sig: MtxSpin::new(SigState::new()),
-        }
+            fd: Filedesc::console()?,
+        })
     }
 }
 

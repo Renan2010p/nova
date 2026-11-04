@@ -31,7 +31,9 @@ use sys::errno::{Errno, KResult};
 use sys::signal::Signal;
 use framework::user::Inherit;
 use kern::kern_sig::{SelfSignal, kern_sigself};
-use vm::vm_mmap::{MmapAt, kern_minherit, kern_mmap_anon, kern_munmap};
+use vm::vm_mmap::{MmapAt, kern_minherit, kern_mmap_anon, kern_mprotect, kern_munmap};
+use kern::sys_generic::{TtyOp, TtyReply, kern_tty_ioctl};
+use crate::freebsd_types::{STAT_SIZE, TERMIOS_SIZE, WINSIZE_SIZE, stat_out, termios_in, termios_out, winsize_in, winsize_out};
 
 use crate::arch::sysarch;
 use crate::freebsd_sysctl;
@@ -39,7 +41,7 @@ use crate::freebsd_signal::{
     SIGACTION_SIZE, SIGSET_SIZE, from_signo, sigaction_in, sigaction_out, sigset_in, sigset_out,
 };
 use crate::freebsd_syscalls::{
-    SYS___sysctl, SYS___sysctlbyname, SYS__exit, SYS_cpuset_getaffinity, SYS_getrandom, SYS_minherit, SYS_thr_kill, SYS_MAXSYSCALL, SYS_clock_gettime, SYS_getpid, SYS_issetugid, SYS_madvise, SYS_mmap, SYS_munmap,
+    SYS___getcwd, SYS___sysctl, SYS___sysctlbyname, SYS_close, SYS_fstat, SYS_fstatat, SYS_getegid, SYS_geteuid, SYS_getgid, SYS_getppid, SYS_getuid, SYS_ioctl, SYS_mprotect, SYS_read, SYS__exit, SYS_cpuset_getaffinity, SYS_getrandom, SYS_minherit, SYS_thr_kill, SYS_MAXSYSCALL, SYS_clock_gettime, SYS_getpid, SYS_issetugid, SYS_madvise, SYS_mmap, SYS_munmap,
     SYS_readlink, SYS_sigaction, SYS_sigprocmask, SYS_sysarch, SYS_thr_self, SYS_write, SYSCALLNAMES,
 };
 
@@ -94,6 +96,18 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_minherit => sys_minherit(p, args[0], args[1], int(2)).into(),
         SYS_cpuset_getaffinity => sys_cpuset_getaffinity(p, args[3], args[4]).into(),
         SYS_thr_kill => sys_thr_kill(p, args[0], int(1)),
+        SYS_read => sys_generic::kern_read(p, int(0), args[1], args[2]).map(|n| [n, 0]).into(),
+        SYS_close => sys_generic::kern_close(p, int(0)).map(|()| [0, 0]).into(),
+        SYS_ioctl => sys_ioctl(p, int(0), args[1], args[2]).into(),
+        SYS_fstat => sys_fstat(p, int(0), args[1]).into(),
+        SYS_fstatat => sys_fstatat(p, int(0), args[1], args[2], int(3)).into(),
+        SYS___getcwd => sys_getcwd(p, args[0], args[1]).into(),
+        SYS_mprotect => sys_mprotect(p, args[0], args[1], int(2)).into(),
+        SYS_getuid => Ok([u64::from(kern_prot::kern_getcred(p).ruid), 0]).into(),
+        SYS_geteuid => Ok([u64::from(kern_prot::kern_getcred(p).euid), 0]).into(),
+        SYS_getgid => Ok([u64::from(kern_prot::kern_getcred(p).rgid), 0]).into(),
+        SYS_getegid => Ok([u64::from(kern_prot::kern_getcred(p).egid), 0]).into(),
+        SYS_getppid => Ok([u64::from(kern_prot::kern_getppid(p)), 0]).into(),
         c if c >= SYS_MAXSYSCALL || is_nosys(SYSCALLNAMES[usize_from_u32(c)]) => nosys(p, u64::from(c)),
         c => {
             if kern::init_main::bootverbose() {
@@ -301,4 +315,91 @@ fn sys_thr_kill(p: &Proc, id: u64, sig: i32) -> SyscallResult {
             SyscallResult::Ok([0, 0])
         }
     }
+}
+
+/// `ioctl(fd, cmd, data)`: the terminal requests (`sys/ttycom.h`, numbers
+/// from `tools/abidump`) and the descriptor flags.
+fn sys_ioctl(p: &Proc, fd: i32, cmd: u64, data: u64) -> KResult<[u64; 2]> {
+    const TIOCGETA: u32 = 0x402c_7413;
+    const TIOCSETA: u32 = 0x802c_7414;
+    const TIOCSETAW: u32 = 0x802c_7415;
+    const TIOCSETAF: u32 = 0x802c_7416;
+    const TIOCGWINSZ: u32 = 0x4008_7468;
+    const TIOCSWINSZ: u32 = 0x8008_7467;
+    const TIOCGPGRP: u32 = 0x4004_7477;
+    const TIOCSPGRP: u32 = 0x8004_7476;
+    const FIONBIO: u32 = 0x8004_667e;
+    const FIOCLEX: u32 = 0x2000_6601;
+    const FIONCLEX: u32 = 0x2000_6602;
+    // `u_long` on the wire, but the numbers are 32 bits.
+    match libkern::conv::trunc_u32(cmd) {
+        TIOCGETA => {
+            let TtyReply::Attr(t) = kern_tty_ioctl(p, fd, TtyOp::GetAttr)? else { return Err(Errno::ENOTTY) };
+            p.vm.copyout(data, &termios_out(&t)).map_err(vm_errno)?;
+        }
+        c @ (TIOCSETA | TIOCSETAW | TIOCSETAF) => {
+            let mut b = [0u8; TERMIOS_SIZE];
+            p.vm.copyin(data, &mut b).map_err(vm_errno)?;
+            kern_tty_ioctl(p, fd, TtyOp::SetAttr { termios: termios_in(&b), flush: c == TIOCSETAF })?;
+        }
+        TIOCGWINSZ => {
+            let TtyReply::Winsize(w) = kern_tty_ioctl(p, fd, TtyOp::GetWinsize)? else { return Err(Errno::ENOTTY) };
+            p.vm.copyout(data, &winsize_out(&w)).map_err(vm_errno)?;
+        }
+        TIOCSWINSZ => {
+            let mut b = [0u8; WINSIZE_SIZE];
+            p.vm.copyin(data, &mut b).map_err(vm_errno)?;
+            kern_tty_ioctl(p, fd, TtyOp::SetWinsize(winsize_in(&b)))?;
+        }
+        // No sessions yet, so no controlling terminal: as FreeBSD answers a
+        // process that has none (job control is then turned off).
+        TIOCGPGRP | TIOCSPGRP => {
+            sys_generic::kern_fd_valid(p, fd)?;
+            return Err(Errno::ENOTTY);
+        }
+        // Close-on-exec and non-blocking I/O: nothing to change yet.
+        FIONBIO | FIOCLEX | FIONCLEX => sys_generic::kern_fd_valid(p, fd)?,
+        _ => {
+            sys_generic::kern_fd_valid(p, fd)?;
+            return Err(Errno::ENOTTY);
+        }
+    }
+    Ok([0, 0])
+}
+
+/// `fstat(fd, sb)`.
+fn sys_fstat(p: &Proc, fd: i32, sb: u64) -> KResult<[u64; 2]> {
+    let st = sys_generic::kern_fstat(p, fd)?;
+    let out: [u8; STAT_SIZE] = stat_out(&st);
+    p.vm.copyout(sb, &out).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// `fstatat(fd, path, sb, flag)`.
+fn sys_fstatat(p: &Proc, fd: i32, path: u64, sb: u64, flag: i32) -> KResult<[u64; 2]> {
+    const AT_EMPTY_PATH: i32 = 0x4000;
+    let mut first = [0u8; 1];
+    p.vm.copyin(path, &mut first).map_err(vm_errno)?;
+    let st = vfs_syscalls::kern_statat(p, fd, first[0] == 0, flag & AT_EMPTY_PATH != 0)?;
+    p.vm.copyout(sb, &stat_out(&st)).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// `__getcwd(buf, size)`: the path, with its NUL.
+fn sys_getcwd(p: &Proc, buf: u64, size: u64) -> KResult<[u64; 2]> {
+    let cwd = vfs_syscalls::kern_getcwd(p).as_bytes();
+    let need = libkern::conv::u64_from_usize(cwd.len() + 1);
+    if size < need {
+        return Err(Errno::ERANGE);
+    }
+    p.vm.copyout(buf, cwd).map_err(vm_errno)?;
+    p.vm.copyout(buf + need - 1, &[0]).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// `mprotect(addr, len, prot)`.
+fn sys_mprotect(p: &Proc, addr: u64, len: u64, prot: i32) -> KResult<[u64; 2]> {
+    let prot = Prot { read: prot & 7 != 0, write: prot & 2 != 0, exec: prot & 4 != 0 };
+    kern_mprotect(&p.vm, addr, len, prot)?;
+    Ok([0, 0])
 }

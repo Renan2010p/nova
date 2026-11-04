@@ -13,13 +13,26 @@
 
 //! Process identity and credentials (FreeBSD's `kern/kern_prot.c`).
 //!
-//! TODO(cred): users, groups, set-id programs.
+//! Every process runs as root for now.
+//!
+//! TODO(cred): users, groups, `setuid` and friends, set-id programs.
 
 use crate::kern_proc::Proc;
 
 /// The process id (`getpid`).
 pub fn kern_getpid(p: &Proc) -> u32 {
     p.pid
+}
+
+/// The parent's pid (`getppid`).
+pub fn kern_getppid(p: &Proc) -> u32 {
+    p.ppid
+}
+
+/// Real and effective user and group ids (`getuid`, `geteuid`, `getgid`,
+/// `getegid`).
+pub fn kern_getcred(p: &Proc) -> crate::kern_proc::Cred {
+    p.cred
 }
 
 /// Whether the process is tainted by a set-id execution (`issetugid`).

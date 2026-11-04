@@ -19,7 +19,8 @@ FreeBSD userland; real hardware comes after.
 | 4d | Console on the UEFI framebuffer, as FreeBSD's `vt(4)`/`efifb` (white text on the screen), with the font the loader passes (`MODINFOMD_FONT`); tested with QEMU and `edk2` | a UEFI boot shows the kernel's messages on the screen | **done** (to be validated under bhyve) |
 | 5a | **libc programs**: FPU/SSE state per thread; demand-zero paging (`vm_fault`) over `VmSpace` regions; anonymous `mmap`/`munmap`; signal masks and actions (`sigprocmask`, `sigaction`); TLS (`sysarch(AMD64_SET_TLSBASE)`); `clock_gettime`, `thr_self`, `issetugid`; FreeBSD's `uprintf_signal` report | a static program built with FreeBSD's `cc` and libc prints with `printf` | **done** (to be validated under bhyve) |
 | 5b | Kernel random generator (ChaCha20, fast key erasure, seeded by `rdseed`/`rdrand`; random stack canary); FreeBSD `sysctl` and `sysctlbyname` for what libc reads (`kern.arandom`, `hw.ncpu`, `hw.pagesize`, `kern.osreldate`, ...); `getrandom`, `minherit`, `thr_kill` to oneself, `cpuset_getaffinity` | `/rescue/sh` starts up and reads its first command | **done** (to be validated under bhyve) |
-| 5 | Descriptors, the console as a device with input, credentials; VFS with an `md_image` root; `fork`/`exec`/`wait`; signal delivery | `/rescue/sh` runs | |
+| 5c | Descriptor tables; the console terminal with FreeBSD's line discipline (canonical editing, echo, `termios`, `winsize`) and serial input; `read`, `close`, `ioctl`, `fstat`, `fstatat`, `__getcwd`, `mprotect`, credentials; `tools/abidump` checks the FreeBSD structures | `/rescue/sh` takes commands typed on the console | **done** (to be validated under bhyve) |
+| 5 | VFS with an `md_image` root; `fork`/`exec`/`wait`; signal delivery; sessions and job control | `/rescue/sh` runs programs | |
 | 6 | Full `mmap`; the sysctls libc needs; `ld-elf.so.1` | dynamic FreeBSD binaries run | |
 | 7 | `bus_space`/`bus_dma`, PCI, virtio-blk, UFS | boots to `init` from a FreeBSD disk | |
 | 7b | Loadable kernel modules (kld): the kernel linked with `.dynamic` and a `DT_HASH` symbol table as FreeBSD's is, so loader(8) finds `kernphys`, `__start_set_modmetadata_set` and friends (today it prints `elf64_lookup_symbol: corrupt symbol table` and carries on); module metadata; preloaded and `kldload`ed modules | the loader is silent, a preloaded module initializes | |
@@ -31,7 +32,8 @@ Tools planned along the way:
 * `tools/makesyscalls`: generates `compat/freebsd/freebsd_syscalls.rs`
   from FreeBSD's `sys/kern/syscalls.master` (**done**, `make sysent`).
 * `tools/abidump`: a C program run on FreeBSD that prints `sizeof` and
-  `offsetof` of every ABI struct, which the personality checks against
-  (milestone 4).
+  `offsetof` of ABI structures and the values of ABI constants, which the
+  personality checks against (**done** for `stat`, `termios`, `winsize`
+  and the terminal `ioctl`s; `make abidump`).
 * A QEMU runner next to the bhyve one, booting a small FreeBSD-style disk
   image made with `makefs` + `mkimg`.
