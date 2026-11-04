@@ -22,11 +22,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn run(cmd: &str, args: &[&str], dir: &PathBuf) -> Option<String> {
-    let out = Command::new(cmd)
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .ok()?;
+    let mut c = Command::new(cmd);
+    if cmd == "git" {
+        // Building as another user than the checkout's owner (doas make)
+        // must not turn the revision into "unknown".
+        c.args(["-c", "safe.directory=*"]);
+    }
+    let out = c.args(args).current_dir(dir).output().ok()?;
     if !out.status.success() {
         return None;
     }

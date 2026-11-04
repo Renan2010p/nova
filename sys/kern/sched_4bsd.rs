@@ -42,7 +42,14 @@ impl Scheduler for Sched4bsd {
     }
 
     fn pick_next(&self) -> Option<Arc<Task>> {
-        self.runq.lock().pop_front()
+        let next = self.runq.lock().pop_front();
+        if next.is_some() {
+            // The chosen thread runs on this CPU with a fresh slice, as
+            // 4BSD's sched_switch resets ts_slice.
+            let g = framework::cpu::intr_guard();
+            SLICE.get(&g).set(0);
+        }
+        next
     }
 }
 

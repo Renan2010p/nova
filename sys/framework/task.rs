@@ -386,8 +386,10 @@ static IDLE: CpuLocal<AtomicBool> = CpuLocal::new([const { AtomicBool::new(false
 /// `ipi_cpu(IPI_AST)`).
 fn kick_idle_cpu() {
     let me = curcpu();
+    // Claim the CPU (clear its flag) so that a second wakeup right after
+    // this one goes to another idle CPU, not to the one already woken.
     if let Some(cpu) =
-        crate::smp::online_cpus().find(|&c| c != me && IDLE.get_on(c).load(Ordering::Relaxed))
+        crate::smp::online_cpus().find(|&c| c != me && IDLE.get_on(c).swap(false, Ordering::AcqRel))
     {
         crate::smp::ipi_cpu(cpu, mdi::Ipi::Ast);
     }

@@ -162,10 +162,13 @@ fn mutex(verbose: bool) {
 fn preemption(verbose: bool, hz: u32) {
     let stop = Arc::new(AtomicBool::new(false));
     let spins = Arc::new(AtomicU64::new(0));
-    let spinners: Vec<Arc<Task>> = (0..framework::cpu::mp_ncpus())
+    let running = Arc::new(AtomicU32::new(0));
+    let ncpus = framework::cpu::mp_ncpus();
+    let spinners: Vec<Arc<Task>> = (0..ncpus)
         .map(|_| {
-            let (stop, spins) = (stop.clone(), spins.clone());
+            let (stop, spins, running) = (stop.clone(), spins.clone(), running.clone());
             spawn("spinner", move || {
+                running.fetch_add(1, Ordering::AcqRel);
                 while !stop.load(Ordering::Acquire) {
                     spins.fetch_add(1, Ordering::Relaxed);
                     core::hint::spin_loop();
@@ -173,9 +176,14 @@ fn preemption(verbose: bool, hz: u32) {
             })
         })
         .collect();
+    // Wait until the spinners hold every other CPU, so that none is idle
+    // when this thread wakes up.
+    while running.load(Ordering::Acquire) < ncpus - 1 {
+        task::yield_now();
+    }
     let start = kern_clock::ticks();
-    // While this thread sleeps the spinners take every CPU. Waking up only
-    // lets us run again if the clock preempts one of them.
+    // While this thread sleeps the last spinner takes this CPU too. Waking
+    // up only lets us run again if the clock preempts one of them.
     pause("preempt", 1);
     let back = kern_clock::ticks();
     stop.store(true, Ordering::Release);
