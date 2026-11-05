@@ -67,5 +67,6 @@ pub mod tty;
 pub mod vfs_lookup;
 pub mod vfs_mount;
 pub mod vfs_syscalls;
+pub mod vfs_vnops;
 pub mod vnode;
 pub mod vers;

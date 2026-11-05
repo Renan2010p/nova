@@ -112,18 +112,10 @@ CONF
 fi
 
 if [ -n "$ROOTFS" ]; then
-	# The root file system: /rescue as FreeBSD installs it (one crunched
-	# binary, hard-linked under every name), /bin and /sbin pointing to
-	# it, and the usual empty directories.
+	# The root file system: the host's /rescue, /bin and the libraries
+	# they need (tools/mkroot.sh).
 	MFS=$WORK/mfsroot
-	mkdir -p "$MFS/rescue" "$MFS/dev" "$MFS/etc" "$MFS/tmp" "$MFS/root"
-	cp /rescue/rescue "$MFS/rescue/rescue"
-	for f in $(ls /rescue); do
-		[ "$f" = rescue ] || ln "$MFS/rescue/rescue" "$MFS/rescue/$f"
-	done
-	ln -s rescue "$MFS/bin"
-	ln -s rescue "$MFS/sbin"
-	echo "Nova root file system (UFS2 on md0)" > "$MFS/etc/motd"
+	/rescue/sh "$(dirname "$0")/../mkroot.sh" "$MFS"
 	makefs -t ffs -o version=2 -f 64 -b 10% "$ROOT/boot/mfsroot" "$MFS" >/dev/null
 	cat >> "$ROOT/boot/loader.conf" <<CONF
 mfsroot_load="YES"

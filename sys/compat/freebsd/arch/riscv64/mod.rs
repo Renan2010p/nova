@@ -22,7 +22,7 @@ mod vm_machdep;
 
 pub(crate) use elf_machdep::*;
 pub(crate) use exec_machdep::{PAGESIZES, USRSTACK, exec_setregs};
-pub(crate) use sig_machdep::{cpu_syscall_restart, map_sigcode, sendsig, sigreturn};
+pub(crate) use sig_machdep::{cpu_syscall_restart, getcontext, map_sigcode, sendsig, sigreturn};
 pub(crate) use sys_machdep::sysarch;
 pub(crate) use trap::{cpu_fetch_syscall_args, trap_uprintf_signal};
 pub(crate) use vm_machdep::*;

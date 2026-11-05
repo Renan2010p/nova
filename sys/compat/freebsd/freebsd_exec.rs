@@ -34,7 +34,7 @@ use libkern::conv::{u64_from_usize, usize_from_u64};
 use framework::user::VmSpace;
 use kern::kern_abi::ImageParams;
 use kern::kern_exec::{SGROWSIZ_INITIAL, vm_errno};
-use sys::elf::{AT_PHDR, AT_PHENT, AT_PHNUM};
+use sys::elf::{AT_BASE, AT_ENTRY, AT_PHDR, AT_PHENT, AT_PHNUM};
 use sys::errno::{Errno, KResult};
 
 use crate::FREEBSD_VERSION;
@@ -43,8 +43,6 @@ use crate::arch::{PAGESIZES, USRSTACK};
 const AT_NULL: u64 = 0;
 const AT_PAGESZ: u64 = 6;
 const AT_FLAGS: u64 = 8;
-const AT_ENTRY: u64 = 9;
-const AT_BASE: u64 = 7;
 const AT_EHDRFLAGS: u64 = 24;
 const AT_EXECPATH: u64 = 15;
 const AT_OSRELDATE: u64 = 18;
@@ -165,8 +163,8 @@ pub(crate) fn copyout_strings(vm: &VmSpace, img: &ImageParams<'_>) -> KResult<u6
         (AT_PHNUM, aux_value(AT_PHNUM)),
         (AT_PAGESZ, u64_from_usize(framework::PAGE_SIZE)),
         (AT_FLAGS, 0),
-        (AT_ENTRY, img.entry),
-        (AT_BASE, 0),
+        (AT_ENTRY, img.aux.iter().find(|e| e.tag == AT_ENTRY).map_or(img.entry, |e| e.value)),
+        (AT_BASE, aux_value(AT_BASE)),
         (AT_EHDRFLAGS, 0),
         (AT_EXECPATH, execpathp),
         (AT_OSRELDATE, u64::from(FREEBSD_VERSION)),

@@ -120,6 +120,51 @@ fn get8(b: &[u8], off: usize) -> u64 {
     b.get(off..off + 8).and_then(|s| s.try_into().ok()).map_or(0, u64::from_le_bytes)
 }
 
+/// `PSL_C`, the carry flag: set, a system call failed.
+const PSL_C: u64 = 0x1;
+
+/// A `ucontext_t` for `regs` and `mask` into `uc` (`get_mcontext`):
+/// with `clear_ret`, as a system call that returns 0 leaves them
+/// (`GET_MC_CLEAR_RET`, for `getcontext`).
+fn ucontext_out(regs: &UserRegs, mask: SigSet, clear_ret: bool, uc: &mut [u8]) {
+    let mc = UC_MCONTEXT;
+    put(uc, 0, &sigset_out(mask));
+    put(uc, UC_STACK_FLAGS, &SS_DISABLE.to_le_bytes());
+    let mut saved = *regs;
+    if clear_ret {
+        saved.rax = 0;
+        saved.rdx = 0;
+        saved.rflags &= !PSL_C;
+    }
+    for (i, r) in gprs(&mut saved).into_iter().enumerate() {
+        put(uc, mc + MC_REGS + 8 * i, &r.to_le_bytes());
+    }
+    put(uc, mc + MC_TRAPNO, &u32::try_from(regs.trapno).unwrap_or(0).to_le_bytes());
+    put(uc, mc + MC_ADDR, &regs.fault_addr.to_le_bytes());
+    put(uc, mc + MC_FLAGS, &(MC_HASSEGS | MC_HASBASES).to_le_bytes());
+    put(uc, mc + MC_ERR, &regs.err.to_le_bytes());
+    put(uc, mc + MC_RIP, &regs.rip.to_le_bytes());
+    put(uc, mc + MC_CS, &UCODESEL.to_le_bytes());
+    put(uc, mc + MC_RFLAGS, &saved.rflags.to_le_bytes());
+    put(uc, mc + MC_RSP, &regs.rsp.to_le_bytes());
+    put(uc, mc + MC_SS, &UDATASEL.to_le_bytes());
+    put(uc, mc + MC_LEN, &MCONTEXT_SIZE.to_le_bytes());
+    put(uc, mc + MC_FPFORMAT, &MC_FPFMT_XMM.to_le_bytes());
+    put(uc, mc + MC_OWNEDFP, &MC_FPOWNED_FPU.to_le_bytes());
+    if let Some(fp) = uc.get_mut(mc + MC_FPSTATE..mc + MC_FPSTATE + 512) {
+        user::fpu_save(fp);
+    }
+    put(uc, mc + MC_FSBASE, &regs.fsbase.to_le_bytes());
+}
+
+/// Saves the caller's context at `ucp` (`sys_getcontext`): it resumes
+/// there, `getcontext` returning 0, when `setcontext` loads it.
+pub(crate) fn getcontext(vm: &VmSpace, regs: &UserRegs, mask: SigSet, ucp: u64) -> KResult<()> {
+    let mut uc = [0u8; UCONTEXT_SIZE];
+    ucontext_out(regs, mask, true, &mut uc);
+    vm.copyout(ucp, &uc).map_err(vm_errno)
+}
+
 /// Maps the shared page with the signal trampoline in a new image.
 pub(crate) fn map_sigcode(vm: &VmSpace) -> KResult<()> {
     let prot = framework::user::Prot { read: true, write: false, exec: true };
@@ -138,29 +183,9 @@ pub(crate) fn sendsig(
     regs: &mut UserRegs,
 ) -> KResult<()> {
     let mut sf = [0u8; SIGFRAME_SIZE];
-    let mc = SF_UC + UC_MCONTEXT;
-    put(&mut sf, SF_UC, &sigset_out(mask));
-    put(&mut sf, SF_UC + UC_STACK_FLAGS, &SS_DISABLE.to_le_bytes());
-    let mut saved = *regs;
-    for (i, r) in gprs(&mut saved).into_iter().enumerate() {
-        put(&mut sf, mc + MC_REGS + 8 * i, &r.to_le_bytes());
+    if let Some(uc) = sf.get_mut(SF_UC..SF_UC + UCONTEXT_SIZE) {
+        ucontext_out(regs, mask, false, uc);
     }
-    put(&mut sf, mc + MC_TRAPNO, &u32::try_from(regs.trapno).unwrap_or(0).to_le_bytes());
-    put(&mut sf, mc + MC_ADDR, &regs.fault_addr.to_le_bytes());
-    put(&mut sf, mc + MC_FLAGS, &(MC_HASSEGS | MC_HASBASES).to_le_bytes());
-    put(&mut sf, mc + MC_ERR, &regs.err.to_le_bytes());
-    put(&mut sf, mc + MC_RIP, &regs.rip.to_le_bytes());
-    put(&mut sf, mc + MC_CS, &UCODESEL.to_le_bytes());
-    put(&mut sf, mc + MC_RFLAGS, &regs.rflags.to_le_bytes());
-    put(&mut sf, mc + MC_RSP, &regs.rsp.to_le_bytes());
-    put(&mut sf, mc + MC_SS, &UDATASEL.to_le_bytes());
-    put(&mut sf, mc + MC_LEN, &MCONTEXT_SIZE.to_le_bytes());
-    put(&mut sf, mc + MC_FPFORMAT, &MC_FPFMT_XMM.to_le_bytes());
-    put(&mut sf, mc + MC_OWNEDFP, &MC_FPOWNED_FPU.to_le_bytes());
-    if let Some(fp) = sf.get_mut(mc + MC_FPSTATE..mc + MC_FPSTATE + 512) {
-        user::fpu_save(fp);
-    }
-    put(&mut sf, mc + MC_FSBASE, &regs.fsbase.to_le_bytes());
 
     // Below the red zone, 16-aligned.
     let sfp = (regs.rsp.wrapping_sub(128).wrapping_sub(u64_from_usize(SIGFRAME_SIZE))) & !0xf;
@@ -188,7 +213,7 @@ pub(crate) fn sendsig(
     Ok(())
 }
 
-/// Takes the frame at `ucp` down (`sys_sigreturn`): the registers and
+/// Takes the frame at `ucp` down (`sys_sigreturn`, and `setcontext`): the registers and
 /// floating-point state come back; returns the mask to restore. `EINVAL`
 /// for a context a program may not set (privileged flags, another code
 /// segment).

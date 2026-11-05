@@ -160,13 +160,7 @@ pub use vm::vm_mmap::vm_errno;
 /// Builds a new image from `file` (`kern_execve`): the first page is read
 /// once, then the registered image activators are asked in order.
 pub fn kern_execve(file: &dyn ImageFile, path: &str, argv: &[&str], envv: &[&str]) -> KResult<Image> {
-    let size = file.size()?;
-    let head_len = usize_from_u64(size.min(u64_from_usize(IMAGE_HEADER)));
-    let mut head: KVec<u8> = KVec::with_capacity(head_len, &M_TEMP, M_WAITOK)?;
-    for _ in 0..head_len {
-        head.push(0, M_WAITOK)?;
-    }
-    file.read_at(0, &mut head)?;
+    let head = image_head(file)?;
 
     let args = ExecArgs { path, argv, envv };
     // The lock is released before `exec`: the activator may allocate and
@@ -179,6 +173,29 @@ pub fn kern_execve(file: &dyn ImageFile, path: &str, argv: &[&str], envv: &[&str
         Some(act) => act.exec(&head, file, &args),
         None => Err(Errno::ENOEXEC),
     }
+}
+
+/// Opens the file at the absolute `path` for an image activator: an
+/// interpreter the image names (`PT_INTERP`, `#!`). It must be a regular
+/// file.
+pub fn image_open(path: &[u8]) -> KResult<Vnode> {
+    let root = crate::vfs_mount::rootvnode().ok_or(Errno::ENOENT)?;
+    let vp = crate::vfs_lookup::namei(root, root, path, true)?;
+    if vp.getattr()?.kind != VType::Reg {
+        return Err(Errno::EACCES);
+    }
+    Ok(vp)
+}
+
+/// Reads the first page of `file` (at most), as activators look at it.
+pub fn image_head(file: &dyn ImageFile) -> KResult<KVec<u8>> {
+    let head_len = usize_from_u64(file.size()?.min(u64_from_usize(IMAGE_HEADER)));
+    let mut head: KVec<u8> = KVec::with_capacity(head_len, &M_TEMP, M_WAITOK)?;
+    for _ in 0..head_len {
+        head.push(0, M_WAITOK)?;
+    }
+    file.read_at(0, &mut head)?;
+    Ok(head)
 }
 
 /// Executes the file at `path` in `p` (`kern_execve` from `execve(2)`):

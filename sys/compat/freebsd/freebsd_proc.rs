@@ -28,7 +28,7 @@ use kern::kern_proc::{
 use kern::kern_sig::{KillWho, SigHow, kern_kill, kern_sigpending, kern_sigprocmask, kern_sigsuspend};
 use sys::errno::{Errno, KResult};
 
-use crate::arch::{cpu_set_syscall_retval, sigreturn};
+use crate::arch::{cpu_set_syscall_retval, getcontext, sigreturn};
 use crate::freebsd_signal::{SIGSET_SIZE, from_signo, sigset_in, sigset_out, signo};
 use crate::freebsd_sysent::SyscallResult;
 use crate::freebsd_vfs::copyinstr;
@@ -318,5 +318,112 @@ pub(crate) fn sys_getlogin(p: &Proc, buf: u64, len: u64) -> KResult<[u64; 2]> {
         return Err(Errno::ERANGE);
     }
     p.vm().copyout(buf, b.get(..want).unwrap_or(&[0])).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// `getcontext(ucp)`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_getcontext(p: &Proc, regs: &UserRegs, ucp: u64) -> KResult<[u64; 2]> {
+    let mask = kern_sigprocmask(p, SigHow::Block, None);
+    getcontext(&p.vm(), regs, mask, ucp)?;
+    Ok([0, 0])
+}
+
+/// `setcontext(ucp)`: as `sigreturn`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_setcontext(p: &Proc, regs: &mut UserRegs, ucp: u64) -> SyscallResult {
+    sys_sigreturn(p, regs, ucp)
+}
+
+/// `swapcontext(oucp, ucp)`: saves to `oucp`, loads `ucp`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_swapcontext(p: &Proc, regs: &mut UserRegs, oucp: u64, ucp: u64) -> SyscallResult {
+    if let Err(e) = sys_getcontext(p, regs, oucp) {
+        return SyscallResult::Err(e);
+    }
+    sys_sigreturn(p, regs, ucp)
+}
+
+/// `thr_wake(id)`: for the caller, the next `thr_suspend` would not sleep
+/// (`TDP_WAKEUP`); there is no other thread. TODO(thread).
+pub(crate) fn sys_thr_wake(id: u64) -> KResult<[u64; 2]> {
+    if id == kern::kern_thr::kern_thr_self() { Ok([0, 0]) } else { Err(Errno::ESRCH) }
+}
+
+/// `rtprio_thread(function, lwpid, rtp)`: every thread runs at the normal
+/// time-sharing priority (`RTP_PRIO_NORMAL`, 0); setting it is accepted.
+/// TODO(sched): real-time and idle classes.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_rtprio_thread(p: &Proc, function: i32, lwpid: u64, rtp: u64) -> KResult<[u64; 2]> {
+    const RTP_LOOKUP: i32 = 0;
+    const RTP_SET: i32 = 1;
+    const RTP_PRIO_NORMAL: u16 = 3;
+    if lwpid != 0 && lwpid != kern::kern_thr::kern_thr_self() {
+        return Err(Errno::ESRCH);
+    }
+    match function {
+        RTP_LOOKUP => {
+            let mut b = [0u8; 4];
+            b[..2].copy_from_slice(&RTP_PRIO_NORMAL.to_le_bytes());
+            p.vm().copyout(rtp, &b).map_err(vm_errno)?;
+            Ok([0, 0])
+        }
+        RTP_SET => Ok([0, 0]),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// `_umtx_op(obj, op, val, uaddr, uaddr2)`, for one thread per process:
+/// wakes find no one; a wait returns at once if the word changed, else
+/// sleeps until a signal or its timeout.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_umtx_op(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
+    const UMTX_OP_WAIT: i32 = 2;
+    const UMTX_OP_WAKE: i32 = 3;
+    const UMTX_OP_WAIT_UINT: i32 = 11;
+    const UMTX_OP_WAIT_UINT_PRIVATE: i32 = 15;
+    const UMTX_OP_WAKE_PRIVATE: i32 = 16;
+    const UMTX_OP_NWAKE_PRIVATE: i32 = 21;
+    let (obj, op, val) = (args[0], libkern::conv::trunc_i32(args[1]), args[2]);
+    let vm = p.vm();
+    let wide = match op {
+        UMTX_OP_WAKE | UMTX_OP_WAKE_PRIVATE | UMTX_OP_NWAKE_PRIVATE => return Ok([0, 0]),
+        UMTX_OP_WAIT => true,
+        UMTX_OP_WAIT_UINT | UMTX_OP_WAIT_UINT_PRIVATE => false,
+        _ => {
+            if kern::init_main::bootverbose() {
+                kern::printf!("pid {} comm {}: _umtx_op {} not implemented\n", p.pid, p.comm(), op);
+            }
+            return Err(Errno::EINVAL);
+        }
+    };
+    let cur = if wide {
+        let mut b = [0u8; 8];
+        vm.copyin(obj, &mut b).map_err(vm_errno)?;
+        u64::from_le_bytes(b)
+    } else {
+        let mut b = [0u8; 4];
+        vm.copyin(obj, &mut b).map_err(vm_errno)?;
+        u64::from(u32::from_le_bytes(b))
+    };
+    let want = if wide { val } else { val & 0xffff_ffff };
+    if cur != want {
+        return Ok([0, 0]);
+    }
+    // The timeout: a `struct timespec` or a `struct _umtx_time` (whose
+    // first member is one), relative.
+    let timeout = if args[4] == 0 {
+        None
+    } else {
+        let mut t = [0u8; 16];
+        vm.copyin(args[4], &mut t).map_err(vm_errno)?;
+        let sec = i64::from_le_bytes(t[..8].try_into().map_err(|_| Errno::EFAULT)?);
+        let nsec = i64::from_le_bytes(t[8..].try_into().map_err(|_| Errno::EFAULT)?);
+        if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+            return Err(Errno::EINVAL);
+        }
+        Some(u64::try_from(sec).unwrap_or(0).saturating_mul(1_000_000_000).saturating_add(u64::try_from(nsec).unwrap_or(0)))
+    };
+    kern::kern_synch::kern_umtx_sleep(p, timeout)?;
     Ok([0, 0])
 }

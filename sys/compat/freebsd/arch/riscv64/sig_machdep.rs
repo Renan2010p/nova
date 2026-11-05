@@ -44,3 +44,8 @@ pub(crate) fn sigreturn(_vm: &VmSpace, _ucp: u64, _regs: &mut UserRegs) -> KResu
 pub(crate) fn cpu_syscall_restart(regs: &mut UserRegs) {
     regs.sepc -= 4;
 }
+
+/// TODO(riscv): `sys_getcontext`.
+pub(crate) fn getcontext(_vm: &VmSpace, _regs: &UserRegs, _mask: SigSet, _ucp: u64) -> KResult<()> {
+    Err(Errno::ENOSYS)
+}

@@ -97,3 +97,21 @@ pub fn kern_nanosleep_sig(p: &Proc, ns: u64) -> KResult<()> {
         r => r,
     }
 }
+
+/// Never true: for a sleep only a signal ends.
+static NOWHERE: WaitQueue = WaitQueue::new();
+
+/// Sleeps until a signal comes, or `timeout_ns` passes (`ETIMEDOUT`):
+/// a thread waiting on a user lock that no other thread can release (a
+/// process has one thread for now).
+///
+/// TODO(thread): user locks shared between threads (`kern_umtx.c`).
+pub fn kern_umtx_sleep(p: &Proc, timeout_ns: Option<u64>) -> KResult<()> {
+    match timeout_ns {
+        Some(ns) => {
+            kern_nanosleep_sig(p, ns)?;
+            Err(Errno::ETIMEDOUT)
+        }
+        None => sleep_sig(p, WChan::Static(&NOWHERE), || false),
+    }
+}

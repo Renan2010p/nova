@@ -51,7 +51,8 @@ use crate::freebsd_syscalls::{
     SYS_statfs, SYS_sysarch, SYS_thr_kill, SYS_thr_self, SYS_umask, SYS_vfork, SYS_wait4, SYS_wait6, SYS_write,
     SYS_MAXSYSCALL, SYSCALLNAMES, SYS_copy_file_range, SYS_fpathconf, SYS_lpathconf, SYS_pathconf, SYS_readv,
     SYS_writev, SYS_nanosleep, SYS_clock_nanosleep, SYS_pipe2, SYS_sigreturn, SYS_sigsuspend, SYS_sigpending,
-    SYS_setlogin, SYS_getlogin, SYS_revoke,
+    SYS_setlogin, SYS_getlogin, SYS_revoke, SYS_pread, SYS_pwrite, SYS_getcontext, SYS_setcontext, SYS_swapcontext,
+    SYS_thr_wake, SYS__umtx_op, SYS_rtprio_thread, SYS_exterrctl, SYS_clock_getres, SYS_kenv,
 };
 
 /// The outcome of one system call.
@@ -126,6 +127,19 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_pathconf => freebsd_vfs::sys_pathconf(p, Err(args[0]), true, int(1)).into(),
         SYS_lpathconf => freebsd_vfs::sys_pathconf(p, Err(args[0]), false, int(1)).into(),
         SYS_fpathconf => freebsd_vfs::sys_pathconf(p, Ok(int(0)), true, int(1)).into(),
+        SYS_clock_getres => sys_clock_getres(p, int(0), args[1]).into(),
+        SYS_kenv => sys_kenv(p, int(0), args[1], args[2], int(3)).into(),
+        SYS_getcontext => freebsd_proc::sys_getcontext(p, regs, args[0]).into(),
+        SYS_setcontext => freebsd_proc::sys_setcontext(p, regs, args[0]),
+        SYS_swapcontext => freebsd_proc::sys_swapcontext(p, regs, args[0], args[1]),
+        SYS_thr_wake => freebsd_proc::sys_thr_wake(args[0]).into(),
+        SYS__umtx_op => freebsd_proc::sys_umtx_op(p, args).into(),
+        SYS_rtprio_thread => freebsd_proc::sys_rtprio_thread(p, int(0), args[1], args[2]).into(),
+        // Extended error reports (FreeBSD 15): accepted; the kernel has
+        // none to give yet, so the program's buffer stays empty.
+        SYS_exterrctl => Ok([0, 0]).into(),
+        SYS_pread => sys_generic::kern_pread(p, int(0), args[1], args[2], args[3]).map(|n| [n, 0]).into(),
+        SYS_pwrite => sys_generic::kern_pwrite(p, int(0)).map(|n| [n, 0]).into(),
         SYS_pipe2 => freebsd_proc::sys_pipe2(p, args[0], int(1)).into(),
         SYS_sigreturn => freebsd_proc::sys_sigreturn(p, regs, args[0]),
         SYS_sigsuspend => freebsd_proc::sys_sigsuspend(p, args[0]).into(),
@@ -261,12 +275,10 @@ fn sys_mmap(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     const MAP_ALIGNMENT_SHIFT: u32 = 24;
     const MAP_ALIGNED_SUPER: u32 = 1;
     let (addr, len) = (args[0], args[1]);
+    const MAP_SHARED: i32 = 0x0001;
     let (prot, flags, fd) = (trunc_i32(args[2]), trunc_i32(args[3]), trunc_i32(args[4]));
-    if flags & (MAP_ANON | MAP_GUARD) == 0 {
-        // A file mapping: there are no files yet, so no valid descriptor.
-        return Err(Errno::EBADF);
-    }
-    if fd != -1 || args[5] != 0 || flags & MAP_32BIT != 0 {
+    let file = flags & (MAP_ANON | MAP_GUARD) == 0;
+    if (!file && (fd != -1 || args[5] != 0)) || flags & MAP_32BIT != 0 {
         return Err(Errno::EINVAL);
     }
     if flags & MAP_GUARD != 0 && prot != 0 {
@@ -289,6 +301,10 @@ fn sys_mmap(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
         (true, true) => MmapAt::FixedNoReplace(addr),
         (false, _) => MmapAt::Hint { addr, align_shift },
     };
+    if file {
+        let shared = flags & MAP_SHARED != 0;
+        return Ok([kern::vfs_vnops::kern_mmap_fd(p, at, len, prot, shared, fd, args[5])?, 0]);
+    }
     // TODO(fork): MAP_SHARED anonymous memory is private until there are
     // other processes to share it with.
     Ok([kern_mmap_anon(&p.vm(), at, len, prot)?, 0])
@@ -344,6 +360,74 @@ fn sys_clock_nanosleep(p: &Proc, id: i32, flags: i32, rqtp: u64, rmtp: u64) -> K
         vm.copyout(rmtp, &[0u8; 16]).map_err(vm_errno)?;
     }
     Ok([0, 0])
+}
+
+/// `clock_getres(clock_id, tp)`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+fn sys_clock_getres(p: &Proc, id: i32, tp: u64) -> KResult<[u64; 2]> {
+    let clock = match id {
+        0 | 9 | 10 => ClockId::Realtime,
+        4 | 5 | 7 | 8 | 11 | 12 => ClockId::Monotonic,
+        13 => ClockId::Second,
+        _ => return Err(Errno::EINVAL),
+    };
+    if tp != 0 {
+        let ts = kern::kern_clock::kern_clock_getres(clock);
+        let mut b = [0u8; 16];
+        b[..8].copy_from_slice(&ts.sec.to_le_bytes());
+        b[8..].copy_from_slice(&ts.nsec.to_le_bytes());
+        p.vm().copyout(tp, &b).map_err(vm_errno)?;
+    }
+    Ok([0, 0])
+}
+
+/// `kenv(action, name, value, len)`: reading the loader's environment,
+/// one variable (`KENV_GET`) or all (`KENV_DUMP*`, `name=value` strings).
+/// It cannot be changed yet (`EPERM`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+fn sys_kenv(p: &Proc, action: i32, name: u64, value: u64, len: i32) -> KResult<[u64; 2]> {
+    const KENV_GET: i32 = 0;
+    const KENV_SET: i32 = 1;
+    const KENV_UNSET: i32 = 2;
+    const KENV_DUMP: i32 = 3;
+    const KENV_DUMP_LOADER: i32 = 4;
+    const KENV_DUMP_STATIC: i32 = 5;
+    let vm = p.vm();
+    let len = usize::try_from(len).unwrap_or(0);
+    let env = kern::kern_environment::kenv();
+    match action {
+        KENV_GET => {
+            let mut nb = [0u8; 128];
+            let n = crate::freebsd_vfs::copyinstr(&vm, name, &mut nb)?;
+            let name = core::str::from_utf8(&nb[..n]).map_err(|_| Errno::EINVAL)?;
+            let v = env.getenv(name).ok_or(Errno::ENOENT)?;
+            let want = (v.len() + 1).min(len);
+            if want > 0 {
+                let n = want.min(v.len());
+                vm.copyout(value, &v.as_bytes()[..n]).map_err(vm_errno)?;
+                vm.copyout(value + libkern::conv::u64_from_usize(want - 1), &[0]).map_err(vm_errno)?;
+            }
+            Ok([libkern::conv::u64_from_usize(want), 0])
+        }
+        KENV_SET | KENV_UNSET => Err(Errno::EPERM),
+        KENV_DUMP | KENV_DUMP_LOADER | KENV_DUMP_STATIC => {
+            let mut total = 0usize;
+            for (n, v) in env.iter() {
+                let rec = n.len() + 1 + v.len() + 1;
+                if value != 0 && total + rec <= len {
+                    let at = value + libkern::conv::u64_from_usize(total);
+                    vm.copyout(at, n.as_bytes()).map_err(vm_errno)?;
+                    let at = at + libkern::conv::u64_from_usize(n.len());
+                    vm.copyout(at, b"=").map_err(vm_errno)?;
+                    vm.copyout(at + 1, v.as_bytes()).map_err(vm_errno)?;
+                    vm.copyout(at + 1 + libkern::conv::u64_from_usize(v.len()), &[0]).map_err(vm_errno)?;
+                }
+                total += rec;
+            }
+            Ok([libkern::conv::u64_from_usize(total), 0])
+        }
+        _ => Err(Errno::EINVAL),
+    }
 }
 
 /// `getrandom(buf, buflen, flags)`: the kernel's generator never blocks

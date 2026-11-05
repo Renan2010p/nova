@@ -110,3 +110,12 @@ pub fn kern_clock_gettime(clock: ClockId) -> Timespec {
         ClockId::Second => Timespec { sec, nsec: 0 },
     }
 }
+
+/// The resolution of `clock` (`kern_clock_getres`): one tick, until there
+/// is a precise timecounter; a second for `CLOCK_SECOND`.
+pub fn kern_clock_getres(clock: ClockId) -> Timespec {
+    match clock {
+        ClockId::Second => Timespec { sec: 1, nsec: 0 },
+        _ => Timespec { sec: 0, nsec: i64::from(1_000_000_000 / hz().max(1)) },
+    }
+}

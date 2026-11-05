@@ -74,6 +74,9 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     // from here on shows on the screen too.
     vt::vt_init(boot);
     let kenv = StaticEnv::new(boot.envp);
+    if let Err(e) = crate::kern_environment::kenv_init(boot.envp) {
+        panic!("cannot keep the kernel environment: {e:?}");
+    }
     let bootverbose = boot.howto & RB_VERBOSE != 0;
     BOOTVERBOSE.store(bootverbose, Ordering::Relaxed);
     let param = subr_param::init_param1(&kenv);
@@ -239,6 +242,7 @@ fn cpu_startup(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
         .map(|kib| kib << 10)
         .filter(|&m| m >= free)
         .unwrap_or(maxmem);
+    crate::kern_mib::set_memory(realmem, free);
     printf!("real memory  = {} ({} MB)\n", realmem, realmem >> 20);
     if bootverbose {
         printf!("Physical memory chunk(s):\n");

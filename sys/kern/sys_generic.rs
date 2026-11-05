@@ -285,3 +285,45 @@ pub fn kern_tty_ioctl(p: &Proc, fd: i32, op: TtyOp) -> KResult<TtyReply> {
 pub fn kern_fd_valid(p: &Proc, fd: i32) -> KResult<()> {
     p.fd.get(fd).map(drop)
 }
+
+/// Reads from `fd` at `offset`, leaving its offset alone (`kern_pread`):
+/// only a file of a file system has positions (`ESPIPE` otherwise).
+pub fn kern_pread(p: &Proc, fd: i32, buf: u64, nbyte: u64, offset: u64) -> KResult<u64> {
+    let file = p.fd.get(fd)?;
+    if !file.flags.lock().read {
+        return Err(Errno::EBADF);
+    }
+    let vp = file.kind.vnode().ok_or(Errno::ESPIPE)?;
+    if vp.getattr()?.kind == VType::Dir {
+        return Err(Errno::EISDIR);
+    }
+    if i64::try_from(offset).is_err() || nbyte > IOSIZE_MAX {
+        return Err(Errno::EINVAL);
+    }
+    let vm = p.vm();
+    let mut chunk = [0u8; 1024];
+    let mut done = 0u64;
+    while done < nbyte {
+        let n = usize_from_u64((nbyte - done).min(u64_from_usize(chunk.len())));
+        let got = vp.read(offset + done, &mut chunk[..n])?;
+        if got == 0 {
+            break;
+        }
+        if let Err(e) = vm.copyout(buf + done, &chunk[..got]) {
+            return if done > 0 { Ok(done) } else { Err(vm_errno(e)) };
+        }
+        done += u64_from_usize(got);
+    }
+    Ok(done)
+}
+
+/// Writes to `fd` at `offset` (`kern_pwrite`): files are read-only for
+/// now, so only the checks.
+pub fn kern_pwrite(p: &Proc, fd: i32) -> KResult<u64> {
+    let file = p.fd.get(fd)?;
+    if !file.flags.lock().write {
+        return Err(Errno::EBADF);
+    }
+    let vp = file.kind.vnode().ok_or(Errno::ESPIPE)?;
+    Err(if vp.mp.rdonly { Errno::EROFS } else { Errno::EBADF })
+}

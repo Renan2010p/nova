@@ -58,6 +58,16 @@ struct Node {
     value: Value,
 }
 
+/// Memory not wired by the kernel (`hw.usermem`): what is free.
+fn usermem() -> u64 {
+    framework::mm::vm_phys::free_count() * libkern::conv::u64_from_usize(framework::PAGE_SIZE)
+}
+
+/// Pages of memory (`hw.availpages`, for `sysconf(_SC_PHYS_PAGES)`).
+fn availpages() -> u64 {
+    kern::kern_mib::physmem() / libkern::conv::u64_from_usize(framework::PAGE_SIZE)
+}
+
 fn ncpu() -> i32 {
     i32::try_from(framework::cpu::mp_ncpus()).unwrap_or(i32::MAX)
 }
@@ -77,6 +87,11 @@ static NODES: &[Node] = &[
     Node { mib: &[6, 1], name: "hw.machine", value: Value::Str(|b| b.buf_str(framework::MACHINE)) },
     Node { mib: &[6, 3], name: "hw.ncpu", value: Value::Int(ncpu) },
     Node { mib: &[6, 4], name: "hw.byteorder", value: Value::Int(|| 1234) },
+    Node { mib: &[6, 5], name: "hw.physmem", value: Value::Ulong(kern::kern_mib::physmem) },
+    Node { mib: &[6, 6], name: "hw.usermem", value: Value::Ulong(usermem) },
+    // OID_AUTO nodes: numbers from FreeBSD's dynamic range, stable here.
+    Node { mib: &[6, 0x1_0001], name: "hw.realmem", value: Value::Ulong(kern::kern_mib::realmem) },
+    Node { mib: &[6, 0x1_0002], name: "hw.availpages", value: Value::Ulong(availpages) },
     Node { mib: &[6, 7], name: "hw.pagesize", value: Value::Int(|| i32::try_from(framework::PAGE_SIZE).unwrap_or(4096)) },
     Node { mib: &[6, 11], name: "hw.machine_arch", value: Value::Str(|b| b.buf_str(framework::MACHINE_ARCH)) },
     Node { mib: &[6, 13], name: "hw.pagesizes", value: Value::Ulong(|| PAGESIZES[0]) },

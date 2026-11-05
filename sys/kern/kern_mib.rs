@@ -94,3 +94,24 @@ impl<const N: usize> core::fmt::Write for FixedBuf<N> {
         Ok(())
     }
 }
+
+/// Memory sizes found at boot, in bytes (`realmem`, `physmem`).
+static REALMEM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static PHYSMEM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Records the memory sizes `cpu_startup` reports: installed (`realmem`)
+/// and available to the kernel (`physmem`).
+pub fn set_memory(realmem: u64, physmem: u64) {
+    REALMEM.store(realmem, core::sync::atomic::Ordering::Relaxed);
+    PHYSMEM.store(physmem, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Installed memory (`hw.realmem`), in bytes.
+pub fn realmem() -> u64 {
+    REALMEM.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Memory the kernel manages (`hw.physmem`), in bytes.
+pub fn physmem() -> u64 {
+    PHYSMEM.load(core::sync::atomic::Ordering::Relaxed)
+}

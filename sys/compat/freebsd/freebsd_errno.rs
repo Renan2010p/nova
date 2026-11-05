@@ -48,6 +48,8 @@ pub(crate) const fn errno(e: Errno) -> i32 {
         Errno::ENAMETOOLONG => 63,
         Errno::EPIPE => 32,
         Errno::ENXIO => 6,
+        Errno::ENODEV => 19,
+        Errno::ETIMEDOUT => 60,
         // Never returned: the ABI restarts the call instead.
         Errno::ERESTART => -1,
     }

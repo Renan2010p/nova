@@ -81,6 +81,10 @@ pub enum Errno {
     EPIPE,
     /// Device not configured.
     ENXIO,
+    /// Operation not supported by device.
+    ENODEV,
+    /// Operation timed out.
+    ETIMEDOUT,
     /// Not an error a program sees: the system call is restarted, as a
     /// signal whose handler has `SA_RESTART` interrupted it (FreeBSD's
     /// kernel-only `ERESTART`).

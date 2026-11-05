@@ -39,6 +39,8 @@ pub const ET_EXEC: u16 = 2;
 pub const ET_DYN: u16 = 3;
 /// `p_type` of a loadable segment.
 pub const PT_LOAD: u32 = 1;
+/// `p_type` of the interpreter's path (the dynamic linker).
+pub const PT_INTERP: u32 = 3;
 /// `p_type` of a note segment.
 pub const PT_NOTE: u32 = 4;
 /// `p_flags`: executable.
@@ -58,6 +60,10 @@ pub const AT_PHDR: u64 = 3;
 pub const AT_PHENT: u64 = 4;
 /// `AT_PHNUM`: number of program headers.
 pub const AT_PHNUM: u64 = 5;
+/// `AT_BASE`: where the interpreter was loaded.
+pub const AT_BASE: u64 = 7;
+/// `AT_ENTRY`: the program's entry point (the interpreter starts first).
+pub const AT_ENTRY: u64 = 9;
 
 /// The generic fields of an `Elf64_Ehdr`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
