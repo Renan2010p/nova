@@ -18,11 +18,12 @@
 //! The kernel knows no file system. It knows [`VfsOps`], what every file
 //! system offers (look a name up, read, list a directory, describe a
 //! file), and works on [`Vnode`]s: a mount and a file number in it. Each
-//! file system is a crate under `sys/compat/<abi>/fs/<name>` (a file
-//! system is a format a system defines, as an ABI is), which `sys/conf`
-//! registers ([`crate::vfs_mount::vfs_register`]); the root's type comes
-//! from `vfs.root.mountfrom`, as a string. `checklayers` rule R19 keeps
-//! file system names out of every other crate.
+//! file system is a service crate under `sys/fs/<name>` or
+//! `sys/fs/<origin>/<name>` (or `sys/compat/<abi>/fs/<name>` when it is
+//! tied to an ABI, which UFS is not), which `sys/conf` registers
+//! ([`crate::vfs_mount::vfs_register`]); the root's type comes from
+//! `vfs.root.mountfrom`, as a string. `checklayers` rule R19 keeps file
+//! system names out of every other crate.
 //!
 //! TODO(vfs): writing, a name cache, several mounts (`mount(2)`, mount
 //! points crossed by lookup), devices other than memory disks.
@@ -195,6 +196,12 @@ pub struct Mount {
     pub on: &'static str,
     /// Read-only.
     pub rdonly: bool,
+    /// The directory it is mounted on (`mnt_vnodecovered`); `None` for
+    /// the root.
+    pub covered: Option<Vnode>,
+    /// Its device files open the kernel's devices (the device file
+    /// system).
+    pub devices: bool,
 }
 
 impl core::fmt::Debug for Mount {

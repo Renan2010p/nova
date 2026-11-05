@@ -35,6 +35,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod devfs;
 pub mod init_main;
 pub mod kern_abi;
 pub mod kern_clock;
@@ -61,6 +62,7 @@ pub mod subr_prf;
 pub mod subr_selftest;
 pub mod subr_trap;
 pub mod sys_generic;
+pub mod sys_pipe;
 pub mod tty;
 pub mod vfs_lookup;
 pub mod vfs_mount;

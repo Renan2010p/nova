@@ -34,15 +34,13 @@ use libkern::conv::{u64_from_usize, usize_from_u64};
 use framework::user::VmSpace;
 use kern::kern_abi::ImageParams;
 use kern::kern_exec::{SGROWSIZ_INITIAL, vm_errno};
+use sys::elf::{AT_PHDR, AT_PHENT, AT_PHNUM};
 use sys::errno::{Errno, KResult};
 
 use crate::FREEBSD_VERSION;
 use crate::arch::{PAGESIZES, USRSTACK};
 
 const AT_NULL: u64 = 0;
-const AT_PHDR: u64 = 3;
-const AT_PHENT: u64 = 4;
-const AT_PHNUM: u64 = 5;
 const AT_PAGESZ: u64 = 6;
 const AT_FLAGS: u64 = 8;
 const AT_ENTRY: u64 = 9;
@@ -158,10 +156,13 @@ pub(crate) fn copyout_strings(vm: &VmSpace, img: &ImageParams<'_>) -> KResult<u6
     word(ps_strings + 16, envv)?;
     put(ps_strings + 24, &u32::try_from(envc).map_err(|_| Errno::E2BIG)?.to_le_bytes())?;
 
+    // What the image format contributed (the program headers, for ELF).
+    // The core does not know these tags; the ABI does.
+    let aux_value = |tag: u64| img.aux.iter().find(|e| e.tag == tag).map_or(0, |e| e.value);
     let aux = [
-        (AT_PHDR, img.phdr),
-        (AT_PHENT, u64::from(img.phent)),
-        (AT_PHNUM, u64::from(img.phnum)),
+        (AT_PHDR, aux_value(AT_PHDR)),
+        (AT_PHENT, aux_value(AT_PHENT)),
+        (AT_PHNUM, aux_value(AT_PHNUM)),
         (AT_PAGESZ, u64_from_usize(framework::PAGE_SIZE)),
         (AT_FLAGS, 0),
         (AT_ENTRY, img.entry),

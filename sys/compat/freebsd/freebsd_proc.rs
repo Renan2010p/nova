@@ -22,12 +22,14 @@ use kern::kern_exec::{kern_execve_path, vm_errno};
 use kern::kern_exit::ExitStatus;
 use kern::kern_fork::kern_fork;
 use kern::kern_malloc::M_TEMP;
-use kern::kern_proc::{Proc, WaitWho, kern_getpgid, kern_getsid, kern_setpgid, kern_setsid, kern_wait};
-use kern::kern_sig::{KillWho, SelfSignal, kern_kill};
+use kern::kern_proc::{
+    Proc, StopEvent, WaitEvent, WaitOptions, WaitWho, kern_getpgid, kern_getsid, kern_setpgid, kern_setsid, kern_wait,
+};
+use kern::kern_sig::{KillWho, SigHow, kern_kill, kern_sigpending, kern_sigprocmask, kern_sigsuspend};
 use sys::errno::{Errno, KResult};
 
-use crate::arch::cpu_set_syscall_retval;
-use crate::freebsd_signal::{from_signo, signo};
+use crate::arch::{cpu_set_syscall_retval, sigreturn};
+use crate::freebsd_signal::{SIGSET_SIZE, from_signo, sigset_in, sigset_out, signo};
 use crate::freebsd_sysent::SyscallResult;
 use crate::freebsd_vfs::copyinstr;
 
@@ -111,11 +113,14 @@ pub(crate) fn sys_execve(p: &Proc, regs: &mut UserRegs, path: u64, argv: u64, en
     }
 }
 
-/// FreeBSD's status word (`W_EXITCODE`, `W_TERMSIG`).
-fn status_word(st: ExitStatus) -> i32 {
-    match st {
-        ExitStatus::Exited(rv) => (rv & 0xff) << 8,
-        ExitStatus::Signaled(sig) => signo(sig) & 0x7f,
+/// FreeBSD's status word (`W_EXITCODE`, `W_TERMSIG`, `W_STOPCODE`, and
+/// `0x13` for a continued process).
+fn status_word(ev: WaitEvent) -> i32 {
+    match ev {
+        WaitEvent::Exited(ExitStatus::Exited(rv)) => (rv & 0xff) << 8,
+        WaitEvent::Exited(ExitStatus::Signaled(sig)) => signo(sig) & 0x7f,
+        WaitEvent::Changed(StopEvent::Stopped(sig)) => (signo(sig) << 8) | 0x7f,
+        WaitEvent::Changed(StopEvent::Continued) => 0x13,
     }
 }
 
@@ -132,10 +137,16 @@ fn wait_common(p: &Proc, who: WaitWho, status: u64, options: i32, rusage: u64, r
     if options & !(WNOHANG | WUNTRACED | WCONTINUED | WNOWAIT | WEXITED | WTRAPPED) != 0 {
         return Err(Errno::EINVAL);
     }
-    let Some((pid, st)) = kern_wait(p, who, options & WNOHANG != 0)? else { return Ok([0, 0]) };
+    let opts = WaitOptions {
+        nohang: options & WNOHANG != 0,
+        stopped: options & (WUNTRACED | WTRAPPED) != 0,
+        continued: options & WCONTINUED != 0,
+        nowait: options & WNOWAIT != 0,
+    };
+    let Some((pid, ev)) = kern_wait(p, who, opts)? else { return Ok([0, 0]) };
     let vm = p.vm();
     if status != 0 {
-        vm.copyout(status, &status_word(st).to_le_bytes()).map_err(vm_errno)?;
+        vm.copyout(status, &status_word(ev).to_le_bytes()).map_err(vm_errno)?;
     }
     if rusage != 0 {
         // TODO(rusage): resource usage.
@@ -219,8 +230,7 @@ pub(crate) fn sys_kill(p: &Proc, pid: i32, sig: i32) -> SyscallResult {
         n => KillWho::Pid(n.unsigned_abs()),
     };
     match kern_kill(p, who, sig) {
-        Ok(SelfSignal::Kill(s)) => SyscallResult::Signal(s),
-        Ok(_) => SyscallResult::Ok([0, 0]),
+        Ok(()) => SyscallResult::Ok([0, 0]),
         Err(e) => SyscallResult::Err(e),
     }
 }
@@ -231,4 +241,82 @@ pub(crate) fn sys_umask(p: &Proc, mask: u64) -> KResult<[u64; 2]> {
     let new = u32::try_from(mask & 0o777).map_err(|_| Errno::EINVAL)?;
     let old = p.umask.swap(new, core::sync::atomic::Ordering::Relaxed);
     Ok([u64::from(old), 0])
+}
+
+/// `pipe2(fildes, flags)`: `O_CLOEXEC`, `O_NONBLOCK`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_pipe2(p: &Proc, fds: u64, flags: i32) -> KResult<[u64; 2]> {
+    const O_NONBLOCK: i32 = 0x4;
+    const O_CLOEXEC: i32 = 0x10_0000;
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let (r, w) = kern::sys_pipe::kern_pipe(p, flags & O_CLOEXEC != 0, flags & O_NONBLOCK != 0)?;
+    let mut b = [0u8; 8];
+    b[..4].copy_from_slice(&r.to_le_bytes());
+    b[4..].copy_from_slice(&w.to_le_bytes());
+    if let Err(e) = p.vm().copyout(fds, &b) {
+        let _ = p.fd.close(r);
+        let _ = p.fd.close(w);
+        return Err(vm_errno(e));
+    }
+    Ok([0, 0])
+}
+
+/// `sigreturn(ucp)`: back from a handler, as it was before
+/// (`EJUSTRETURN`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_sigreturn(p: &Proc, regs: &mut UserRegs, ucp: u64) -> SyscallResult {
+    match sigreturn(&p.vm(), ucp, regs) {
+        Ok(mask) => {
+            kern_sigprocmask(p, SigHow::SetMask, Some(mask));
+            SyscallResult::JustReturn
+        }
+        Err(e) => SyscallResult::Err(e),
+    }
+}
+
+/// `sigsuspend(sigmask)`: waits for a signal with that mask; the handler
+/// runs with it, and the old mask comes back after (always `EINTR`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_sigsuspend(p: &Proc, set: u64) -> KResult<[u64; 2]> {
+    let mut b = [0u8; SIGSET_SIZE];
+    p.vm().copyin(set, &mut b).map_err(vm_errno)?;
+    let old = kern_sigsuspend(p, sigset_in(&b));
+    // The handler's frame takes the suspended mask; after it returns, the
+    // old one must hold: put it back now, the frame keeps what to restore.
+    // TODO(signal): `TDP_OLDMASK`, so the frame saves `old` itself.
+    kern_sigprocmask(p, SigHow::SetMask, Some(old));
+    Err(Errno::EINTR)
+}
+
+/// `sigpending(set)`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_sigpending(p: &Proc, set: u64) -> KResult<[u64; 2]> {
+    p.vm().copyout(set, &sigset_out(kern_sigpending(p))).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// The login name of every session: one for now (`s_login`).
+static LOGIN: framework::sync::MtxSpin<([u8; 33], usize)> = framework::sync::MtxSpin::new(([0; 33], 0));
+
+/// `setlogin(name)`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_setlogin(p: &Proc, name: u64) -> KResult<[u64; 2]> {
+    let mut b = [0u8; 33];
+    let n = copyinstr(&p.vm(), name, &mut b).map_err(|e| if e == Errno::ENAMETOOLONG { Errno::EINVAL } else { e })?;
+    *LOGIN.lock() = (b, n);
+    Ok([0, 0])
+}
+
+/// `getlogin(name, len)`: the name with its NUL.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_getlogin(p: &Proc, buf: u64, len: u64) -> KResult<[u64; 2]> {
+    let (b, n) = *LOGIN.lock();
+    let want = n + 1;
+    if len < u64::try_from(want).unwrap_or(u64::MAX) {
+        return Err(Errno::ERANGE);
+    }
+    p.vm().copyout(buf, b.get(..want).unwrap_or(&[0])).map_err(vm_errno)?;
+    Ok([0, 0])
 }

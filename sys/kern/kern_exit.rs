@@ -40,13 +40,17 @@ pub fn exit1(p: &Proc, status: ExitStatus) {
     if p.pid == PID_INIT {
         let (signo, rval) = match status {
             ExitStatus::Exited(rv) => (0, rv),
-            ExitStatus::Signaled(sig) => (p.abi().signal_number(sig), 0),
+            ExitStatus::Signaled(sig) => (p.abi().signals().map_or(0, |s| s.signal_number(sig)), 0),
         };
         crate::printf!("init died (signal {}, exit {})\n", signo, rval);
         panic!("Going nowhere without my init!");
     }
     p.fd.close_all();
     *p.cwd.lock() = None;
+    // A session leader's end leaves its terminal free (`killjobc`).
+    if p.sid() == p.pid {
+        crate::tty::tty_release(p.sid());
+    }
     // The memory goes now, not when the zombie is reaped: an empty space
     // takes its place (`vmspace_exit`).
     user::set_vmspace(None);
@@ -54,4 +58,7 @@ pub fn exit1(p: &Proc, status: ExitStatus) {
         drop(p.set_vm(empty));
     }
     proc_zombie(p, status);
+    if let Some(parent) = crate::kern_proc::pfind(p.ppid()) {
+        crate::kern_sig::psignal(&parent, Signal::SIGCHLD);
+    }
 }

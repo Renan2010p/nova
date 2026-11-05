@@ -40,15 +40,27 @@ then the userland.
    `sys/arch/amd64/machdep.rs`, ... Anyone who knows FreeBSD finds their
    way around Nova.
 
-## Status: milestone 3
+## Status: milestones 0–5e — FreeBSD userland
 
 The kernel is loaded by **FreeBSD's `loader(8)`** and takes the machine
 over: its own GDT/IDT, page tables and direct map, a page allocator and
-heap, the local APIC clock, and preemptive kernel threads with a
-pluggable scheduler (4BSD), sleep mutexes and wait queues. Fatal traps and
-panics are reported exactly like FreeBSD reports them, with a symbolized
-backtrace. There is no userland yet, so the kernel halts where FreeBSD
-would start `init(8)`.
+heap, the local APIC clock, SMP start-up, and preemptive kernel threads
+with a pluggable scheduler (4BSD), sleep mutexes and wait queues. Fatal
+traps and panics are reported exactly like FreeBSD reports them, with a
+symbolized backtrace.
+
+On top of that it runs FreeBSD ELF binaries: user address spaces and user
+mode, an ELF image activator, the FreeBSD personality (syscalls, errno,
+signals, the initial stack), demand paging and `mmap`, the console line
+discipline, a VFS with read-only UFS2 and devfs, processes
+(`fork`/`execve`/`wait`), signals and pipes. The code boots to
+`/rescue/sh` from a UFS root under bhyve/QEMU (to be validated on each
+host); the remaining milestones are the full `mmap` and dynamic binaries
+(6), drivers (7), modules (7b) and the network (8).
+
+The kernel core knows no ABI, no executable format and no file system:
+those are services registered by `sys/conf`. See
+[docs/DIAGRAM.md](docs/DIAGRAM.md) for the boundaries.
 
 The console reads like FreeBSD's: the same boot messages (`CPU:`,
 `Features=`, `real memory`, `avail memory`, `Event timer`...), the same
@@ -75,6 +87,8 @@ See [docs/BOOT.md](docs/BOOT.md) for the boot protocol and testing.
 
 | Document | Contents |
 |---|---|
+| [docs/DIAGRAM.md](docs/DIAGRAM.md) | diagrams: boot chain, layers, syscalls, traps, threads, memory |
+| [docs/DRIVERS.md](docs/DRIVERS.md) | proposal: native, FreeBSD and Linux drivers, KPI shims, userspace host |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | overview, the `sys/` tree, framekernel, MD/MI, SMP |
 | [docs/LAYERING.md](docs/LAYERING.md) | the layering rules and how they are enforced |
 | [docs/BOOT.md](docs/BOOT.md) | the contract with `loader(8)` and how to test under bhyve |

@@ -12,9 +12,10 @@
  */
 
 //! ELF definitions (FreeBSD's `sys/elf64.h`, `sys/elf_common.h`): the
-//! generic parts of an executable's headers, which `kern` reads without
-//! knowing any ABI, and the kernel symbol table the loader preloads (what
-//! FreeBSD's `db_fetch_ksymtab` reads).
+//! generic parts of an executable's headers, which an image activator
+//! reads, and the kernel symbol table the loader preloads (what
+//! FreeBSD's `db_fetch_ksymtab` reads). The kernel core does not parse
+//! ELF; `sys/exec/elf` does, as a service registered by `sys/conf`.
 //!
 //! The loader copies the kernel's `.symtab` and `.strtab` after the image
 //! and reports the area as `[MODINFOMD_SSYM, MODINFOMD_ESYM)`, laid out as
@@ -50,6 +51,13 @@ pub const PF_R: u32 = 4;
 pub const ELF64_EHDR_SIZE: usize = 64;
 /// Size of an `Elf64_Phdr`.
 pub const ELF64_PHDR_SIZE: usize = 56;
+
+/// `AT_PHDR`: user address of the program headers.
+pub const AT_PHDR: u64 = 3;
+/// `AT_PHENT`: size of a program header.
+pub const AT_PHENT: u64 = 4;
+/// `AT_PHNUM`: number of program headers.
+pub const AT_PHNUM: u64 = 5;
 
 /// The generic fields of an `Elf64_Ehdr`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

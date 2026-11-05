@@ -25,9 +25,11 @@ members = [
     # services: machine-independent kernel, 100% safe Rust
     "vm",
     "dev/vt",
+    "exec/elf",
     "kern",
     "compat/freebsd",
-    "compat/freebsd/fs/ufs",
+    "fs/freebsd/ufs",
+    "vendor/freebsd/kpi",
     # conf: the kernel binary
     "conf",
 ]
@@ -53,9 +55,11 @@ riscv64 = { path = "arch/riscv64" }
 framework = { path = "framework" }
 vm = { path = "vm" }
 vt = { path = "dev/vt" }
+exec_elf = { path = "exec/elf" }
 kern = { path = "kern" }
 compat_freebsd = { path = "compat/freebsd" }
-compat_freebsd_ufs = { path = "compat/freebsd/fs/ufs" }
+ufs = { path = "fs/freebsd/ufs" }
+freebsd_kpi = { path = "vendor/freebsd/kpi" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

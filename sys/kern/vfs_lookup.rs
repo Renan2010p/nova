@@ -66,8 +66,20 @@ pub fn namei(root: Vnode, dir: Vnode, path: &[u8], follow: bool) -> KResult<Vnod
         }
         let next = if name == b"." || (name == b".." && cur.same(&root)) {
             cur
+        } else if name == b".." {
+            // Out of a mount's root, through the directory it covers.
+            let mut base = cur;
+            while let Some(c) = crate::vfs_mount::covered(&base) {
+                base = c;
+            }
+            if base.same(&root) { root } else { Vnode { mp: base.mp, ino: base.mp.ops.lookup(base.ino, name)? } }
         } else {
-            Vnode { mp: cur.mp, ino: cur.mp.ops.lookup(cur.ino, name)? }
+            let mut v = Vnode { mp: cur.mp, ino: cur.mp.ops.lookup(cur.ino, name)? };
+            // Into what is mounted on it (`v_mountedhere`).
+            while let Some(r) = crate::vfs_mount::mounted_here(&v) {
+                v = r;
+            }
+            v
         };
         let attr = next.getattr()?;
         // A trailing slash asks for a directory, so it follows a link too.

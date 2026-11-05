@@ -11,38 +11,61 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Executing an image (FreeBSD's `kern/kern_exec.c` and the ELF image
-//! activator, `kern/imgact_elf.c`).
+//! Executing an image (FreeBSD's `kern/kern_exec.c`).
 //!
-//! The kernel loads the `PT_LOAD` segments and maps the stack; the ABI that
-//! accepts the image (see [`crate::kern_abi`]) lays out its arguments and
-//! registers. An image no registered ABI accepts is `ENOEXEC`.
+//! The core knows no executable format. It reads the first page of the
+//! file and asks each registered [`ImageActivator`] whether it accepts
+//! it. An activator (ELF is `sys/exec/elf`) loads the image into a fresh
+//! address space, selects the ABI that runs it (`kern_abi::abi_select`),
+//! and returns the registers to start with. An image no activator or ABI
+//! accepts is `ENOEXEC`.
 //!
 //! The image comes from a file system ([`kern_execve_path`]) or from
 //! memory (init, when the loader preloaded it); either way it is read
 //! piece by piece ([`ImageFile`]), never copied whole.
 //!
-//! TODO(exec): interpreters (`PT_INTERP`), `ET_DYN`, `#!` scripts, set-id
-//! programs, stack growth, ASLR.
-
+//! A new format is a new crate implementing [`ImageActivator`], registered
+//! by `sys/conf`; the core does not change. TODO(exec): interpreters
+//! (`PT_INTERP`, `#!`), set-id programs, stack growth, ASLR.
 
 use libkern::conv::{u64_from_usize, usize_from_u64};
-use framework::PAGE_SIZE;
 use framework::mm::{KArc, KVec, M_WAITOK};
-use framework::user::{self, Prot, UserRegs, VM_MAXUSER_ADDRESS, VmSpace};
-use sys::elf::{ET_EXEC, PF_W, PF_X, PT_LOAD, phdrs};
+use framework::sync::MtxSpin;
+use framework::user::{self, UserRegs, VmSpace};
 use sys::errno::{Errno, KResult};
 
-use crate::kern_abi::{self, ExecImage, ImageParams, SysEntVec};
+use crate::kern_abi::SysEntVec;
 use crate::kern_malloc::M_TEMP;
 use crate::kern_proc::Proc;
 use crate::vfs_syscalls::{AtFd, namei_at};
 use crate::vnode::{VType, Vnode};
 
-/// How much of the file the image activator looks at first: the ELF
-/// header, the program headers and the notes must be in it (FreeBSD reads
-/// one page, `imgp->image_header`).
+/// How much of the file the activators look at first: the header, the
+/// program headers and the notes must be in it (FreeBSD reads one page,
+/// `imgp->image_header`).
 const IMAGE_HEADER: usize = 4096;
+
+/// Most image activators a kernel is built with.
+pub const MAX_ACTIVATORS: usize = 8;
+
+/// The formats this kernel is built with, in registration order.
+static ACTIVATORS: MtxSpin<[Option<&'static dyn ImageActivator>; MAX_ACTIVATORS]> =
+    MtxSpin::new([None; MAX_ACTIVATORS]);
+
+/// Registers an image format (`execsw`). Called by the kernel binary
+/// before `mi_startup`.
+///
+/// # Panics
+///
+/// If [`MAX_ACTIVATORS`] formats are registered already: the kernel
+/// binary is misconfigured.
+pub fn register(act: &'static dyn ImageActivator) {
+    let mut table = ACTIVATORS.lock();
+    let Some(slot) = table.iter_mut().find(|s| s.is_none()) else {
+        panic!("kern_exec: more than {MAX_ACTIVATORS} image activators");
+    };
+    *slot = Some(act);
+}
 
 /// An executable file, read at offsets.
 pub trait ImageFile {
@@ -88,6 +111,35 @@ impl ImageFile for Vnode {
     }
 }
 
+/// What an activator gets besides the file: the name and strings of the
+/// program (`execve`'s arguments).
+#[derive(Clone, Copy, Debug)]
+pub struct ExecArgs<'a> {
+    /// The path executed (`AT_EXECPATH`).
+    pub path: &'a str,
+    /// Arguments, `argv[0]` first.
+    pub argv: &'a [&'a str],
+    /// Environment strings, `name=value`.
+    pub envv: &'a [&'a str],
+}
+
+/// An executable format (FreeBSD's `execsw`). Implemented by services
+/// such as `sys/exec/elf`; registered by `sys/conf`.
+pub trait ImageActivator: Sync {
+    /// Its name, for diagnostics (`"ELF64"`).
+    fn name(&self) -> &'static str;
+
+    /// Whether this format accepts the file whose first bytes are `head`.
+    /// Must be cheap and must not allocate: it runs for every registered
+    /// activator.
+    fn probe(&self, head: &[u8]) -> bool;
+
+    /// Loads the image into a fresh address space, selects the ABI and
+    /// fills the registers the program starts with. `head` is the same
+    /// prefix `probe` saw.
+    fn exec(&self, head: &[u8], file: &dyn ImageFile, args: &ExecArgs<'_>) -> KResult<Image>;
+}
+
 /// Size of the stack mapped for a new image (FreeBSD reserves `maxssiz`
 /// and grows into it; Nova maps this much up front).
 pub const SGROWSIZ_INITIAL: u64 = 1 << 20;
@@ -105,91 +157,28 @@ pub struct Image {
 
 pub use vm::vm_mmap::vm_errno;
 
-/// Builds a new image from the ELF file `file` (`kern_execve`).
+/// Builds a new image from `file` (`kern_execve`): the first page is read
+/// once, then the registered image activators are asked in order.
 pub fn kern_execve(file: &dyn ImageFile, path: &str, argv: &[&str], envv: &[&str]) -> KResult<Image> {
     let size = file.size()?;
     let head_len = usize_from_u64(size.min(u64_from_usize(IMAGE_HEADER)));
-    let mut header: KVec<u8> = KVec::with_capacity(head_len, &M_TEMP, M_WAITOK)?;
+    let mut head: KVec<u8> = KVec::with_capacity(head_len, &M_TEMP, M_WAITOK)?;
     for _ in 0..head_len {
-        header.push(0, M_WAITOK)?;
+        head.push(0, M_WAITOK)?;
     }
-    file.read_at(0, &mut header)?;
-    let image = ExecImage::new(&header);
-    let ehdr = image.ehdr.ok_or(Errno::ENOEXEC)?;
-    if ehdr.kind != ET_EXEC {
-        return Err(Errno::ENOEXEC);
-    }
-    let abi = kern_abi::abi_select(&image).ok_or(Errno::ENOEXEC)?;
-    let vm = VmSpace::new()?;
+    file.read_at(0, &mut head)?;
 
-    // Pages of all segments, with their protections merged: two segments
-    // may share a page.
-    let page = u64_from_usize(PAGE_SIZE);
-    let mut pages: KVec<(u64, Prot)> = KVec::new(&M_TEMP);
-    let mut phdr = 0;
-    for ph in phdrs(&header, &ehdr).filter(|ph| ph.kind == PT_LOAD) {
-        let end = ph.vaddr.checked_add(ph.memsz).filter(|&e| e <= VM_MAXUSER_ADDRESS);
-        let file_end = ph.offset.checked_add(ph.filesz).filter(|&e| e <= size);
-        let (Some(end), Some(_)) = (end, file_end) else {
-            return Err(Errno::ENOEXEC);
-        };
-        if ph.filesz > ph.memsz {
-            return Err(Errno::ENOEXEC);
-        }
-        for va in (ph.vaddr & !(page - 1)..end).step_by(PAGE_SIZE) {
-            let i = match pages.binary_search_by_key(&va, |&(v, _)| v) {
-                Ok(i) => i,
-                Err(i) => {
-                    pages.insert(i, (va, Prot { read: true, write: false, exec: false }), M_WAITOK)?;
-                    i
-                }
-            };
-            if let Some((_, p)) = pages.get_mut(i) {
-                p.write |= ph.flags & PF_W != 0;
-                p.exec |= ph.flags & PF_X != 0;
-            }
-        }
-        if (ph.offset..ph.offset + ph.filesz).contains(&ehdr.phoff) {
-            phdr = ph.vaddr + (ehdr.phoff - ph.offset);
-        }
-    }
-    if pages.is_empty() {
-        return Err(Errno::ENOEXEC);
-    }
-    for &(va, prot) in pages.iter() {
-        vm.map_zeroed(va, page, prot).map_err(vm_errno)?;
-    }
-    // The segments' contents, a page at a time.
-    let mut chunk: KVec<u8> = KVec::with_capacity(PAGE_SIZE, &M_TEMP, M_WAITOK)?;
-    for _ in 0..PAGE_SIZE {
-        chunk.push(0, M_WAITOK)?;
-    }
-    for ph in phdrs(&header, &ehdr).filter(|ph| ph.kind == PT_LOAD) {
-        let mut done = 0;
-        while done < ph.filesz {
-            let n = usize_from_u64((ph.filesz - done).min(page));
-            let buf = chunk.get_mut(..n).ok_or(Errno::ENOEXEC)?;
-            file.read_at(ph.offset + done, buf)?;
-            vm.copyout_init(ph.vaddr + done, buf).map_err(vm_errno)?;
-            done += u64_from_usize(n);
-        }
-    }
-
-    let top = abi.usrstack();
-    vm.map_zeroed(top - SGROWSIZ_INITIAL, SGROWSIZ_INITIAL, Prot { read: true, write: true, exec: false })
-        .map_err(vm_errno)?;
-    let params = ImageParams {
-        entry: ehdr.entry,
-        phdr,
-        phent: ehdr.phentsize,
-        phnum: ehdr.phnum,
-        execpath: path,
-        argv,
-        envv,
+    let args = ExecArgs { path, argv, envv };
+    // The lock is released before `exec`: the activator may allocate and
+    // sleep, and must not run under a spin lock.
+    let act = {
+        let table = ACTIVATORS.lock();
+        table.iter().flatten().copied().find(|a| a.probe(&head))
     };
-    let mut regs = UserRegs::default();
-    abi.exec_setregs(&vm, &params, &mut regs)?;
-    Ok(Image { vm, regs, abi })
+    match act {
+        Some(act) => act.exec(&head, file, &args),
+        None => Err(Errno::ENOEXEC),
+    }
 }
 
 /// Executes the file at `path` in `p` (`kern_execve` from `execve(2)`):

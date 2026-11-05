@@ -226,4 +226,15 @@ unsafe impl mdi::UserMode for Machine {
     unsafe fn cpu_user_enter(_regs: &mut Self::UserRegs) -> mdi::UserExit {
         todo("cpu_user_enter")
     }
+
+    /// `f0`..`f31` and `fcsr`.
+    const FPU_STATE_SIZE: usize = 33 * 8;
+
+    fn fpu_save(_buf: &mut [u8]) {
+        todo("fpu_save")
+    }
+
+    fn fpu_load(_state: Option<&[u8]>) {
+        todo("fpu_load")
+    }
 }

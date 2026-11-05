@@ -15,15 +15,17 @@
 //! of open files, and what can be asked of a file.
 //!
 //! A file is the console terminal (which `init` gets as its descriptors
-//! 0, 1 and 2, as FreeBSD opens `/dev/console` for it) or a vnode.
+//! 0, 1 and 2, as FreeBSD opens `/dev/console` for it), a vnode, an end of
+//! a pipe, or `/dev/null` or `/dev/zero`.
 //!
-//! TODO(fd): pipes, sockets, `fcntl` locks.
+//! TODO(fd): sockets, `fcntl` locks.
 
 use framework::mm::{KArc, KVec, M_WAITOK, MallocType};
 use framework::sync::Mutex;
 use sys::errno::{Errno, KResult};
 
 use crate::kern_clock::Timespec;
+use crate::sys_pipe::{Pipe, PipeEnd};
 use crate::vnode::{VTime, VType, Vnode};
 
 /// Open files and descriptor tables (`M_FILEDESC`, `M_FILE`).
@@ -33,12 +35,28 @@ static M_FILEDESC: MallocType = MallocType::new("filedesc");
 pub const MAXFILES: usize = 1024;
 
 /// What an open file is (FreeBSD's `DTYPE_*` and `fileops`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum FileKind {
     /// The console terminal.
     Console,
     /// A file of a file system (`DTYPE_VNODE`).
     Vnode(Vnode),
+    /// An end of a pipe (`DTYPE_PIPE`).
+    Pipe(KArc<Pipe>, PipeEnd),
+    /// `/dev/null`: reads nothing, writes everything.
+    Null,
+    /// `/dev/zero`: reads zeros, writes everything.
+    Zero,
+}
+
+impl FileKind {
+    /// The vnode, if it is one.
+    pub fn vnode(&self) -> Option<Vnode> {
+        match self {
+            FileKind::Vnode(vp) => Some(*vp),
+            _ => None,
+        }
+    }
 }
 
 /// How a file was opened (`f_flag`).
@@ -67,6 +85,15 @@ pub struct File {
 impl core::fmt::Debug for File {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("File").field("kind", &self.kind).finish_non_exhaustive()
+    }
+}
+
+impl Drop for File {
+    /// The last descriptor of it is gone (`closef`).
+    fn drop(&mut self) {
+        if let FileKind::Pipe(pipe, end) = &self.kind {
+            pipe.close(*end);
+        }
     }
 }
 
@@ -308,7 +335,34 @@ pub fn vn_stat(vp: &Vnode) -> KResult<Stat> {
 /// Status of an open file (`kern_fstat`).
 pub fn file_stat(f: &File) -> KResult<Stat> {
     let zero = Timespec { sec: 0, nsec: 0 };
-    match f.kind {
+    let dev = |ino, perm| Stat {
+        dev: 0,
+        ino,
+        nlink: 1,
+        kind: FileType::CharDevice,
+        perm,
+        uid: 0,
+        gid: 0,
+        rdev: ino,
+        atime: zero,
+        mtime: zero,
+        ctime: zero,
+        birthtime: zero,
+        size: 0,
+        blocks: 0,
+        blksize: 4096,
+        flags: 0,
+        generation: 0,
+    };
+    match &f.kind {
+        FileKind::Null => Ok(dev(4, 0o666)),
+        FileKind::Zero => Ok(dev(6, 0o666)),
+        FileKind::Pipe(pipe, _) => Ok(Stat {
+            kind: FileType::Fifo,
+            size: i64::try_from(pipe.len()).unwrap_or(0),
+            blksize: 4096,
+            ..dev(pipe.ino, 0o600)
+        }),
         // FreeBSD's /dev/console: crw------- root wheel.
         FileKind::Console => Ok(Stat {
             dev: 0,
@@ -329,6 +383,6 @@ pub fn file_stat(f: &File) -> KResult<Stat> {
             flags: 0,
             generation: 0,
         }),
-        FileKind::Vnode(vp) => vn_stat(&vp),
+        FileKind::Vnode(vp) => vn_stat(vp),
     }
 }

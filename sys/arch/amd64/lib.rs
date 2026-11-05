@@ -331,4 +331,14 @@ unsafe impl mdi::UserMode for Machine {
         // SAFETY: forwarded to the caller (same contract).
         unsafe { usermode::cpu_user_enter(regs) }
     }
+
+    const FPU_STATE_SIZE: usize = 512;
+
+    fn fpu_save(buf: &mut [u8]) {
+        fpu::fpu_save(buf);
+    }
+
+    fn fpu_load(state: Option<&[u8]>) {
+        fpu::fpu_load(state);
+    }
 }

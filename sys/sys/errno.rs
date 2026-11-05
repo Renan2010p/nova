@@ -77,6 +77,14 @@ pub enum Errno {
     ELOOP,
     /// File name too long.
     ENAMETOOLONG,
+    /// Broken pipe.
+    EPIPE,
+    /// Device not configured.
+    ENXIO,
+    /// Not an error a program sees: the system call is restarted, as a
+    /// signal whose handler has `SA_RESTART` interrupted it (FreeBSD's
+    /// kernel-only `ERESTART`).
+    ERESTART,
 }
 
 /// The result of a kernel operation.

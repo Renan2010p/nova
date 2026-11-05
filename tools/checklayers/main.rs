@@ -42,12 +42,28 @@
 //!   its own (with its dependencies declared, so R1 sees them), and its
 //!   root documents what it offers (`//!`);
 //! * R15 no ABI vocabulary (`freebsd`, `linux`, ...) in identifiers
-//!   outside the personalities (`compat/*`) and `conf`: the kernel knows
-//!   no ABI, so running another one only takes a new `sys/compat/<abi>`;
+//!   outside the personalities (`compat/*`), imported code (`vendor/*`),
+//!   an origin driver directory (`dev/<origin>/*`), an origin file system
+//!   directory (`fs/<origin>/*`) and `conf`: the kernel knows no ABI, so
+//!   running another one only takes a new `sys/compat/<abi>`;
 //! * R19 no file system vocabulary (`ufs`, `zfs`, `ext4`, `msdosfs`, ...)
-//!   in identifiers outside the personalities and `conf`: the kernel's VFS
-//!   knows no file system; each is a crate under `sys/compat/<abi>/fs/`,
-//!   registered by `conf` behind `kern::vnode::VfsOps`.
+//!   in identifiers outside the file systems (`fs/*`), the personalities
+//!   (`compat/*`) and `conf`: the kernel's VFS knows no file system; each
+//!   is a crate under `sys/fs/<name>` or `sys/fs/<origin>/<name>`
+//!   (or `sys/compat/<abi>/fs/` for one tied to an ABI), registered by
+//!   `conf` behind `kern::vnode::VfsOps`;
+//! * R20 no executable format in the kernel core: `kern` does not name
+//!   `Ehdr`, `Phdr` or `PT_LOAD`; a format is a service under `exec/*`
+//!   implementing `kern::kern_exec::ImageActivator`;
+//! * R21 imported code (`vendor/*`) and origin directories
+//!   (`dev/<origin>/*`, `fs/<origin>/*`) may use the origin's
+//!   vocabulary;
+//! * R22 ABI personalities (`compat/*`) do not depend on drivers
+//!   (`dev/*`), KPIs (`vendor/*`) or file systems (`fs/*`): a driver or a
+//!   format is not an ABI;
+//! * R23 drivers (`dev/*`) depend only on the base, `framework` and a
+//!   vendor KPI; they never reach into `kern`, `vm`, `compat` or another
+//!   service.
 //!
 //! It is deliberately dependency-free and parses only the subset of TOML
 //! that sys/ uses. Source checks run on code with comments and string
@@ -139,6 +155,19 @@ fn may_depend(from: &Crate, to: &Crate) -> Result<(), &'static str> {
     use Layer::*;
     if to.path.starts_with("compat/") && from.layer != Conf {
         return Err("R9: personalities are leaves; only conf links them in");
+    }
+    if from.path.starts_with("compat/")
+        && (to.path.starts_with("dev/")
+            || to.path.starts_with("vendor/")
+            || to.path.starts_with("fs/"))
+    {
+        return Err("R22: a personality does not depend on drivers, KPIs or file systems");
+    }
+    if from.path.starts_with("dev/") {
+        let allowed = matches!(to.layer, Base | Framework) || to.path.starts_with("vendor/");
+        if !allowed {
+            return Err("R23: drivers depend only on the base, framework and a vendor KPI");
+        }
     }
     let ok = match (from.layer, to.layer) {
         (Base, Base) => true,
@@ -347,7 +376,7 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
                     }
                 }
             }
-            if !c.path.starts_with("compat/") && c.layer != Layer::Conf {
+            if !in_origin_dir(&c.path) && c.layer != Layer::Conf {
                 for ident in identifiers(line) {
                     if let Some(word) = abi_word(ident) {
                         report.err(
@@ -362,16 +391,38 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
                     }
                 }
             }
-            if !c.path.starts_with("compat/") && c.layer != Layer::Conf {
+            if !c.path.starts_with("compat/")
+                && !c.path.starts_with("fs/")
+                && c.layer != Layer::Conf
+            {
                 for ident in identifiers(line) {
                     if let Some(word) = fs_word(ident) {
                         report.err(
                             file,
                             n,
                             format!(
-                                "R19: `{ident}` names the `{word}` file system outside sys/compat; \
+                                "R19: `{ident}` names the `{word}` file system outside sys/fs; \
                                  the kernel knows no file system: put it in \
-                                 sys/compat/<abi>/fs/, behind `kern::vnode::VfsOps`"
+                                 sys/fs/<name> or sys/fs/<origin>/<name>, behind \
+                                 `kern::vnode::VfsOps`, and register it from sys/conf"
+                            ),
+                        );
+                    }
+                }
+            }
+            if c.name == "kern" {
+                for ident in identifiers(line) {
+                    if matches!(
+                        ident,
+                        "Ehdr" | "Phdr" | "phdrs" | "PT_LOAD" | "ET_EXEC" | "ET_DYN"
+                    ) {
+                        report.err(
+                            file,
+                            n,
+                            format!(
+                                "R20: `{ident}` is an executable format in the kernel core; \
+                                 an image format is a service under sys/exec/ implementing \
+                                 `kern::kern_exec::ImageActivator`"
                             ),
                         );
                     }
@@ -416,9 +467,25 @@ const MD_WORDS: &[&str] = &[
     "apic", "lapic", "ioapic", "xapic", "x2apic", "sipi", "madt", "smap", "e820", "ns8250",
 ];
 
-/// Words that name a userland ABI (R15). Only personalities and `conf`
-/// may contain them in identifiers; comments and strings are not checked,
-/// so the kernel may say where its designs come from.
+/// True for crates allowed to use an origin's vocabulary (R15): the
+/// userland personalities, imported code, and a driver directory named
+/// after its origin (`dev/<origin>/...`).
+fn in_origin_dir(path: &str) -> bool {
+    if path.starts_with("compat/") || path.starts_with("vendor/") {
+        return true;
+    }
+    // `dev/freebsd/...`, `fs/freebsd/...`, ...
+    ["dev/", "fs/"].iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|origin| ABI_WORDS.contains(&origin))
+    })
+}
+
+/// Words that name a userland ABI (R15). Only personalities, imported
+/// code, origin driver directories and `conf` may contain them in
+/// identifiers; comments and strings are not checked, so the kernel may
+/// say where its designs come from.
 const ABI_WORDS: &[&str] = &[
     "freebsd", "linux", "netbsd", "openbsd", "dragonfly", "illumos", "solaris", "sunos",
     "darwin", "macos", "xnu", "svr4", "ibcs2", "cloudabi", "haiku", "redox",

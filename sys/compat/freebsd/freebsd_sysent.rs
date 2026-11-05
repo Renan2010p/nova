@@ -30,7 +30,7 @@ use libkern::conv::{trunc_i32, usize_from_u32};
 use sys::errno::{Errno, KResult};
 use sys::signal::Signal;
 use framework::user::Inherit;
-use kern::kern_sig::{SelfSignal, kern_sigself};
+use kern::kern_sig::psignal;
 use vm::vm_mmap::{MmapAt, kern_minherit, kern_mmap_anon, kern_mprotect, kern_munmap};
 use kern::sys_generic::{TtyOp, TtyReply, kern_tty_ioctl};
 use crate::freebsd_types::{STAT_SIZE, TERMIOS_SIZE, WINSIZE_SIZE, stat_out, termios_in, termios_out, winsize_in, winsize_out};
@@ -50,7 +50,8 @@ use crate::freebsd_syscalls::{
     SYS_openat, SYS_read, SYS_readlink, SYS_readlinkat, SYS_setpgid, SYS_setsid, SYS_sigaction, SYS_sigprocmask,
     SYS_statfs, SYS_sysarch, SYS_thr_kill, SYS_thr_self, SYS_umask, SYS_vfork, SYS_wait4, SYS_wait6, SYS_write,
     SYS_MAXSYSCALL, SYSCALLNAMES, SYS_copy_file_range, SYS_fpathconf, SYS_lpathconf, SYS_pathconf, SYS_readv,
-    SYS_writev, SYS_nanosleep, SYS_clock_nanosleep,
+    SYS_writev, SYS_nanosleep, SYS_clock_nanosleep, SYS_pipe2, SYS_sigreturn, SYS_sigsuspend, SYS_sigpending,
+    SYS_setlogin, SYS_getlogin, SYS_revoke,
 };
 
 /// The outcome of one system call.
@@ -125,6 +126,14 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_pathconf => freebsd_vfs::sys_pathconf(p, Err(args[0]), true, int(1)).into(),
         SYS_lpathconf => freebsd_vfs::sys_pathconf(p, Err(args[0]), false, int(1)).into(),
         SYS_fpathconf => freebsd_vfs::sys_pathconf(p, Ok(int(0)), true, int(1)).into(),
+        SYS_pipe2 => freebsd_proc::sys_pipe2(p, args[0], int(1)).into(),
+        SYS_sigreturn => freebsd_proc::sys_sigreturn(p, regs, args[0]),
+        SYS_sigsuspend => freebsd_proc::sys_sigsuspend(p, args[0]).into(),
+        SYS_sigpending => freebsd_proc::sys_sigpending(p, args[0]).into(),
+        SYS_setlogin => freebsd_proc::sys_setlogin(p, args[0]).into(),
+        SYS_getlogin => freebsd_proc::sys_getlogin(p, args[0], args[1]).into(),
+        // Revoking access to a terminal: nothing to revoke yet.
+        SYS_revoke => Ok([0, 0]).into(),
         SYS_nanosleep => sys_clock_nanosleep(p, 0, 0, args[0], args[1]).into(),
         SYS_clock_nanosleep => sys_clock_nanosleep(p, int(0), int(1), args[2], args[3]).into(),
         SYS_copy_file_range => freebsd_vfs::sys_copy_file_range(p, int(0), int(2)).into(),
@@ -329,7 +338,7 @@ fn sys_clock_nanosleep(p: &Proc, id: i32, flags: i32, rqtp: u64, rmtp: u64) -> K
         ns -= i128::from(now.sec) * 1_000_000_000 + i128::from(now.nsec);
     }
     if ns > 0 {
-        kern::kern_synch::kern_nanosleep(u64::try_from(ns).unwrap_or(u64::MAX));
+        kern::kern_synch::kern_nanosleep_sig(p, u64::try_from(ns).unwrap_or(u64::MAX))?;
     }
     if rmtp != 0 && flags & TIMER_ABSTIME == 0 {
         vm.copyout(rmtp, &[0u8; 16]).map_err(vm_errno)?;
@@ -396,15 +405,8 @@ fn sys_thr_kill(p: &Proc, id: u64, sig: i32) -> SyscallResult {
     let Some(sig) = from_signo(sig) else {
         return SyscallResult::Err(Errno::EINVAL);
     };
-    match kern_sigself(p, sig) {
-        SelfSignal::Kill(sig) => SyscallResult::Signal(sig),
-        other => {
-            if kern::init_main::bootverbose() && other != SelfSignal::Nothing {
-                printf!("pid {} comm {}: signal {:?}: {:?} (not implemented yet)\n", p.pid, p.comm(), sig, other);
-            }
-            SyscallResult::Ok([0, 0])
-        }
-    }
+    psignal(p, sig);
+    SyscallResult::Ok([0, 0])
 }
 
 /// `ioctl(fd, cmd, data)`: the terminal requests (`sys/ttycom.h`, numbers
@@ -420,6 +422,10 @@ fn sys_ioctl(p: &Proc, fd: i32, cmd: u64, data: u64) -> KResult<[u64; 2]> {
     const TIOCGPGRP: u32 = 0x4004_7477;
     const TIOCSPGRP: u32 = 0x8004_7476;
     const FIONBIO: u32 = 0x8004_667e;
+    const FIONREAD: u32 = 0x4004_667f;
+    const TIOCSCTTY: u32 = 0x2000_7461;
+    const TIOCNOTTY: u32 = 0x2000_7471;
+    const TIOCGSID: u32 = 0x4004_7463;
     const FIOCLEX: u32 = 0x2000_6601;
     const FIONCLEX: u32 = 0x2000_6602;
     // `u_long` on the wire, but the numbers are 32 bits.
@@ -442,11 +448,27 @@ fn sys_ioctl(p: &Proc, fd: i32, cmd: u64, data: u64) -> KResult<[u64; 2]> {
             p.vm().copyin(data, &mut b).map_err(vm_errno)?;
             kern_tty_ioctl(p, fd, TtyOp::SetWinsize(winsize_in(&b)))?;
         }
-        // No sessions yet, so no controlling terminal: as FreeBSD answers a
-        // process that has none (job control is then turned off).
-        TIOCGPGRP | TIOCSPGRP => {
-            sys_generic::kern_fd_valid(p, fd)?;
-            return Err(Errno::ENOTTY);
+        TIOCSCTTY => {
+            kern_tty_ioctl(p, fd, TtyOp::SetCtty)?;
+        }
+        TIOCNOTTY => {
+            kern_tty_ioctl(p, fd, TtyOp::NotCtty)?;
+        }
+        c @ (TIOCGPGRP | TIOCGSID) => {
+            let op = if c == TIOCGPGRP { TtyOp::GetPgrp } else { TtyOp::GetSid };
+            let TtyReply::Id(id) = kern_tty_ioctl(p, fd, op)? else { return Err(Errno::ENOTTY) };
+            p.vm().copyout(data, &id.to_le_bytes()).map_err(vm_errno)?;
+        }
+        TIOCSPGRP => {
+            let mut b = [0u8; 4];
+            p.vm().copyin(data, &mut b).map_err(vm_errno)?;
+            let pgid = u32::try_from(i32::from_le_bytes(b)).map_err(|_| Errno::EINVAL)?;
+            kern_tty_ioctl(p, fd, TtyOp::SetPgrp(pgid))?;
+        }
+        FIONREAD => {
+            let n = sys_generic::kern_fionread(p, fd)?;
+            let n = i32::try_from(n).unwrap_or(i32::MAX);
+            p.vm().copyout(data, &n.to_le_bytes()).map_err(vm_errno)?;
         }
         // Close-on-exec and non-blocking I/O: nothing to change yet.
         FIONBIO | FIOCLEX | FIONCLEX => sys_generic::kern_fd_valid(p, fd)?,

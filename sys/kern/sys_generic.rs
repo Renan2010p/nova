@@ -34,14 +34,19 @@ pub fn kern_write(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
     if nbyte > IOSIZE_MAX {
         return Err(Errno::EINVAL);
     }
-    if !file.flags.lock().write {
+    let flags = *file.flags.lock();
+    if !flags.write {
         return Err(Errno::EBADF);
     }
-    if let FileKind::Vnode(vp) = file.kind {
+    match &file.kind {
         // Opening for writing failed already on a read-only mount.
-        return Err(if vp.mp.rdonly { Errno::EROFS } else { Errno::EBADF });
+        FileKind::Vnode(vp) => return Err(if vp.mp.rdonly { Errno::EROFS } else { Errno::EBADF }),
+        FileKind::Null | FileKind::Zero => return Ok(nbyte),
+        _ => {}
     }
-    let mut chunk = [0u8; 256];
+    // A pipe takes up to `PIPE_BUF` bytes at once, so chunks of that size
+    // keep small writes atomic.
+    let mut chunk = [0u8; crate::sys_pipe::PIPE_BUF];
     let mut done = 0;
     while done < nbyte {
         let n = usize_from_u64((nbyte - done).min(u64_from_usize(chunk.len())));
@@ -49,11 +54,27 @@ pub fn kern_write(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
             // As FreeBSD: a partial transfer is a success.
             return if done > 0 { Ok(done) } else { Err(vm_errno(e)) };
         }
-        match file.kind {
-            FileKind::Console => tty::tty_write(&chunk[..n]),
-            FileKind::Vnode(_) => return Err(Errno::EBADF),
-        }
-        done += u64_from_usize(n);
+        let wrote = match &file.kind {
+            FileKind::Console => {
+                tty::tty_write(&chunk[..n]);
+                n
+            }
+            FileKind::Pipe(pipe, _) => {
+                let mut put = 0;
+                while put < n {
+                    match crate::sys_pipe::pipe_write(p, pipe, &chunk[put..n], flags.nonblock) {
+                        Ok(k) => put += k,
+                        Err(e) => {
+                            let total = done + u64_from_usize(put);
+                            return if total > 0 { Ok(total) } else { Err(e) };
+                        }
+                    }
+                }
+                put
+            }
+            _ => return Err(Errno::EBADF),
+        };
+        done += u64_from_usize(wrote);
     }
     Ok(done)
 }
@@ -65,19 +86,30 @@ pub fn kern_read(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
     if nbyte > IOSIZE_MAX {
         return Err(Errno::EINVAL);
     }
-    if !file.flags.lock().read {
+    let flags = *file.flags.lock();
+    if !flags.read {
         return Err(Errno::EBADF);
     }
     let vm = p.vm();
     let mut chunk = [0u8; 1024];
-    let vp = match file.kind {
+    let n = usize_from_u64(nbyte.min(u64_from_usize(chunk.len())));
+    let vp = match &file.kind {
         FileKind::Console => {
-            let n = usize_from_u64(nbyte.min(u64_from_usize(chunk.len())));
-            let got = tty::tty_read(&mut chunk[..n]);
+            let got = tty::tty_read(p, &mut chunk[..n])?;
             vm.copyout(buf, &chunk[..got]).map_err(vm_errno)?;
             return Ok(u64_from_usize(got));
         }
-        FileKind::Vnode(vp) => vp,
+        FileKind::Pipe(pipe, _) => {
+            let got = crate::sys_pipe::pipe_read(p, pipe, &mut chunk[..n], flags.nonblock)?;
+            vm.copyout(buf, &chunk[..got]).map_err(vm_errno)?;
+            return Ok(u64_from_usize(got));
+        }
+        FileKind::Null => return Ok(0),
+        FileKind::Zero => {
+            vm.copyout(buf, &chunk[..n]).map_err(vm_errno)?;
+            return Ok(u64_from_usize(n));
+        }
+        FileKind::Vnode(vp) => *vp,
     };
     if vp.getattr()?.kind == VType::Dir {
         return Err(Errno::EISDIR);
@@ -126,7 +158,12 @@ pub enum Whence {
 /// `ESPIPE` on a terminal.
 pub fn kern_lseek(p: &Proc, fd: i32, offset: i64, whence: Whence) -> KResult<u64> {
     let file = p.fd.get(fd)?;
-    let FileKind::Vnode(vp) = file.kind else { return Err(Errno::ESPIPE) };
+    let vp = match &file.kind {
+        FileKind::Vnode(vp) => *vp,
+        // Devices without a position: the offset stays 0.
+        FileKind::Null | FileKind::Zero => return Ok(0),
+        _ => return Err(Errno::ESPIPE),
+    };
     let mut off = file.offset.lock();
     let base = match whence {
         Whence::Set => 0,
@@ -145,8 +182,19 @@ pub fn kern_lseek(p: &Proc, fd: i32, offset: i64, whence: Whence) -> KResult<u64
 fn tty_of(file: &File) -> KResult<()> {
     match file.kind {
         FileKind::Console => Ok(()),
-        FileKind::Vnode(_) => Err(Errno::ENOTTY),
+        _ => Err(Errno::ENOTTY),
     }
+}
+
+/// Bytes that can be read from `fd` now (`FIONREAD`).
+pub fn kern_fionread(p: &Proc, fd: i32) -> KResult<u64> {
+    let file = p.fd.get(fd)?;
+    Ok(match &file.kind {
+        FileKind::Console => u64_from_usize(tty::tty_nread()),
+        FileKind::Pipe(pipe, _) => u64_from_usize(pipe.len()),
+        FileKind::Vnode(vp) => vp.getattr()?.size.saturating_sub(*file.offset.lock()),
+        FileKind::Null | FileKind::Zero => 0,
+    })
 }
 
 /// What can be asked of a terminal (the terminal `ioctl`s, by name).
@@ -166,6 +214,18 @@ pub enum TtyOp {
     GetWinsize,
     /// A new size (`TIOCSWINSZ`).
     SetWinsize(Winsize),
+    /// Become the caller's controlling terminal (`TIOCSCTTY`).
+    SetCtty,
+    /// Stop being it (`TIOCNOTTY`).
+    NotCtty,
+    /// The foreground process group (`TIOCGPGRP`).
+    GetPgrp,
+    /// A new foreground process group (`TIOCSPGRP`).
+    SetPgrp(u32),
+    /// The session (`TIOCGSID`).
+    GetSid,
+    /// Bytes ready to read (`FIONREAD`).
+    NRead,
 }
 
 /// The answer to a [`TtyOp`].
@@ -177,6 +237,8 @@ pub enum TtyReply {
     Attr(Termios),
     /// The size.
     Winsize(Winsize),
+    /// A process group, a session, or a count.
+    Id(u32),
 }
 
 /// A terminal operation on descriptor `fd` (`kern_ioctl` on a tty);
@@ -195,6 +257,26 @@ pub fn kern_tty_ioctl(p: &Proc, fd: i32, op: TtyOp) -> KResult<TtyReply> {
             tty::tty_setwinsize(&w);
             TtyReply::Done
         }
+        TtyOp::SetCtty => {
+            tty::tty_setctty(p)?;
+            TtyReply::Done
+        }
+        TtyOp::NotCtty => {
+            if !tty::tty_is_ctty(p.sid()) {
+                return Err(Errno::ENOTTY);
+            }
+            if p.sid() == p.pid {
+                tty::tty_release(p.sid());
+            }
+            TtyReply::Done
+        }
+        TtyOp::GetPgrp => TtyReply::Id(tty::tty_getpgrp(p)?),
+        TtyOp::SetPgrp(g) => {
+            tty::tty_setpgrp(p, g)?;
+            TtyReply::Done
+        }
+        TtyOp::GetSid => TtyReply::Id(tty::tty_getsid(p)?),
+        TtyOp::NRead => TtyReply::Id(u32::try_from(tty::tty_nread()).unwrap_or(u32::MAX)),
     })
 }
 

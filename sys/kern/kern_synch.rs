@@ -16,12 +16,19 @@
 //! For now every timed sleeper waits on one queue that `hardclock` wakes
 //! on each tick (the old BSD `lbolt`), and checks its own deadline.
 //!
+//! A sleep a signal may interrupt ([`sleep_sig`], FreeBSD's `PCATCH`)
+//! records its wait channel in the process, so that sending a signal
+//! wakes it.
+//!
 //! TODO(callout): a callout wheel (`kern_timeout.c`), so that sleepers
-//! are woken only when their time is up, and `tsleep`/`wakeup` channels.
+//! are woken only when their time is up.
 
+use framework::mm::KArc;
 use framework::sync::WaitQueue;
+use sys::errno::{Errno, KResult};
 
 use crate::kern_clock;
+use crate::kern_proc::Proc;
 
 /// Woken on every clock tick.
 static TICK_WAIT: WaitQueue = WaitQueue::new();
@@ -39,13 +46,54 @@ pub(crate) fn tick_wakeup() {
     TICK_WAIT.wake_all();
 }
 
-/// Sleeps at least `ns` nanoseconds (`kern_nanosleep`): whole clock ticks,
-/// rounded up, plus one, since the current tick is partly gone.
-///
-/// TODO(signal): interrupted by a signal (`EINTR`, with the time left).
-pub fn kern_nanosleep(ns: u64) {
+
+/// What a process sleeps on (FreeBSD's wait channel, `wchan`): a queue a
+/// signal sent to the process wakes, so that its sleep ends.
+#[derive(Clone)]
+pub enum WChan {
+    /// A queue that lives forever.
+    Static(&'static WaitQueue),
+    /// A queue shared with an object (a pipe).
+    Shared(KArc<WaitQueue>),
+}
+
+impl WChan {
+    fn queue(&self) -> &WaitQueue {
+        match self {
+            WChan::Static(q) => q,
+            WChan::Shared(q) => q,
+        }
+    }
+
+    /// Wakes everyone sleeping on it; each checks what it waits for again.
+    pub fn wake(&self) {
+        self.queue().wake_all();
+    }
+}
+
+/// Sleeps on `chan` until `cond` holds, or a signal comes (`tsleep` with
+/// `PCATCH`): then `EINTR`, or `ERESTART` if the call should be
+/// restarted (see [`crate::kern_sig::sig_interrupt`]). `cond` must be
+/// quick and must not sleep (it runs with interrupts off).
+pub fn sleep_sig(p: &Proc, chan: WChan, mut cond: impl FnMut() -> bool) -> KResult<()> {
+    *p.wchan.lock() = Some(chan.clone());
+    chan.queue().wait_until(|| cond() || p.sig_pending());
+    *p.wchan.lock() = None;
+    if cond() {
+        return Ok(());
+    }
+    Err(crate::kern_sig::sig_interrupt(p))
+}
+
+/// Sleeps at least `ns` nanoseconds, or until a signal comes (`EINTR`:
+/// `nanosleep` is never restarted).
+pub fn kern_nanosleep_sig(p: &Proc, ns: u64) -> KResult<()> {
     let hz = u64::from(kern_clock::hz());
     let ticks = u128::from(ns) * u128::from(hz);
-    let ticks = u32::try_from(ticks.div_ceil(1_000_000_000) + 1).unwrap_or(u32::MAX);
-    pause("nanslp", ticks);
+    let ticks = u64::try_from(ticks.div_ceil(1_000_000_000) + 1).unwrap_or(u64::MAX);
+    let deadline = kern_clock::ticks().saturating_add(ticks);
+    match sleep_sig(p, WChan::Static(&TICK_WAIT), || kern_clock::ticks() >= deadline) {
+        Err(Errno::ERESTART) => Err(Errno::EINTR),
+        r => r,
+    }
 }

@@ -18,7 +18,8 @@
 # SELFTEST=pf|stack, INIT=program (preloaded as /sbin/init, or as
 # INIT_NAME), ROOTFS=1 (a UFS root file system with the host's /rescue,
 # loaded as the memory disk md0, with INIT_PATH, default /rescue/sh, as
-# init; INIT is then not used), TIMEOUT=secs
+# init; INIT is then not used), SINGLE=1 (boot -s: with
+# INIT_PATH=/rescue/init, FreeBSD's single-user shell), TIMEOUT=secs
 # (stop QEMU after that long; default none), CPU (QEMU CPU model, default
 # max), UEFI=1 (boot with QEMU's edk2 firmware and the host's loader.efi
 # from an EFI system partition; the console is then the screen, mirrored
@@ -43,6 +44,7 @@ VERBOSE=${VERBOSE:-}
 SELFTEST=${SELFTEST:-}
 INIT=${INIT:-}
 ROOTFS=${ROOTFS:-}
+SINGLE=${SINGLE:-}
 INIT_PATH=${INIT_PATH:-}
 TIMEOUT=${TIMEOUT:-}
 CPU=${CPU:-max}
@@ -88,6 +90,9 @@ boot_mute="NO"
 CONF
 if [ -n "$VERBOSE" ]; then
 	echo 'boot_verbose="YES"' >> "$ROOT/boot/loader.conf"
+fi
+if [ -n "$SINGLE" ]; then
+	echo 'boot_single="YES"' >> "$ROOT/boot/loader.conf"
 fi
 if [ -n "$SELFTEST" ]; then
 	echo "debug.nova.selftest=\"$SELFTEST\"" >> "$ROOT/boot/loader.conf"

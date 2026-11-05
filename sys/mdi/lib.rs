@@ -467,6 +467,20 @@ pub unsafe trait UserMode {
     /// guard may be held (interrupts taken in user mode are handled, and may
     /// switch threads, before this returns).
     unsafe fn cpu_user_enter(regs: &mut Self::UserRegs) -> UserExit;
+
+    /// Bytes of the user floating-point state [`UserMode::fpu_save`]
+    /// writes (the machine's format, e.g. amd64's `fxsave` area).
+    const FPU_STATE_SIZE: usize;
+
+    /// Copies the current thread's user floating-point state into `buf`
+    /// (at least [`UserMode::FPU_STATE_SIZE`] bytes), for a signal frame.
+    fn fpu_save(buf: &mut [u8]);
+
+    /// Makes `state` (as [`UserMode::fpu_save`] wrote it, possibly changed
+    /// by the program) the current thread's user floating-point state,
+    /// with the bits a program may not set cleared; `None`: the initial
+    /// state, as a new thread has.
+    fn fpu_load(state: Option<&[u8]>);
 }
 
 /// Everything an architecture must provide.

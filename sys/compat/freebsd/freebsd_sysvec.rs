@@ -16,15 +16,16 @@
 //! calls the kernel.
 
 use framework::user::{UserFault, UserRegs, VmSpace};
-use kern::kern_abi::{ExecImage, ImageParams, SysEntVec, SyscallOutcome};
+use kern::kern_abi::{ExecAbi, ExecImage, ImageParams, SignalAbi, SyscallAbi, SysEntVec, SyscallOutcome};
 use kern::kern_proc::Proc;
-use sys::elf::notes;
+use sys::elf::{Ehdr, notes};
 use sys::errno::KResult;
-use sys::signal::Signal;
+use sys::signal::{SigAction, SigSet, Signal};
+use sys::errno::Errno;
 
 use crate::arch::{
-    ELF_ARCH, SV_NAME, USRSTACK, cpu_fetch_syscall_args, cpu_set_syscall_retval, exec_setregs,
-    trap_uprintf_signal,
+    ELF_ARCH, SV_NAME, USRSTACK, cpu_fetch_syscall_args, cpu_set_syscall_retval, cpu_syscall_restart, exec_setregs,
+    map_sigcode, sendsig, trap_uprintf_signal,
 };
 use crate::freebsd_sysent::{SyscallResult, syscall};
 use crate::{freebsd_errno, freebsd_exec, freebsd_signal};
@@ -45,10 +46,17 @@ impl SysEntVec for FreebsdSysvec {
         SV_NAME
     }
 
+    fn signals(&self) -> Option<&dyn SignalAbi> {
+        Some(self)
+    }
+}
+
+impl ExecAbi for FreebsdSysvec {
     /// A FreeBSD binary for this machine: `EI_OSABI` is FreeBSD, or it
     /// carries a `FreeBSD` ABI tag note (`brandinfo`).
     fn accepts(&self, image: &ExecImage<'_>) -> bool {
-        let Some(e) = image.ehdr else { return false };
+        // The ABI reads its own format; the core only supplies the bytes.
+        let Some(e) = Ehdr::parse(image.header) else { return false };
         e.machine == ELF_ARCH
             && (e.osabi == ELFOSABI_FREEBSD
                 || notes(image.header, &e)
@@ -60,15 +68,20 @@ impl SysEntVec for FreebsdSysvec {
     }
 
     fn exec_setregs(&self, vm: &VmSpace, image: &ImageParams<'_>, regs: &mut UserRegs) -> KResult<()> {
+        map_sigcode(vm)?;
         let stack = freebsd_exec::copyout_strings(vm, image)?;
         exec_setregs(regs, image.entry, stack);
         Ok(())
     }
+}
 
+impl SyscallAbi for FreebsdSysvec {
     fn syscall(&self, p: &Proc, regs: &mut UserRegs) -> SyscallOutcome {
         let (code, args) = cpu_fetch_syscall_args(regs);
         match syscall(p, regs, code, &args) {
             SyscallResult::Ok(rv) => cpu_set_syscall_retval(regs, Ok(rv)),
+            // Issued again once the signal that interrupted it is taken.
+            SyscallResult::Err(Errno::ERESTART) => cpu_syscall_restart(regs),
             SyscallResult::Err(e) => cpu_set_syscall_retval(regs, Err(freebsd_errno::errno(e))),
             SyscallResult::Exit(rv) => return SyscallOutcome::Exit(rv),
             SyscallResult::Signal(sig) => return SyscallOutcome::Signal(sig),
@@ -76,7 +89,9 @@ impl SysEntVec for FreebsdSysvec {
         }
         SyscallOutcome::Return
     }
+}
 
+impl SignalAbi for FreebsdSysvec {
     fn trapsignal(&self, p: &Proc, fault: &UserFault, regs: &UserRegs) -> Signal {
         let sig = freebsd_signal::trapsignal(fault);
         if kern::init_main::bootverbose() {
@@ -87,5 +102,17 @@ impl SysEntVec for FreebsdSysvec {
 
     fn signal_number(&self, sig: Signal) -> i32 {
         freebsd_signal::signo(sig)
+    }
+
+    fn sendsig(
+        &self,
+        p: &Proc,
+        sig: Signal,
+        handler: u64,
+        action: &SigAction,
+        mask: SigSet,
+        regs: &mut UserRegs,
+    ) -> KResult<()> {
+        sendsig(&p.vm(), freebsd_signal::signo(sig), handler, action, mask, regs)
     }
 }

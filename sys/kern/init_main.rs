@@ -41,6 +41,7 @@
 use libkern::conv::u64_from_usize;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use framework::sync::OnceLock;
 use framework::{BootInfo, PAGE_SIZE};
 use sys::copyright::{COPYRIGHT, OSTYPE};
 use sys::reboot::{RB_SINGLE, RB_VERBOSE};
@@ -65,7 +66,9 @@ pub fn bootverbose() -> bool {
 
 /// The MI entry point (`mdi::MiStartup`). Called once by the MD bootstrap
 /// on the boot CPU, with interrupts disabled; the framework (page
-/// allocator, heap, thread 0) is already initialized.
+/// allocator, heap, thread 0) is already initialized, and `sys/conf` has
+/// registered the ABIs, image activators, file systems and the
+/// [`InitPolicy`].
 pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     // The video console first, as FreeBSD's `cninit`: everything printed
     // from here on shows on the screen too.
@@ -95,26 +98,67 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     subr_selftest::trap_selftest(&kenv);
 
     crate::vfs_mount::vfs_mountroot(boot, &kenv);
+    if let Err(e) = kern_kthread::kthread_add("ttysig", || crate::tty::tty_signal_thread()) {
+        panic!("cannot start the terminal signal thread: {e:?}");
+    }
     start_init(boot, &kenv, bootverbose);
     swapper(param.hz)
 }
 
-/// Paths tried for `init`, unless `init_path` is set (FreeBSD's default).
-const INIT_PATH: &str = "/sbin/init:/sbin/oinit:/sbin/init.bak:/rescue/init";
+/// How the first user program is named and started. A personality
+/// supplies it, so the kernel core does not hardcode another system's
+/// userland conventions. `sys/conf` registers it before `mi_startup`.
+pub trait InitPolicy: Sync {
+    /// The paths tried for `init` when the environment has no
+    /// `init_path` (FreeBSD's default is `/sbin/init:...`).
+    fn init_path(&self) -> &'static str;
+
+    /// The argument single-user mode adds after the program name
+    /// (`-s` for FreeBSD). `None` for a personality that has no such
+    /// mode or spells it differently.
+    fn single_user_arg(&self) -> Option<&'static str> {
+        Some("-s")
+    }
+}
+
+static INIT_POLICY: OnceLock<&'static dyn InitPolicy> = OnceLock::new();
+
+/// Registers the init policy. Called by the kernel binary before
+/// `mi_startup`.
+///
+/// # Panics
+///
+/// If called more than once, or if no policy is registered when
+/// `mi_startup` reaches `init`.
+pub fn set_init_policy(policy: &'static dyn InitPolicy) {
+    assert!(INIT_POLICY.set(policy).is_ok(), "init policy set twice");
+}
+
+fn init_policy() -> &'static dyn InitPolicy {
+    *INIT_POLICY.get().expect("init_main: no init policy registered")
+}
 
 /// Starts the initial user process (`start_init`): execs the first file
 /// of `init_path` found on the root file system, or else preloaded by the
 /// loader (e.g. with `init_load="YES"`, `init_type="nova_exec"` and
 /// `init_name="/sbin/init"` in loader.conf).
 fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
-    let init_path = kenv.getenv("init_path").unwrap_or(INIT_PATH);
+    let policy = init_policy();
+    let init_path = kenv.getenv("init_path").unwrap_or(policy.init_path());
     for path in init_path.split(':') {
         if bootverbose {
             printf!("start_init: trying {}\n", path);
         }
-        // `init` gets its path and, in single-user mode, `-s`.
-        let args = [path, "-s"];
-        let argc = if boot.howto & RB_SINGLE != 0 { 2 } else { 1 };
+        // `init` gets its path and, in single-user mode, the policy's
+        // extra argument (`-s` for FreeBSD).
+        let mut args = [path, ""];
+        let mut argc = 1;
+        if boot.howto & RB_SINGLE != 0
+            && let Some(arg) = policy.single_user_arg()
+        {
+            args[1] = arg;
+            argc = 2;
+        }
         let argv = args.get(..argc).unwrap_or(&args);
         let image = match crate::vfs_mount::rootvnode() {
             // On the root file system, through a process with no image yet

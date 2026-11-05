@@ -563,6 +563,22 @@ impl Drop for VmSpace {
     }
 }
 
+/// Bytes of the user floating-point state ([`fpu_save`]).
+pub const FPU_STATE_SIZE: usize = <Md as UserMode>::FPU_STATE_SIZE;
+
+/// Copies the current thread's user floating-point state into `buf`, in
+/// the machine's format (for a signal frame; the ABI lays it out).
+pub fn fpu_save(buf: &mut [u8]) {
+    Md::fpu_save(buf);
+}
+
+/// Restores the current thread's user floating-point state from `state`
+/// (sanitized by the machine), or resets it (`None`), as a signal handler
+/// starts.
+pub fn fpu_load(state: Option<&[u8]>) {
+    Md::fpu_load(state);
+}
+
 /// Makes `vm` the address space of the current thread (FreeBSD's
 /// `vmspace_switch_aio`/`exec` switch), replacing any previous one.
 pub fn set_vmspace(vm: Option<KArc<VmSpace>>) {

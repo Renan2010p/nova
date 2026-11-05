@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "compat_freebsd_ufs"
+name = "exec_elf"
 version = "0.1.0"
 dependencies = [
  "framework",
@@ -45,6 +45,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "freebsd_kpi"
+version = "0.1.0"
+dependencies = [
+ "framework",
+ "libkern",
+ "sys",
+]
+
+[[package]]
 name = "kern"
 version = "0.1.0"
 dependencies = [
@@ -60,9 +69,10 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "compat_freebsd",
- "compat_freebsd_ufs",
+ "exec_elf",
  "framework",
  "kern",
+ "ufs",
 ]
 
 [[package]]
@@ -89,6 +99,16 @@ name = "sys"
 version = "0.1.0"
 dependencies = [
  "libkern",
+]
+
+[[package]]
+name = "ufs"
+version = "0.1.0"
+dependencies = [
+ "framework",
+ "kern",
+ "libkern",
+ "sys",
 ]
 
 [[package]]

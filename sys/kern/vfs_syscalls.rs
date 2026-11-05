@@ -29,6 +29,7 @@ use crate::vfs_lookup::{MAXPATHLEN, NAME_MAX, namei};
 use crate::vfs_mount::rootvnode;
 use crate::vnode::{DirEnt, Mount, PathConf, StatFs, VType, Vnode};
 
+
 /// Where a relative path starts (`AT_FDCWD` or a directory descriptor).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AtFd {
@@ -72,10 +73,7 @@ fn root() -> KResult<Vnode> {
 fn at_dir(p: &Proc, at: AtFd) -> KResult<Vnode> {
     match at {
         AtFd::Cwd => p.cwd.lock().ok_or(Errno::ENOENT),
-        AtFd::Fd(fd) => match p.fd.get(fd)?.kind {
-            FileKind::Vnode(vp) => Ok(vp),
-            FileKind::Console => Err(Errno::ENOTDIR),
-        },
+        AtFd::Fd(fd) => p.fd.get(fd)?.kind.vnode().ok_or(Errno::ENOTDIR),
     }
 }
 
@@ -104,11 +102,18 @@ pub fn kern_openat(p: &Proc, at: AtFd, path: &[u8], flags: OpenFlags) -> KResult
         k if flags.directory && k != VType::Dir => return Err(Errno::ENOTDIR),
         _ => {}
     }
-    if (flags.write || flags.trunc) && vp.mp.rdonly {
+    // A device of the device file system opens as the device; device
+    // files elsewhere name nothing (`ENXIO`).
+    let kind = match attr.kind {
+        VType::Chr | VType::Blk if vp.mp.devices => crate::devfs::devopen(p, vp.ino)?,
+        VType::Chr | VType::Blk | VType::Fifo | VType::Sock => return Err(Errno::ENXIO),
+        _ => FileKind::Vnode(vp),
+    };
+    if (flags.write || flags.trunc) && vp.mp.rdonly && matches!(kind, FileKind::Vnode(_)) {
         return Err(Errno::EROFS);
     }
     let file = File::new(
-        FileKind::Vnode(vp),
+        kind,
         FileFlags { read: flags.read, write: flags.write, append: flags.append, nonblock: flags.nonblock },
     )?;
     p.fd.alloc(file, 0, flags.cloexec)
@@ -211,6 +216,11 @@ pub fn kern_getcwd(p: &Proc) -> KResult<KVec<u8>> {
     let mut start = buf.len();
     let mut name = [0u8; NAME_MAX];
     while !cur.same(&root) {
+        // A mount's root stands for the directory it covers.
+        if let Some(covered) = crate::vfs_mount::covered(&cur) {
+            cur = covered;
+            continue;
+        }
         let parent = Vnode { mp: cur.mp, ino: cur.mp.ops.lookup(cur.ino, b"..")? };
         let n = name_in(parent, cur, &mut name)?;
         if start < n + 1 {
@@ -233,7 +243,7 @@ pub fn kern_getcwd(p: &Proc) -> KResult<KVec<u8>> {
 /// (`basep`).
 pub fn kern_getdirentries(p: &Proc, fd: i32, f: &mut dyn FnMut(&DirEnt<'_>) -> bool) -> KResult<u64> {
     let file: KArc<File> = p.fd.get(fd)?;
-    let FileKind::Vnode(vp) = file.kind else { return Err(Errno::EINVAL) };
+    let vp = file.kind.vnode().ok_or(Errno::EINVAL)?;
     if vp.getattr()?.kind != VType::Dir {
         return Err(Errno::EINVAL);
     }
@@ -247,19 +257,20 @@ pub fn kern_getdirentries(p: &Proc, fd: i32, f: &mut dyn FnMut(&DirEnt<'_>) -> b
 /// `kern_fstatfs`).
 pub fn kern_statfs(p: &Proc, at: Result<i32, &[u8]>) -> KResult<(StatFs, &'static Mount)> {
     let vp = match at {
-        Ok(fd) => match p.fd.get(fd)?.kind {
-            FileKind::Vnode(vp) => vp,
-            // The console lives on devfs, which Nova does not have yet.
-            FileKind::Console => return Err(Errno::EINVAL),
-        },
+        Ok(fd) => p.fd.get(fd)?.kind.vnode().ok_or(Errno::EINVAL)?,
         Err(path) => namei_at(p, AtFd::Cwd, path, true)?,
     };
     Ok((vp.mp.ops.statfs(), vp.mp))
 }
 
-/// The mounted file systems (`getfsstat`): the root, if any.
-pub fn kern_getfsstat() -> Option<(StatFs, &'static Mount)> {
-    rootvnode().map(|vp| (vp.mp.ops.statfs(), vp.mp))
+/// The mounted file systems (`getfsstat`): `f` is called for each.
+pub fn kern_getfsstat(f: &mut dyn FnMut(StatFs, &'static Mount)) -> usize {
+    let mut n = 0;
+    crate::vfs_mount::foreach_mount(|mp| {
+        f(mp.ops.statfs(), mp);
+        n += 1;
+    });
+    n
 }
 
 /// A limit of the file system holding a path or an open file
@@ -267,10 +278,7 @@ pub fn kern_getfsstat() -> Option<(StatFs, &'static Mount)> {
 /// target (`pathconf`) or the link itself (`lpathconf`).
 pub fn kern_pathconf(p: &Proc, at: Result<i32, &[u8]>, follow: bool, name: PathConf) -> KResult<i64> {
     let vp = match at {
-        Ok(fd) => match p.fd.get(fd)?.kind {
-            FileKind::Vnode(vp) => vp,
-            FileKind::Console => return Err(Errno::EINVAL),
-        },
+        Ok(fd) => p.fd.get(fd)?.kind.vnode().ok_or(Errno::EINVAL)?,
         Err(path) => namei_at(p, AtFd::Cwd, path, follow)?,
     };
     vp.mp.ops.pathconf(name)
@@ -281,7 +289,7 @@ pub fn kern_pathconf(p: &Proc, at: Result<i32, &[u8]>, follow: bool, name: PathC
 /// program copies by itself, as `cat` does to a terminal).
 pub fn kern_copy_file_range(p: &Proc, infd: i32, outfd: i32) -> KResult<u64> {
     let (inf, outf) = (p.fd.get(infd)?, p.fd.get(outfd)?);
-    let (FileKind::Vnode(src), FileKind::Vnode(dst)) = (inf.kind, outf.kind) else { return Err(Errno::EINVAL) };
+    let (Some(src), Some(dst)) = (inf.kind.vnode(), outf.kind.vnode()) else { return Err(Errno::EINVAL) };
     if src.getattr()?.kind != VType::Reg || dst.getattr()?.kind != VType::Reg {
         return Err(Errno::EINVAL);
     }

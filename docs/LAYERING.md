@@ -1,7 +1,7 @@
 # Layering rules
 
 Nova's architecture holds up only if its boundaries hold. These rules are
-not guidelines: `tools/checklayers` enforces R1–R9 on every build
+not guidelines: `tools/checklayers` enforces R1–R23 on every build
 (`make` runs `make check` first), and the compiler enforces the rest.
 
 ## Layers
@@ -40,8 +40,12 @@ The **trusted base** (the framekernel's TCB) is `libkern`, `arch/*` and
 | **R16** | No hidden allocation. No crate links Rust's `alloc` (`extern crate alloc`) or installs a `#[global_allocator]`, so `Box`, `Vec`, `String` and `format!` do not exist in the kernel. Memory comes from `framework::mm::malloc` (FreeBSD's `malloc(9)`): every allocation names a `MallocType` (accounting, as `vmstat -m`) and exactly one of `M_WAITOK`/`M_NOWAIT` (checked against the context), and returns a `Result`; `KBox`, `KVec`, `KArc` and `KFnOnce` own the result. Running out of memory is an error the caller handles, never a panic. Scheduling and waking threads never allocate (`TaskQueue` links the threads themselves). | checklayers + compiler (without `alloc` the types do not exist) |
 | **R17** | Every subsystem is a small module: a crate in its own directory (`sys/fs/tmpfs`, `sys/dev/virtio`, ...), whose dependencies are declared in its `Cargo.toml` (so R1 checks them) and whose root documents what it offers and what it relies on (`//!`). | checklayers (crate roots must document themselves) |
 | **R18** | Explicit conversions and failures, as in Zig: no `as` (`clippy::as_conversions`); a conversion is `From`/`TryFrom`, or a named one from `libkern::conv` (`u64_from_usize`, `trunc_u8`, `fn_addr!`, ...), the only place that writes `as`. No `unwrap()` (`clippy::unwrap_used`): a value that cannot be missing says why, with `expect("why")`; one that can is handled. Arithmetic overflow and out-of-bounds indexing panic, as in Zig's safe modes (`overflow-checks = true`); `wrapping_*`/`checked_*` say when that is not wanted. | clippy (`deny`, on the kernel, every port and the host tests) |
-| **R15** | The kernel knows no ABI: no ABI vocabulary (`freebsd`, `linux`, `netbsd`, `darwin`, ...) in identifiers outside the personalities (`sys/compat/*`) and `sys/conf`. Everything ABI-specific (syscall numbers and register convention, errno and signal numbers, which signal a fault raises, the initial stack) sits behind `kern::kern_abi::SysEntVec`; the kernel offers ABI-neutral services (`kern_write`, `exit1`, `sigexit`, `kern_execve`) and names errors and signals without numbers (`sys::errno::Errno`, `sys::signal::Signal`, both exhaustive, so a new one does not compile until every ABI maps it). Running another ABI means writing `sys/compat/<abi>` and registering it in `conf`. | checklayers (words of every identifier) + compiler (exhaustive `match`) |
-| **R19** | The kernel knows no file system: no file system vocabulary (`ufs`, `ffs`, `zfs`, `ext4`, `msdosfs`, `cd9660`, `tmpfs`, ...) in identifiers outside the personalities and `sys/conf`. The VFS (`kern::vnode`, `vfs_mount`, `vfs_lookup`, `vfs_syscalls`) works on vnodes through `kern::vnode::VfsOps`; each file system is a crate under `sys/compat/<abi>/fs/<name>` that `conf` registers (`vfs_register`), and the root's type comes from `vfs.root.mountfrom` as a string. | checklayers (words of every identifier) |
+| **R15** | The kernel knows no ABI: no ABI vocabulary (`freebsd`, `linux`, `netbsd`, `darwin`, ...) in identifiers outside the personalities (`sys/compat/*`), imported code (`sys/vendor/*`), an origin driver directory (`sys/dev/<origin>/*`), an origin file system directory (`sys/fs/<origin>/*`) and `sys/conf`. Everything ABI-specific (syscall numbers and register convention, errno and signal numbers, which signal a fault raises, the initial stack) sits behind `kern::kern_abi::SysEntVec`; the kernel offers ABI-neutral services (`kern_write`, `exit1`, `sigexit`, `kern_execve`) and names errors and signals without numbers (`sys::errno::Errno`, `sys::signal::Signal`, both exhaustive, so a new one does not compile until every ABI maps it). Running another ABI means writing `sys/compat/<abi>` and registering it in `conf`. | checklayers (words of every identifier) + compiler (exhaustive `match`) |
+| **R19** | The kernel knows no file system: no file system vocabulary (`ufs`, `ffs`, `zfs`, `ext4`, `msdosfs`, `cd9660`, `tmpfs`, ...) in identifiers outside the file systems (`sys/fs/*`), the personalities (`sys/compat/*`) and `sys/conf`. The VFS (`kern::vnode`, `vfs_mount`, `vfs_lookup`, `vfs_syscalls`) works on vnodes through `kern::vnode::VfsOps`; each file system is a crate under `sys/fs/<name>` or `sys/fs/<origin>/<name>` (or `sys/compat/<abi>/fs/<name>` when it is tied to an ABI) that `conf` registers (`vfs_register`), and the root's type comes from `vfs.root.mountfrom` as a string. A file system is not an ABI: `sys/fs/freebsd/ufs` is registered next to the personality, not inside it. | checklayers (words of every identifier) |
+| **R20** | The kernel core knows no executable format: no `Ehdr`, `Phdr`, `phdrs`, `PT_LOAD`, `ET_EXEC` or `ET_DYN` identifiers in `sys/kern`. An image format is a service under `sys/exec/` implementing `kern::kern_exec::ImageActivator`, registered by `conf`; ELF is `sys/exec/elf`. A format is not an ABI, either. | checklayers (words of every identifier) |
+| **R21** | Imported code under `sys/vendor/<origin>/`, an origin driver directory under `sys/dev/<origin>/`, and an origin file system directory under `sys/fs/<origin>/` may use the origin's vocabulary (`freebsd`, `linux`, ...). This is the R15 exception; an origin is metadata, not an ABI. | checklayers (origin path) |
+| **R22** | ABI personalities (`sys/compat/*`) never depend on drivers (`sys/dev/*`), KPIs (`sys/vendor/*`) or file systems (`sys/fs/*`). A driver or a format is not a userland ABI. | checklayers (dependency edges) |
+| **R23** | Drivers (`sys/dev/*`) depend only on the base layer, `framework` and a vendor KPI. They never reach into `kern`, `vm`, another service or a personality. | checklayers (dependency edges) |
 
 Source checks ignore comments and string literals, so documentation may
 mention `target_arch`, `asm!` or `static mut` freely.
@@ -53,6 +57,32 @@ mention `target_arch`, `asm!` or `static mut` freely.
 `[workspace.dependencies]` in `sys/Cargo.toml`, and depend on `framework`
 for anything hardware-related. If you need something the framework does
 not offer, extend the framework (and keep R10), do not reach around it.
+
+**A new image format** (e.g. `#!` scripts, PE): create a crate under
+`sys/exec/<name>` implementing `kern::kern_exec::ImageActivator` (a cheap
+`probe` and an `exec` that fills an `Image`), add it to `members` and
+`[workspace.dependencies]`, and register it in `sys/conf` with
+`kern::kern_exec::register`. `kern` does not change (R20).
+
+**A new file system** (e.g. `sys/fs/tmpfs` or
+`sys/fs/freebsd/ufs`): create the crate under `sys/fs/<name>` or
+`sys/fs/<origin>/<name>` with `#![forbid(unsafe_code)]`, implement
+`kern::vnode::VfsOps`, and register its `VfsConf` in `sys/conf` with
+`vfs_register`. Only `conf` names it (R19).
+
+**A new ABI:** create `sys/compat/<abi>/` implementing `ExecAbi`,
+`SyscallAbi` and, if it has one, `SignalAbi` and `SysEntVec`; register it
+in `sys/conf` with `abi_register`. The kernel core does not change (R15).
+
+**A new driver:** create `sys/dev/<name>/` (native) or
+`sys/dev/<origin>/<name>/` (ported), implement the framework's driver
+interface, and register it in `sys/conf`. A ported driver depends on its
+KPI under `sys/vendor/<origin>/kpi/`, never on `sys/compat/*` or another
+service (R22/R23).
+
+**A new KPI** (e.g. `sys/vendor/linux/kpi`): create it as a service
+crate under `sys/vendor/<origin>/kpi/`, wrapping `framework` under the
+origin's names; only drivers and `conf` may depend on it (R21/R23).
 
 **A new MD function:** add it to the right `mdi` trait, implement it in
 every `arch/*` (the compiler lists them), and wrap it in `framework` with

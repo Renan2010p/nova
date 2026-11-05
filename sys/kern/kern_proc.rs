@@ -22,13 +22,14 @@
 //! controlling terminal), `kinfo_proc`.
 
 use core::fmt;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use framework::mm::{KArc, KBox, KVec, M_WAITOK, MallocType};
 use framework::sync::{Mutex, MtxSpin, WaitQueue};
 use framework::user::VmSpace;
 use sys::errno::{Errno, KResult};
 use sys::signal::{NSIG, SigAction, SigHandler, SigSet, Signal};
+
 
 use crate::kern_abi::SysEntVec;
 use crate::kern_descrip::Filedesc;
@@ -110,9 +111,18 @@ pub struct Proc {
     /// Signal mask and actions (`td_sigmask`, `p_sigacts`): a few
     /// kilobytes, so on the heap, as FreeBSD's `struct sigacts`.
     pub sig: KBox<MtxSpin<SigState>>,
-    /// A signal sent by another process that kills it, acted on when it
-    /// next returns to user mode. TODO(signal): pending signals.
-    pub killed: MtxSpin<Option<Signal>>,
+    /// A signal is pending that is not blocked (`SIGPENDING`): sleeps
+    /// that a signal interrupts check it. Kept by [`SigState`]'s users
+    /// through [`Proc::sig_update`].
+    sig_hint: AtomicBool,
+    /// What the process sleeps on, if a signal may interrupt the sleep
+    /// (`td_wchan`): a signal sent to it wakes the channel.
+    pub wchan: MtxSpin<Option<crate::kern_synch::WChan>>,
+    /// Stopped by a signal (`P_STOPPED_SIG`).
+    pub stopped: AtomicBool,
+    /// A stop or continue its parent has not been told of by `wait` yet
+    /// (`P_WAITED` clear).
+    pub wait_event: MtxSpin<Option<StopEvent>>,
     /// Open files (`p_fd`).
     pub fd: Filedesc,
     /// Current directory (`pwd_cdir`); `None` without a root file system.
@@ -121,6 +131,15 @@ pub struct Proc {
     pub umask: AtomicU32,
     /// How it ended, once it has: a zombie (`p_xexit`, `PRS_ZOMBIE`).
     exit: MtxSpin<Option<ExitStatus>>,
+}
+
+/// A change of a process's state that `wait` reports, besides its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopEvent {
+    /// Stopped by this signal (`WUNTRACED`).
+    Stopped(Signal),
+    /// Continued (`WCONTINUED`).
+    Continued,
 }
 
 /// Who a process acts as (`struct ucred`).
@@ -144,12 +163,14 @@ pub struct SigState {
     pub mask: SigSet,
     /// What each signal does, by `Signal::index` (`ps_sigact`).
     pub actions: [SigAction; NSIG],
+    /// Sent, not yet delivered (`td_siglist`).
+    pub pending: SigSet,
 }
 
 impl SigState {
     /// Nothing blocked, every action the default (a new image).
     pub const fn new() -> Self {
-        Self { mask: SigSet::EMPTY, actions: [SigAction::DEFAULT; NSIG] }
+        Self { mask: SigSet::EMPTY, actions: [SigAction::DEFAULT; NSIG], pending: SigSet::EMPTY }
     }
 
     /// After `exec`: caught signals go back to their default (`execsigs`);
@@ -160,6 +181,19 @@ impl SigState {
                 *a = SigAction::DEFAULT;
             }
         }
+    }
+
+    /// The action for `sig`; `SIGKILL` and `SIGSTOP` always the default.
+    pub fn action(&self, sig: Signal) -> SigAction {
+        if sig.is_uncatchable() {
+            return SigAction::DEFAULT;
+        }
+        self.actions.get(sig.index()).copied().unwrap_or_default()
+    }
+
+    /// Pending signals not blocked.
+    pub fn deliverable(&self) -> SigSet {
+        self.pending.difference(self.mask.blockable())
     }
 }
 
@@ -211,7 +245,10 @@ impl Proc {
             vm: MtxSpin::new(vm),
             abi: MtxSpin::new(abi),
             sig: KBox::new(MtxSpin::new(SigState::new()), &M_PROC, M_WAITOK)?,
-            killed: MtxSpin::new(None),
+            sig_hint: AtomicBool::new(false),
+            wchan: MtxSpin::new(None),
+            stopped: AtomicBool::new(false),
+            wait_event: MtxSpin::new(None),
             fd: Filedesc::console()?,
             cwd: MtxSpin::new(crate::vfs_mount::rootvnode()),
             umask: AtomicU32::new(0o022),
@@ -225,6 +262,8 @@ impl Proc {
     pub fn fork(&self, vm: KArc<VmSpace>) -> KResult<Self> {
         let sig = KBox::new(MtxSpin::new(SigState::new()), &M_PROC, M_WAITOK)?;
         *sig.lock() = *self.sig.lock();
+        // A child starts with no signal pending (`fork1`).
+        sig.lock().pending = SigSet::EMPTY;
         Ok(Self {
             pid: next_pid(),
             ppid: AtomicU32::new(self.pid),
@@ -238,7 +277,10 @@ impl Proc {
             vm: MtxSpin::new(vm),
             abi: MtxSpin::new(self.abi()),
             sig,
-            killed: MtxSpin::new(None),
+            sig_hint: AtomicBool::new(false),
+            wchan: MtxSpin::new(None),
+            stopped: AtomicBool::new(false),
+            wait_event: MtxSpin::new(None),
             fd: self.fd.fork()?,
             cwd: MtxSpin::new(*self.cwd.lock()),
             umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
@@ -298,6 +340,17 @@ impl Proc {
         self.sid.load(Ordering::Acquire)
     }
 
+    /// Recomputes the pending-signal hint from `st` (its signal state,
+    /// locked by the caller).
+    pub fn sig_update(&self, st: &SigState) {
+        self.sig_hint.store(st.deliverable().iter().next().is_some(), Ordering::Release);
+    }
+
+    /// A signal is pending that is not blocked.
+    pub fn sig_pending(&self) -> bool {
+        self.sig_hint.load(Ordering::Acquire)
+    }
+
     /// How it ended, if it is a zombie.
     pub fn exit_status(&self) -> Option<ExitStatus> {
         *self.exit.lock()
@@ -345,8 +398,7 @@ pub(crate) fn proc_zombie(p: &Proc, status: ExitStatus) {
         q.ppid.store(PID_INIT, Ordering::Release);
     }
     *p.exit.lock() = Some(status);
-    EXIT_GEN.fetch_add(1, Ordering::AcqRel);
-    PROC_EXITED.wake_all();
+    wakeup_waiters();
 }
 
 /// Undoes [`proc_register`] when a fork fails after it.
@@ -365,14 +417,43 @@ pub enum WaitWho {
     Pgid(u32),
 }
 
-/// Waits for a child of `p` to end, and reaps it (`kern_wait6`): its pid
-/// and how it ended; `None` if `nohang` and none has ended yet. `ECHILD`
-/// if no child matches.
-pub fn kern_wait(p: &Proc, who: WaitWho, nohang: bool) -> KResult<Option<(u32, ExitStatus)>> {
+/// What `wait` reports, besides ended children.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitOptions {
+    /// Do not sleep (`WNOHANG`).
+    pub nohang: bool,
+    /// Stopped children (`WUNTRACED`).
+    pub stopped: bool,
+    /// Continued children (`WCONTINUED`).
+    pub continued: bool,
+    /// Leave the child as it is: report it again next time (`WNOWAIT`).
+    pub nowait: bool,
+}
+
+/// What happened to a child, as `wait` reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitEvent {
+    /// It ended.
+    Exited(ExitStatus),
+    /// It stopped, or continued.
+    Changed(StopEvent),
+}
+
+/// Bumps the exit generation and wakes parents in `wait`.
+pub(crate) fn wakeup_waiters() {
+    EXIT_GEN.fetch_add(1, Ordering::AcqRel);
+    PROC_EXITED.wake_all();
+}
+
+/// Waits for a child of `p` to end, stop or continue, as `opts` asks
+/// (`kern_wait6`): its pid and what happened; an ended child is reaped.
+/// `None` if `nohang` and nothing happened yet; `ECHILD` if no child
+/// matches; interrupted by a signal, `EINTR` or `ERESTART`.
+pub fn kern_wait(p: &Proc, who: WaitWho, opts: WaitOptions) -> KResult<Option<(u32, WaitEvent)>> {
     loop {
         let seen = EXIT_GEN.load(Ordering::Acquire);
         let mut matched = false;
-        let mut zombie = None;
+        let mut found = None;
         for q in ALLPROC.lock().iter().filter(|q| q.ppid() == p.pid) {
             let wanted = match who {
                 WaitWho::Any => true,
@@ -384,22 +465,39 @@ pub fn kern_wait(p: &Proc, who: WaitWho, nohang: bool) -> KResult<Option<(u32, E
             }
             matched = true;
             if let Some(st) = q.exit_status() {
-                zombie = Some((q.pid, st));
+                found = Some((q.pid, WaitEvent::Exited(st)));
+                break;
+            }
+            let mut ev = q.wait_event.lock();
+            let report = match *ev {
+                Some(StopEvent::Stopped(_)) => opts.stopped,
+                Some(StopEvent::Continued) => opts.continued,
+                None => false,
+            };
+            if let (true, Some(e)) = (report, *ev) {
+                if !opts.nowait {
+                    *ev = None;
+                }
+                found = Some((q.pid, WaitEvent::Changed(e)));
                 break;
             }
         }
-        if let Some((pid, st)) = zombie {
-            // Reaped: the table's reference goes; the rest went at exit.
-            drop(proc_unregister(pid));
-            return Ok(Some((pid, st)));
+        if let Some((pid, ev)) = found {
+            if matches!(ev, WaitEvent::Exited(_)) && !opts.nowait {
+                // Reaped: the table's reference goes; the rest went at exit.
+                drop(proc_unregister(pid));
+            }
+            return Ok(Some((pid, ev)));
         }
         if !matched {
             return Err(Errno::ECHILD);
         }
-        if nohang {
+        if opts.nohang {
             return Ok(None);
         }
-        PROC_EXITED.wait_until(|| EXIT_GEN.load(Ordering::Acquire) != seen);
+        crate::kern_synch::sleep_sig(p, crate::kern_synch::WChan::Static(&PROC_EXITED), || {
+            EXIT_GEN.load(Ordering::Acquire) != seen
+        })?;
     }
 }
 

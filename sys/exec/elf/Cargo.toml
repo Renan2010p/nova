@@ -1,6 +1,6 @@
 [package]
-name = "compat_freebsd_ufs"
-description = "Nova: FreeBSD's UFS2 file system, read-only (sys/compat/freebsd/fs/ufs, FreeBSD's sys/ufs)"
+name = "exec_elf"
+description = "Nova: the ELF image activator (a service registered by conf)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

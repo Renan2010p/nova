@@ -23,7 +23,8 @@
 # (preloaded as /sbin/init, which Nova executes as process 1, when there
 # is no root file system), ROOTFS=1 (a UFS root file system holding the
 # host's /rescue, loaded as the memory disk md0, with INIT_PATH, default
-# /rescue/sh, as init; INIT is then not used).
+# /rescue/sh, as init; INIT is then not used), SINGLE=1 (boot -s: with
+# INIT_PATH=/rescue/init, FreeBSD's single-user shell).
 #
 # Nova halts like FreeBSD: "Please press any key to reboot." Press a key
 # (or wait for the panic countdown) and bhyve exits.
@@ -39,6 +40,7 @@ VERBOSE=${VERBOSE:-}
 INIT=${INIT:-}
 INIT_NAME=${INIT_NAME:-}
 ROOTFS=${ROOTFS:-}
+SINGLE=${SINGLE:-}
 INIT_PATH=${INIT_PATH:-}
 
 if [ "$(uname -s)" != FreeBSD ]; then
@@ -77,6 +79,9 @@ boot_mute="NO"
 EOF
 if [ -n "$VERBOSE" ]; then
 	echo 'boot_verbose="YES"' >> "$ROOT/boot/loader.conf"
+fi
+if [ -n "$SINGLE" ]; then
+	echo 'boot_single="YES"' >> "$ROOT/boot/loader.conf"
 fi
 if [ -n "$INIT" ] && [ -z "$ROOTFS" ]; then
 	# INIT_NAME: the path init is loaded as, and so its argv[0] (crunched

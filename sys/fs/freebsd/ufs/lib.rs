@@ -12,11 +12,11 @@
  */
 
 
-//! `compat_freebsd_ufs`: FreeBSD's file system, UFS2 (`sys/ufs/ffs` and
-//! `sys/ufs/ufs`), read-only, on an image in memory (the memory disk the
-//! loader preloads). It implements the kernel's [`VfsOps`]; `sys/conf`
-//! registers it as `ufs` ([`UFS_VFSCONF`]), so `vfs.root.mountfrom` may
-//! name it.
+//! `ufs`: the UFS2 file system (`sys/ufs/ffs` and `sys/ufs/ufs`),
+//! read-only, on an image in memory (the memory disk the loader
+//! preloads). It is a file system service, not part of an ABI: it
+//! implements the kernel's [`VfsOps`], and `sys/conf` registers it as
+//! `ufs` ([`UFS_VFSCONF`]), so `vfs.root.mountfrom` may name it.
 //!
 //! The layout, from FreeBSD's `ufs/ffs/fs.h` and `ufs/ufs/dinode.h`
 //! (offsets checked against them with the host's compiler):

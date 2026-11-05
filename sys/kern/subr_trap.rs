@@ -19,21 +19,24 @@
 //! signal a fault means.
 
 use framework::user::{self, UserExit, UserRegs};
+use sys::signal::Signal;
 
 use crate::kern_exit::{ExitStatus, exit1};
 use crate::kern_proc::Proc;
-use crate::kern_sig::sigexit;
+use crate::kern_sig::{postsig, sigexit};
 use crate::kern_abi::SyscallOutcome;
 
 /// Runs `p` from `regs` until it exits. Called on `p`'s thread.
 pub fn userret_loop(p: &Proc, mut regs: UserRegs) -> ExitStatus {
     user::set_vmspace(Some(p.vm()));
     let status = loop {
-        let exit = user::enter(&mut regs);
-        // Killed by another process meanwhile (`ast`).
-        if let Some(sig) = p.killed.lock().take() {
-            break sigexit(p, sig);
+        // Signals first (`ast`): a handler's frame, a stop, or the end.
+        if p.sig_pending()
+            && let Some(status) = postsig(p, &mut regs)
+        {
+            break status;
         }
+        let exit = user::enter(&mut regs);
         match exit {
             UserExit::Syscall => match p.abi().syscall(p, &mut regs) {
                 SyscallOutcome::Return => {}
@@ -46,7 +49,10 @@ pub fn userret_loop(p: &Proc, mut regs: UserRegs) -> ExitStatus {
                 if vm::vm_fault::vm_fault_trap(&p.vm(), &fault) {
                     continue;
                 }
-                break sigexit(p, p.abi().trapsignal(p, &fault, &regs));
+                // An ABI with no signal model has no fault signal to
+                // raise: the process is terminated.
+                let sig = p.abi().signals().map_or(Signal::SIGKILL, |s| s.trapsignal(p, &fault, &regs));
+                break sigexit(p, sig);
             }
         }
     };

@@ -1,0 +1,10 @@
+Imported FreeBSD source, when it arrives, keeps the SPDX licence
+identifier and the copyright notice in each file's header, as rule R8
+requires. Most FreeBSD kernel code is BSD-2-Clause or BSD-3-Clause,
+which is compatible with Nova's MPL-2.0.
+
+No source file has been imported yet: this directory currently contains
+only the `kpi/` crate, which is Nova code under MPL-2.0 (see the header
+of `kpi/lib.rs`). When the first upstream file is added, its full
+licence text and copyright holder go here, and the file is listed in
+`docs/DRIVERS.md`.

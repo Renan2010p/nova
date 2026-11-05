@@ -32,8 +32,11 @@ check:
 	cd tools && ${CARGO} run -q -p checklayers -- ../sys
 	@cd sys && for t in ${PORTS}; do \
 	    ${CARGO} check -q -p kernel --target $$t || exit 1; \
+	    ${CARGO} check -q -p freebsd_kpi --target $$t || exit 1; \
 	    echo "check: the kernel compiles for $$t"; \
 	done
+	@cd sys && ${CARGO} check -q -p freebsd_kpi
+	@echo "check: the FreeBSD KPI compiles"
 
 # The Nova stand: stand.efi, the UEFI boot loader (stand/).
 STAND_EFI=	stand/target/x86_64-unknown-uefi/${PROFILE}/stand.efi
@@ -86,6 +89,7 @@ test:
 # kernel, every other port, and the host unit tests.
 clippy:
 	cd sys && ${CARGO} clippy --profile ${PROFILE}
+	@cd sys && ${CARGO} clippy -q --profile ${PROFILE} -p freebsd_kpi -- -D warnings
 	@cd sys && for t in ${PORTS}; do \
 	    ${CARGO} clippy -q --profile ${PROFILE} -p kernel --target $$t -- -D warnings || exit 1; \
 	done
@@ -121,7 +125,7 @@ kani:
 bhyve:
 	@test -f ${KERNEL} || { echo "bhyve: ${KERNEL} not found; run make first" >&2; exit 1; }
 	VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" INIT_NAME="${INIT_NAME}" \
-	    ROOTFS="${ROOTFS}" INIT_PATH="${INIT_PATH}" \
+	    ROOTFS="${ROOTFS}" INIT_PATH="${INIT_PATH}" SINGLE="${SINGLE}" \
 	    sh tools/bhyve/run.sh ${KERNEL}
 
 # Boots the kernel under QEMU as a real PC (BIOS, gptboot, the host's
@@ -137,7 +141,7 @@ qemu:
 	@test -f ${KERNEL_FILE} || { echo "qemu: ${KERNEL_FILE} not found; run make first" >&2; exit 1; }
 	CPUS="${CPUS}" VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" INIT_NAME="${INIT_NAME}" TIMEOUT="${TIMEOUT}" \
 	    UEFI="${UEFI}" GUI="${GUI}" VNC="${VNC}" STAND="${STAND}" STAND_EFI="${STAND_EFI}" \
-	    ROOTFS="${ROOTFS}" INIT_PATH="${INIT_PATH}" \
+	    ROOTFS="${ROOTFS}" INIT_PATH="${INIT_PATH}" SINGLE="${SINGLE}" \
 	    sh tools/qemu/run.sh ${KERNEL_FILE}
 
 clean:

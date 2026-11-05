@@ -24,16 +24,24 @@
 //! no interrupt controller driver yet), so typing works on the console of
 //! bhyve and QEMU.
 //!
-//! TODO(tty): process groups and job control (`ISIG` characters only echo
-//! and discard the line), the keyboard on the screen, flow control,
-//! `TIOCSTI`, more than one terminal.
+//! It may be a session's controlling terminal (`TIOCSCTTY`), with a
+//! foreground process group (`TIOCSPGRP`) that `VINTR`, `VQUIT` and
+//! `VSUSP` signal (`ISIG`). Input arrives in interrupt context, where no
+//! process may be touched, so a kernel thread sends those signals.
+//!
+//! TODO(tty): `SIGTTIN`/`SIGTTOU` for background groups, the keyboard on
+//! the screen, flow control, `TIOCSTI`, more than one terminal.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use framework::sync::{MtxSpin, WaitQueue};
+use sys::errno::{Errno, KResult};
+use sys::signal::Signal;
 use sys::termios::{Cc, TFlag, Termios, Winsize};
 
 use crate::kern_cons;
+use crate::kern_proc::{Proc, foreach_proc};
+use crate::kern_synch::{WChan, sleep_sig};
 
 /// Bytes the input queue holds (FreeBSD's `TTYINQ_DATASIZE` is per block;
 /// one fixed queue is enough for a console).
@@ -55,6 +63,11 @@ struct Tty {
     eof: bool,
     /// `VLNEXT` was typed: the next character is taken literally.
     lnext: bool,
+    /// The session it is the controlling terminal of (`t_session`); 0:
+    /// none.
+    session: u32,
+    /// Its foreground process group (`t_pgrp`); 0: none.
+    pgrp: u32,
 }
 
 static TTY: MtxSpin<Tty> = MtxSpin::new(Tty {
@@ -67,7 +80,14 @@ static TTY: MtxSpin<Tty> = MtxSpin::new(Tty {
     line_len: 0,
     eof: false,
     lnext: false,
+    session: 0,
+    pgrp: 0,
 });
+
+/// A signal for the foreground group, typed (`Signal::index` + 1; 0:
+/// none), and the queue of the thread that sends it.
+static TTY_SIG: AtomicU32 = AtomicU32::new(0);
+static TTY_SIG_WAIT: WaitQueue = WaitQueue::new();
 
 /// Readers waiting for input.
 static READERS: WaitQueue = WaitQueue::new();
@@ -167,12 +187,23 @@ impl Tty {
             return;
         }
         if self.has(TFlag::ISIG) && (is(Cc::VINTR) || is(Cc::VQUIT) || is(Cc::VSUSP)) {
-            // No process groups yet: show it and drop the line.
+            // `ttydisc_rint`: echo it, flush, and signal the foreground
+            // group (from the signal thread).
             self.echo_char(c);
             if !self.has(TFlag::NOFLSH) {
                 self.line_len = 0;
+                self.len = 0;
             }
-            echo(b'\n');
+            let sig = if is(Cc::VINTR) {
+                Signal::SIGINT
+            } else if is(Cc::VQUIT) {
+                Signal::SIGQUIT
+            } else {
+                Signal::SIGTSTP
+            };
+            if self.pgrp != 0 {
+                TTY_SIG.store(u32::try_from(sig.index() + 1).unwrap_or(0), Ordering::Release);
+            }
             return;
         }
         if !self.has(TFlag::ICANON) {
@@ -279,24 +310,111 @@ pub fn tty_poll() {
     if got && READY.load(Ordering::Acquire) {
         READERS.wake_all();
     }
+    if TTY_SIG.load(Ordering::Acquire) != 0 {
+        TTY_SIG_WAIT.wake_all();
+    }
 }
 
-/// Reads input into `out` (`ttydisc_read`): sleeps until there is some, or
-/// end of file. Returns the bytes read; 0 at end of file.
-pub fn tty_read(out: &mut [u8]) -> usize {
+/// The thread that sends typed signals to the foreground group (in
+/// FreeBSD, `ttydisc_rint` does it in place, under the tty lock).
+pub fn tty_signal_thread() -> ! {
     loop {
-        READERS.wait_until(|| READY.load(Ordering::Acquire));
+        TTY_SIG_WAIT.wait_until(|| TTY_SIG.load(Ordering::Acquire) != 0);
+        let idx = TTY_SIG.swap(0, Ordering::AcqRel);
+        let sig = usize::try_from(idx).ok().and_then(|i| i.checked_sub(1)).and_then(Signal::from_index);
+        let pgrp = TTY.lock().pgrp;
+        if let (Some(sig), true) = (sig, pgrp != 0) {
+            crate::kern_sig::pgsignal(pgrp, sig);
+        }
+    }
+}
+
+/// Reads input into `out` for `p` (`ttydisc_read`): sleeps until there is
+/// some, end of file, or a signal. Returns the bytes read; 0 at end of
+/// file.
+pub fn tty_read(p: &Proc, out: &mut [u8]) -> KResult<usize> {
+    loop {
+        sleep_sig(p, WChan::Static(&READERS), || READY.load(Ordering::Acquire))?;
         let mut t = TTY.lock();
         if t.len > 0 {
-            return t.take(out);
+            return Ok(t.take(out));
         }
         if t.eof {
             t.eof = false;
             READY.store(false, Ordering::Release);
-            return 0;
+            return Ok(0);
         }
         READY.store(false, Ordering::Release);
     }
+}
+
+/// Bytes ready to be read (`FIONREAD`).
+pub fn tty_nread() -> usize {
+    TTY.lock().len
+}
+
+/// Whether the console is the controlling terminal of session `sid`.
+pub fn tty_is_ctty(sid: u32) -> bool {
+    sid != 0 && TTY.lock().session == sid
+}
+
+/// Makes the console `p`'s controlling terminal (`TIOCSCTTY`): `p` must
+/// lead its session, and the console belong to no other.
+pub fn tty_setctty(p: &Proc) -> KResult<()> {
+    if p.sid() != p.pid {
+        return Err(Errno::EPERM);
+    }
+    let mut t = TTY.lock();
+    if t.session != 0 && t.session != p.sid() {
+        return Err(Errno::EPERM);
+    }
+    t.session = p.sid();
+    t.pgrp = p.pgid();
+    Ok(())
+}
+
+/// Lets go of the console as controlling terminal (`TIOCNOTTY`), or as
+/// session `sid` ends (its leader exits).
+pub fn tty_release(sid: u32) {
+    let mut t = TTY.lock();
+    if t.session == sid {
+        t.session = 0;
+        t.pgrp = 0;
+    }
+}
+
+/// The foreground group, for `p` in the console's session (`TIOCGPGRP`).
+pub fn tty_getpgrp(p: &Proc) -> KResult<u32> {
+    let t = TTY.lock();
+    if t.session == 0 || t.session != p.sid() {
+        return Err(Errno::ENOTTY);
+    }
+    Ok(t.pgrp)
+}
+
+/// Sets the foreground group (`TIOCSPGRP`): a group of `p`'s session,
+/// which the console must be the terminal of.
+pub fn tty_setpgrp(p: &Proc, pgid: u32) -> KResult<()> {
+    let sid = p.sid();
+    if !tty_is_ctty(sid) {
+        return Err(Errno::ENOTTY);
+    }
+    let mut exists = false;
+    foreach_proc(|q| exists |= q.pgid() == pgid && q.sid() == sid);
+    if !exists {
+        return Err(Errno::EPERM);
+    }
+    TTY.lock().pgrp = pgid;
+    Ok(())
+}
+
+/// The session the console is the terminal of, for `p` in it
+/// (`TIOCGSID`).
+pub fn tty_getsid(p: &Proc) -> KResult<u32> {
+    if !tty_is_ctty(p.sid()) {
+        return Err(Errno::ENOTTY);
+    }
+    Ok(p.sid())
 }
 
 /// Writes program output (`ttydisc_write`).

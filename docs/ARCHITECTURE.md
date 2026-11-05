@@ -29,14 +29,25 @@ sys/
 │   └── amd64/        md       trusted   the amd64 port: locore, machdep, pcpu, ...
 ├── framework/        framework trusted  framekernel core: CPUs, per-CPU data, locks, ...
 ├── vm/               service            virtual memory policy
+├── exec/
+│   └── elf/          service            the ELF image activator (execsw)
 ├── kern/             service            the kernel core: start-up, console, printf, panic, kenv, ...
+├── fs/
+│   └── freebsd/
+│       └── ufs/      service            UFS2, read-only (FreeBSD's sys/ufs)
+├── vendor/
+│   └── freebsd/kpi/  service            the FreeBSD kernel KPI (malloc, mtx, bus...)
 ├── compat/
 │   └── freebsd/      service            the FreeBSD 15.1 ABI personality
 └── conf/             conf               the kernel binary (like GENERIC) + ldscript.amd64
 ```
 
-Planned, with the same rules: `fs/` (devfs, tmpfs), `ufs/`, `dev/`
-(`dev/ic`, `dev/pci`, `dev/virtio`, ...), `net/`, `netinet/`.
+Planned, with the same rules: `fs/` (tmpfs, `fs/linux/ext4`), `dev/`
+(`dev/vt`, `dev/virtio`, `dev/freebsd/e1000`, ...), `net/`,
+`netinet/`. `devfs`
+stays in `kern`: it is the kernel's own device namespace, not a format
+on disk. A driver's origin (`dev/freebsd`, `dev/linux`) is metadata, not
+an ABI; see [DRIVERS.md](DRIVERS.md).
 
 Every directory is one Cargo crate. Sources sit directly in the directory
 (no `src/`) and keep FreeBSD's file names: `kern/init_main.rs`,
@@ -199,14 +210,18 @@ x2APIC.
 
 ## ABIs: the kernel knows none
 
-The kernel does not know any userland ABI. It knows one interface,
-`kern::kern_abi::SysEntVec` (FreeBSD's `struct sysentvec` as a trait), and
-every ABI lives in `sys/compat/<abi>`, with its MD half in
+The kernel does not know any userland ABI. It knows capabilities:
+`ExecAbi` (which images it runs, the stack, the start registers),
+`SyscallAbi` (decode a call, encode the result) and, optionally,
+`SignalAbi` (the fault signal, its number, the handler frame).
+`SysEntVec` is the registered object; it names the ABI and reports
+`signals()` (or `None` for a personality with no signal model). Every ABI
+lives in `sys/compat/<abi>`, with its MD half in
 `sys/compat/<abi>/arch/<arch>/`. Only `sys/conf` registers ABIs.
 
 | The ABI (`sys/compat/<abi>`) | The kernel (`sys/kern`) |
 |---|---|
-| recognizes its images (`accepts`: brand, note, `EI_OSABI`) | loads `PT_LOAD` segments, maps the stack (`kern_execve`) |
+| recognizes its images (`accepts`: brand, note, `EI_OSABI`) | reads the first page; the format's activator loads segments and maps the stack |
 | lays out argv, envp, auxv and the start registers (`exec_setregs`) | runs the program (`subr_trap::userret_loop`) |
 | decodes a system call, encodes the result (`syscall`) | implements it (`kern_write`, `exit1`, ...) |
 | says which signal a fault raises (`trapsignal`) | delivers it (for now: kills, with FreeBSD's log line) |
@@ -217,10 +232,18 @@ every ABI lives in `sys/compat/<abi>`, with its MD half in
 compile until every ABI has a number for it. A Linux, NetBSD or native
 Nova ABI is "just" a new `sys/compat/<abi>`.
 
-Still to generalize when a second ABI arrives: the image format (the
-kernel loads ELF itself, as FreeBSD's `imgact_elf` serves several ELF
-ABIs; a non-ELF ABI would bring its own image activator, FreeBSD's
-`execsw`), and the set of signals and errors (grown as needed).
+The **image format** is separate from the ABI, as FreeBSD's `execsw` is
+separate from `sysentvec`. `kern::kern_exec` knows only bytes
+(`ImageFile`) and the registered `ImageActivator`s; `sys/exec/elf` parses
+ELF, loads the segments, and asks `kern_abi::abi_select` which ABI accepts
+the image. A non-ELF format (a script, PE, Mach-O, ...) is a new crate
+under `sys/exec/`, registered by `conf`; `kern` does not change (rule
+R20). An ABI that uses ELF reuses the same activator, whatever its brand.
+
+Still to generalize when a second personality arrives: the set of
+signals and errors (grown as needed), and the full event abstraction for
+a personality with no POSIX signal model (`SignalAbi` already makes
+signals optional at the ABI boundary).
 
 ### The FreeBSD personality
 

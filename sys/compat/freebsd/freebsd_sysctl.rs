@@ -257,8 +257,36 @@ pub(crate) fn sys_sysctlbyname(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     let n = usize_from_u64(args[1]).min(name.len());
     p.vm().copyin(args[0], &mut name[..n]).map_err(vm_errno)?;
     let name = &name[..n];
+    if name == b"kern.msgbuf" {
+        return msgbuf(p, args[2], args[3]);
+    }
     let node = find_name(name).ok_or_else(|| {
         unknown(p, format_args!("{}", core::str::from_utf8(name).unwrap_or("?")))
     })?;
     access(p, node, args[2], args[3], args[4], args[5])
+}
+
+/// `kern.msgbuf`: the kernel's message buffer, oldest first (`dmesg`).
+fn msgbuf(p: &Proc, old: u64, oldlenp: u64) -> KResult<[u64; 2]> {
+    let vm = p.vm();
+    let len = kern::subr_prf::msgbuf_len();
+    let mut lenb = [0u8; 8];
+    vm.copyin(oldlenp, &mut lenb).map_err(vm_errno)?;
+    let room = usize_from_u64(u64::from_le_bytes(lenb));
+    let mut done = 0usize;
+    if old != 0 {
+        let mut chunk = [0u8; 512];
+        while done < len.min(room) {
+            let want = (len.min(room) - done).min(chunk.len());
+            let n = kern::subr_prf::msgbuf_read(done, &mut chunk[..want]);
+            if n == 0 {
+                break;
+            }
+            vm.copyout(old + u64_from_usize(done), &chunk[..n]).map_err(vm_errno)?;
+            done += n;
+        }
+    }
+    let reported = if old == 0 { len } else { done };
+    vm.copyout(oldlenp, &u64_from_usize(reported).to_le_bytes()).map_err(vm_errno)?;
+    if old != 0 && done < len { Err(Errno::ENOMEM) } else { Ok([0, 0]) }
 }

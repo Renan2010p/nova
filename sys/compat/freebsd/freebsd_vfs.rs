@@ -368,14 +368,27 @@ pub(crate) fn sys_statfs(p: &Proc, at: Result<i32, u64>, buf: u64) -> KResult<[u
     Ok([0, 0])
 }
 
-/// `getfsstat(buf, bufsize, mode)`: the root, if mounted.
+/// `getfsstat(buf, bufsize, mode)`: every mount, as many as fit; the
+/// count of all without a buffer.
 #[inline(never)] // its buffers stay out of `syscall`'s frame
 pub(crate) fn sys_getfsstat(p: &Proc, buf: u64, size: u64) -> KResult<[u64; 2]> {
-    let Some((s, mp)) = kern_getfsstat() else { return Ok([0, 0]) };
-    if buf != 0 && size >= u64_from_usize(STATFS_SIZE) {
-        p.vm().copyout(buf, &statfs_out(&s, mp)).map_err(vm_errno)?;
+    let vm = p.vm();
+    let room = size / u64_from_usize(STATFS_SIZE);
+    let mut copied = 0u64;
+    let mut err = None;
+    let n = kern_getfsstat(&mut |s, mp| {
+        if buf == 0 || copied >= room || err.is_some() {
+            return;
+        }
+        if let Err(e) = vm.copyout(buf + copied * u64_from_usize(STATFS_SIZE), &statfs_out(&s, mp)) {
+            err = Some(vm_errno(e));
+        }
+        copied += 1;
+    });
+    if let Some(e) = err {
+        return Err(e);
     }
-    Ok([1, 0])
+    Ok([if buf == 0 { u64_from_usize(n) } else { copied }, 0])
 }
 
 /// `pathconf(path, name)`, `lpathconf(path, name)` and `fpathconf(fd,
