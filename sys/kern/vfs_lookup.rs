@@ -111,3 +111,34 @@ pub fn namei(root: Vnode, dir: Vnode, path: &[u8], follow: bool) -> KResult<Vnod
         at = end;
     }
 }
+
+/// Looks up the directory that holds the last component of `path`
+/// (`namei` with `LOCKPARENT`, for `CREATE`, `DELETE`, `RENAME`): the
+/// directory and that name. Trailing slashes are dropped; `EINVAL` for
+/// `.` or `..` as the name, `ENOENT` for an empty path.
+pub fn namei_parent(root: Vnode, dir: Vnode, path: &[u8]) -> KResult<(Vnode, &[u8])> {
+    let mut end = path.len();
+    while end > 1 && path.get(end - 1) == Some(&b'/') {
+        end -= 1;
+    }
+    let path = path.get(..end).ok_or(Errno::ENOENT)?;
+    if path.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+    let (dirpart, name) = match path.iter().rposition(|&c| c == b'/') {
+        Some(0) => (&b"/"[..], path.get(1..).unwrap_or(&[])),
+        Some(i) => (path.get(..i).unwrap_or(&[]), path.get(i + 1..).unwrap_or(&[])),
+        None => (&b"."[..], path),
+    };
+    if name.is_empty() || name == b"." || name == b".." {
+        return Err(Errno::EINVAL);
+    }
+    if name.len() > NAME_MAX {
+        return Err(Errno::ENAMETOOLONG);
+    }
+    let parent = namei(root, dir, dirpart, true)?;
+    if parent.getattr()?.kind != VType::Dir {
+        return Err(Errno::ENOTDIR);
+    }
+    Ok((parent, name))
+}

@@ -34,7 +34,7 @@ use kern::kern_sig::psignal;
 use vm::vm_mmap::{MmapAt, kern_minherit, kern_mmap_anon, kern_mprotect, kern_munmap};
 use kern::sys_generic::{TtyOp, TtyReply, kern_tty_ioctl};
 use crate::freebsd_types::{STAT_SIZE, TERMIOS_SIZE, WINSIZE_SIZE, stat_out, termios_in, termios_out, winsize_in, winsize_out};
-use crate::{freebsd_proc, freebsd_vfs};
+use crate::{freebsd_poll, freebsd_proc, freebsd_prot, freebsd_resource, freebsd_vfs};
 
 use crate::arch::sysarch;
 use crate::freebsd_sysctl;
@@ -52,7 +52,16 @@ use crate::freebsd_syscalls::{
     SYS_MAXSYSCALL, SYSCALLNAMES, SYS_copy_file_range, SYS_fpathconf, SYS_lpathconf, SYS_pathconf, SYS_readv,
     SYS_writev, SYS_nanosleep, SYS_clock_nanosleep, SYS_pipe2, SYS_sigreturn, SYS_sigsuspend, SYS_sigpending,
     SYS_setlogin, SYS_getlogin, SYS_revoke, SYS_pread, SYS_pwrite, SYS_getcontext, SYS_setcontext, SYS_swapcontext,
-    SYS_thr_wake, SYS__umtx_op, SYS_rtprio_thread, SYS_exterrctl, SYS_clock_getres, SYS_kenv,
+    SYS_thr_wake, SYS__umtx_op, SYS_rtprio_thread, SYS_exterrctl, SYS_clock_getres, SYS_kenv, SYS_mkdir, SYS_mkdirat,
+    SYS_unlink, SYS_unlinkat, SYS_rmdir, SYS_rename, SYS_renameat, SYS_symlink, SYS_symlinkat, SYS_link, SYS_linkat,
+    SYS_chmod, SYS_fchmod, SYS_lchmod, SYS_fchmodat, SYS_chown, SYS_fchown, SYS_lchown, SYS_fchownat, SYS_utimes,
+    SYS_lutimes, SYS_futimes, SYS_utimensat, SYS_futimens, SYS_truncate, SYS_ftruncate, SYS_fsync, SYS_fdatasync,
+    SYS_flock, SYS_nmount, SYS_unmount, SYS_mkfifo, SYS_mkfifoat, SYS_chflags, SYS_lchflags, SYS_fchflags,
+    SYS_chflagsat, SYS_getrlimit, SYS_setrlimit, SYS_getpriority, SYS_setpriority, SYS_setloginclass, SYS_getloginclass,
+    SYS_setitimer, SYS_getitimer, SYS___realpathat, SYS_close_range, SYS_gettimeofday, SYS_settimeofday,
+    SYS_clock_settime, SYS_poll, SYS_ppoll, SYS_select, SYS_pselect, SYS_setuid, SYS_seteuid, SYS_setgid,
+    SYS_setegid, SYS_setreuid, SYS_setregid, SYS_setresuid, SYS_setresgid, SYS_getresuid, SYS_getresgid,
+    SYS_getgroups, SYS_setgroups,
 };
 
 /// The outcome of one system call.
@@ -95,8 +104,8 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_issetugid => Ok([u64::from(kern_prot::kern_issetugid(p)), 0]).into(),
         SYS_readlink => freebsd_vfs::sys_readlinkat(p, -100, args[0], args[1], args[2]).into(),
         SYS_readlinkat => freebsd_vfs::sys_readlinkat(p, int(0), args[1], args[2], args[3]).into(),
-        SYS_open => freebsd_vfs::sys_openat(p, -100, args[0], int(1)).into(),
-        SYS_openat => freebsd_vfs::sys_openat(p, int(0), args[1], int(2)).into(),
+        SYS_open => freebsd_vfs::sys_openat(p, -100, args[0], int(1), args[2]).into(),
+        SYS_openat => freebsd_vfs::sys_openat(p, int(0), args[1], int(2), args[3]).into(),
         SYS_access => freebsd_vfs::sys_faccessat(p, -100, args[0], int(1), 0).into(),
         SYS_eaccess => freebsd_vfs::sys_faccessat(p, -100, args[0], int(1), 0).into(),
         SYS_faccessat => freebsd_vfs::sys_faccessat(p, int(0), args[1], int(2), int(3)).into(),
@@ -127,6 +136,71 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_pathconf => freebsd_vfs::sys_pathconf(p, Err(args[0]), true, int(1)).into(),
         SYS_lpathconf => freebsd_vfs::sys_pathconf(p, Err(args[0]), false, int(1)).into(),
         SYS_fpathconf => freebsd_vfs::sys_pathconf(p, Ok(int(0)), true, int(1)).into(),
+        SYS_mkdir => freebsd_vfs::sys_mkdirat(p, -100, args[0], args[1]).into(),
+        SYS_mkdirat => freebsd_vfs::sys_mkdirat(p, int(0), args[1], args[2]).into(),
+        SYS_mkfifo => freebsd_vfs::sys_mkfifoat(p, -100, args[0], args[1]).into(),
+        SYS_mkfifoat => freebsd_vfs::sys_mkfifoat(p, int(0), args[1], args[2]).into(),
+        SYS_unlink => freebsd_vfs::sys_unlinkat(p, -100, args[0], 0).into(),
+        SYS_rmdir => freebsd_vfs::sys_unlinkat(p, -100, args[0], 0x800).into(),
+        SYS_unlinkat => freebsd_vfs::sys_unlinkat(p, int(0), args[1], int(2)).into(),
+        SYS_rename => freebsd_vfs::sys_renameat(p, -100, args[0], -100, args[1]).into(),
+        SYS_renameat => freebsd_vfs::sys_renameat(p, int(0), args[1], int(2), args[3]).into(),
+        SYS_symlink => freebsd_vfs::sys_symlinkat(p, args[0], -100, args[1]).into(),
+        SYS_symlinkat => freebsd_vfs::sys_symlinkat(p, args[0], int(1), args[2]).into(),
+        SYS_link => freebsd_vfs::sys_linkat(p, -100, args[0], -100, args[1], 0x400).into(),
+        SYS_linkat => freebsd_vfs::sys_linkat(p, int(0), args[1], int(2), args[3], int(4)).into(),
+        SYS_chmod => freebsd_vfs::sys_chmod(p, -100, args[0], args[1], 0).into(),
+        SYS_lchmod => freebsd_vfs::sys_chmod(p, -100, args[0], args[1], 0x200).into(),
+        SYS_fchmod => freebsd_vfs::sys_chmod(p, int(0), 0, args[1], 0).into(),
+        SYS_fchmodat => freebsd_vfs::sys_chmod(p, int(0), args[1], args[2], int(3)).into(),
+        SYS_chown => freebsd_vfs::sys_chown(p, -100, args[0], args[1], args[2], 0).into(),
+        SYS_lchown => freebsd_vfs::sys_chown(p, -100, args[0], args[1], args[2], 0x200).into(),
+        SYS_fchown => freebsd_vfs::sys_chown(p, int(0), 0, args[1], args[2], 0).into(),
+        SYS_fchownat => freebsd_vfs::sys_chown(p, int(0), args[1], args[2], args[3], int(4)).into(),
+        SYS_utimes => freebsd_vfs::sys_utimes(p, -100, args[0], args[1], true).into(),
+        SYS_lutimes => freebsd_vfs::sys_utimes(p, -100, args[0], args[1], false).into(),
+        SYS_futimes => freebsd_vfs::sys_utimes(p, int(0), 0, args[1], true).into(),
+        SYS_utimensat => freebsd_vfs::sys_utimensat(p, int(0), args[1], args[2], int(3)).into(),
+        SYS_futimens => freebsd_vfs::sys_utimensat(p, int(0), 0, args[1], 0).into(),
+        SYS_truncate => freebsd_vfs::sys_truncate(p, -100, args[0], args[1]).into(),
+        SYS_ftruncate => freebsd_vfs::sys_truncate(p, int(0), 0, args[1]).into(),
+        SYS_chflags => freebsd_vfs::sys_chflags(p, -100, args[0], args[1], 0).into(),
+        SYS_lchflags => freebsd_vfs::sys_chflags(p, -100, args[0], args[1], 0x200).into(),
+        SYS_fchflags => freebsd_vfs::sys_chflags(p, int(0), 0, args[1], 0).into(),
+        SYS_chflagsat => freebsd_vfs::sys_chflags(p, int(0), args[1], args[2], int(3)).into(),
+        SYS_fsync | SYS_fdatasync => freebsd_vfs::sys_fsync(p, int(0)).into(),
+        SYS_flock => freebsd_vfs::sys_flock(p, int(0)).into(),
+        SYS_nmount => freebsd_vfs::sys_nmount(p, args[0], args[1], args[2]).into(),
+        SYS_setuid => freebsd_prot::sys_setuid(p, args[0]).into(),
+        SYS_seteuid => freebsd_prot::sys_seteuid(p, args[0]).into(),
+        SYS_setgid => freebsd_prot::sys_setgid(p, args[0]).into(),
+        SYS_setegid => freebsd_prot::sys_setegid(p, args[0]).into(),
+        SYS_setreuid => freebsd_prot::sys_setreuid(p, args[0], args[1]).into(),
+        SYS_setregid => freebsd_prot::sys_setregid(p, args[0], args[1]).into(),
+        SYS_setresuid => freebsd_prot::sys_setresuid(p, args[0], args[1], args[2]).into(),
+        SYS_setresgid => freebsd_prot::sys_setresgid(p, args[0], args[1], args[2]).into(),
+        SYS_getresuid => freebsd_prot::sys_getres(p, false, [args[0], args[1], args[2]]).into(),
+        SYS_getresgid => freebsd_prot::sys_getres(p, true, [args[0], args[1], args[2]]).into(),
+        SYS_getgroups => freebsd_prot::sys_getgroups(p, args[0], args[1]).into(),
+        SYS_setgroups => freebsd_prot::sys_setgroups(p, args[0], args[1]).into(),
+        SYS_poll => freebsd_poll::sys_poll(p, args[0], args[1], int(2)).into(),
+        SYS_ppoll => freebsd_poll::sys_ppoll(p, args[0], args[1], args[2], args[3]).into(),
+        SYS_select => freebsd_poll::sys_select(p, args).into(),
+        SYS_pselect => freebsd_poll::sys_pselect(p, args).into(),
+        SYS_unmount => freebsd_vfs::sys_unmount(p, args[0]).into(),
+        SYS_getrlimit => freebsd_resource::sys_getrlimit(p, int(0), args[1]).into(),
+        SYS_setrlimit => freebsd_resource::sys_setrlimit(p, int(0), args[1]).into(),
+        SYS_getpriority => freebsd_resource::sys_getpriority(p, int(0), int(1)).into(),
+        SYS_setpriority => freebsd_resource::sys_setpriority(p, int(0), int(1), int(2)).into(),
+        SYS_setloginclass => freebsd_resource::sys_setloginclass(p, args[0]).into(),
+        SYS_getloginclass => freebsd_resource::sys_getloginclass(p, args[0], args[1]).into(),
+        SYS_setitimer => freebsd_resource::sys_setitimer(p, int(0), args[1], args[2]).into(),
+        SYS_getitimer => freebsd_resource::sys_getitimer(p, int(0), args[1]).into(),
+        SYS_gettimeofday => freebsd_resource::sys_gettimeofday(p, args[0], args[1]).into(),
+        SYS_settimeofday => freebsd_resource::sys_settimeofday(p, args[0]).into(),
+        SYS_clock_settime => freebsd_resource::sys_clock_settime(p, int(0), args[1]).into(),
+        SYS___realpathat => freebsd_vfs::sys_realpathat(p, int(0), args[1], args[2], args[3]).into(),
+        SYS_close_range => freebsd_vfs::sys_close_range(p, args[0], args[1], int(2)).into(),
         SYS_clock_getres => sys_clock_getres(p, int(0), args[1]).into(),
         SYS_kenv => sys_kenv(p, int(0), args[1], args[2], int(3)).into(),
         SYS_getcontext => freebsd_proc::sys_getcontext(p, regs, args[0]).into(),
@@ -139,7 +213,7 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         // none to give yet, so the program's buffer stays empty.
         SYS_exterrctl => Ok([0, 0]).into(),
         SYS_pread => sys_generic::kern_pread(p, int(0), args[1], args[2], args[3]).map(|n| [n, 0]).into(),
-        SYS_pwrite => sys_generic::kern_pwrite(p, int(0)).map(|n| [n, 0]).into(),
+        SYS_pwrite => sys_generic::kern_pwrite(p, int(0), args[1], args[2], args[3]).map(|n| [n, 0]).into(),
         SYS_pipe2 => freebsd_proc::sys_pipe2(p, args[0], int(1)).into(),
         SYS_sigreturn => freebsd_proc::sys_sigreturn(p, regs, args[0]),
         SYS_sigsuspend => freebsd_proc::sys_sigsuspend(p, args[0]).into(),
@@ -150,7 +224,7 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_revoke => Ok([0, 0]).into(),
         SYS_nanosleep => sys_clock_nanosleep(p, 0, 0, args[0], args[1]).into(),
         SYS_clock_nanosleep => sys_clock_nanosleep(p, int(0), int(1), args[2], args[3]).into(),
-        SYS_copy_file_range => freebsd_vfs::sys_copy_file_range(p, int(0), int(2)).into(),
+        SYS_copy_file_range => freebsd_vfs::sys_copy_file_range(p, args).into(),
         SYS_thr_self => sys_thr_self(p, args[0]).into(),
         SYS_sigprocmask => sys_sigprocmask(p, int(0), args[1], args[2]).into(),
         SYS_sigaction => sys_sigaction(p, int(0), args[1], args[2]).into(),
@@ -510,6 +584,7 @@ fn sys_ioctl(p: &Proc, fd: i32, cmd: u64, data: u64) -> KResult<[u64; 2]> {
     const TIOCSCTTY: u32 = 0x2000_7461;
     const TIOCNOTTY: u32 = 0x2000_7471;
     const TIOCGSID: u32 = 0x4004_7463;
+    const FIODGNAME: u32 = 0x8010_6678;
     const FIOCLEX: u32 = 0x2000_6601;
     const FIONCLEX: u32 = 0x2000_6602;
     // `u_long` on the wire, but the numbers are 32 bits.
@@ -548,6 +623,19 @@ fn sys_ioctl(p: &Proc, fd: i32, cmd: u64, data: u64) -> KResult<[u64; 2]> {
             p.vm().copyin(data, &mut b).map_err(vm_errno)?;
             let pgid = u32::try_from(i32::from_le_bytes(b)).map_err(|_| Errno::EINVAL)?;
             kern_tty_ioctl(p, fd, TtyOp::SetPgrp(pgid))?;
+        }
+        FIODGNAME => {
+            // struct fiodgname_arg { int len; void *buf; }
+            let mut b = [0u8; 16];
+            p.vm().copyin(data, &mut b).map_err(vm_errno)?;
+            let len = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            let buf = u64::from_le_bytes(b[8..].try_into().map_err(|_| Errno::EFAULT)?);
+            let name = sys_generic::kern_fiodgname(p, fd)?;
+            if usize::try_from(len).map_or(true, |l| l < name.len() + 1) {
+                return Err(Errno::EINVAL);
+            }
+            p.vm().copyout(buf, name).map_err(vm_errno)?;
+            p.vm().copyout(buf + libkern::conv::u64_from_usize(name.len()), &[0]).map_err(vm_errno)?;
         }
         FIONREAD => {
             let n = sys_generic::kern_fionread(p, fd)?;

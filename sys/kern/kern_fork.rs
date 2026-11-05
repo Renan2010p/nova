@@ -35,12 +35,16 @@ pub fn kern_fork(p: &Proc, regs: UserRegs) -> KResult<u32> {
     let child = proc_register(p.fork(vm)?)?;
     let pid = child.pid;
     let comm = child.comm();
+    let me = child.clone();
     let thread = kern_kthread::kthread_add(comm.as_str(), move || {
         subr_trap::userret_loop(&child, regs);
     });
-    if let Err(e) = thread {
-        proc_forget(pid);
-        return Err(e);
+    match thread {
+        Ok(t) => me.tid.store(t.tid(), core::sync::atomic::Ordering::Relaxed),
+        Err(e) => {
+            proc_forget(pid);
+            return Err(e);
+        }
     }
     Ok(pid)
 }

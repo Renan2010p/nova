@@ -298,7 +298,7 @@ pub(crate) fn sys_sigpending(p: &Proc, set: u64) -> KResult<[u64; 2]> {
 }
 
 /// The login name of every session: one for now (`s_login`).
-static LOGIN: framework::sync::MtxSpin<([u8; 33], usize)> = framework::sync::MtxSpin::new(([0; 33], 0));
+pub(crate) static LOGIN: framework::sync::MtxSpin<([u8; 33], usize)> = framework::sync::MtxSpin::new(([0; 33], 0));
 
 /// `setlogin(name)`.
 #[inline(never)] // its buffers stay out of `syscall`'s frame

@@ -50,8 +50,12 @@
 mod arch;
 mod freebsd_errno;
 mod freebsd_exec;
+mod freebsd_kinfo;
 mod freebsd_init;
+mod freebsd_poll;
 mod freebsd_proc;
+mod freebsd_prot;
+mod freebsd_resource;
 mod freebsd_signal;
 mod freebsd_syscalls;
 mod freebsd_sysctl;

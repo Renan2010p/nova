@@ -51,6 +51,7 @@ fn hardclock() {
     if framework::cpu::curcpu() == framework::cpu::CpuId::BSP {
         TICKS.fetch_add(1, Ordering::Relaxed);
         kern_synch::tick_wakeup();
+        crate::kern_resource::itimer_tick();
         crate::tty::tty_poll();
     }
     sched_4bsd::sched_clock();
@@ -95,19 +96,36 @@ pub struct Timespec {
     pub nsec: i64,
 }
 
-/// Reads `clock` (`kern_clock_gettime`).
+/// The wall-clock time at boot (`boottime`), from the RTC.
+static BOOTTIME: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the wall clock from the machine's RTC (`inittodr`), if it has one.
+pub fn inittodr() {
+    if let Some(now) = framework::clock::rtc_gettime() {
+        BOOTTIME.store(now.saturating_sub(uptime_secs()), Ordering::Relaxed);
+    }
+}
+
+/// Sets the wall clock (`settime`, for `clock_settime`).
+pub fn settime(sec: u64) {
+    BOOTTIME.store(sec.saturating_sub(uptime_secs()), Ordering::Relaxed);
+}
+
+/// Reads `clock` (`kern_clock_gettime`): the wall clock is the boot time
+/// the RTC gave plus the uptime.
 ///
-/// TODO(timecounter): a precise timecounter (TSC) instead of ticks, and
-/// wall-clock time from the RTC: until then the clocks count from boot,
-/// in steps of one tick, and the wall clock starts at the Epoch.
+/// TODO(timecounter): a precise timecounter (TSC) instead of ticks: until
+/// then the clocks advance in steps of one tick.
 pub fn kern_clock_gettime(clock: ClockId) -> Timespec {
     let hz = u64::from(hz().max(1));
     let t = ticks();
-    let sec = i64::try_from(t / hz).unwrap_or(i64::MAX);
+    let up = i64::try_from(t / hz).unwrap_or(i64::MAX);
     let nsec = i64::try_from((t % hz) * (1_000_000_000 / hz)).unwrap_or(0);
+    let boot = i64::try_from(BOOTTIME.load(Ordering::Relaxed)).unwrap_or(0);
     match clock {
-        ClockId::Realtime | ClockId::Monotonic => Timespec { sec, nsec },
-        ClockId::Second => Timespec { sec, nsec: 0 },
+        ClockId::Realtime => Timespec { sec: boot + up, nsec },
+        ClockId::Monotonic => Timespec { sec: up, nsec },
+        ClockId::Second => Timespec { sec: boot + up, nsec: 0 },
     }
 }
 
@@ -118,4 +136,9 @@ pub fn kern_clock_getres(clock: ClockId) -> Timespec {
         ClockId::Second => Timespec { sec: 1, nsec: 0 },
         _ => Timespec { sec: 0, nsec: i64::from(1_000_000_000 / hz().max(1)) },
     }
+}
+
+/// The wall-clock time the system booted at, in seconds (`boottime`).
+pub fn boottime() -> u64 {
+    BOOTTIME.load(Ordering::Relaxed)
 }

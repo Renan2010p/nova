@@ -91,6 +91,21 @@ impl Pipe {
         self.len() == 0
     }
 
+    /// Every writer is gone: reads see the end of the file.
+    pub fn writers_gone(&self) -> bool {
+        self.writers.load(Ordering::Acquire) == 0
+    }
+
+    /// Every reader is gone: writes fail.
+    pub fn readers_gone(&self) -> bool {
+        self.readers.load(Ordering::Acquire) == 0
+    }
+
+    /// A write of `PIPE_BUF` bytes would not sleep.
+    pub fn has_room(&self) -> bool {
+        PIPE_SIZE - self.len() >= PIPE_BUF
+    }
+
     /// One end closes (`pipeclose`): the other side is woken, to see the
     /// end of file or the broken pipe.
     pub(crate) fn close(&self, end: PipeEnd) {

@@ -29,6 +29,7 @@ members = [
     "kern",
     "compat/freebsd",
     "fs/freebsd/ufs",
+    "fs/tmpfs",
     "vendor/freebsd/kpi",
     # conf: the kernel binary
     "conf",
@@ -59,6 +60,7 @@ exec_elf = { path = "exec/elf" }
 kern = { path = "kern" }
 compat_freebsd = { path = "compat/freebsd" }
 ufs = { path = "fs/freebsd/ufs" }
+tmpfs = { path = "fs/tmpfs" }
 freebsd_kpi = { path = "vendor/freebsd/kpi" }
 
 [workspace.lints.rust]

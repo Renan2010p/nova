@@ -37,8 +37,9 @@ pub const MAXFILES: usize = 1024;
 /// What an open file is (FreeBSD's `DTYPE_*` and `fileops`).
 #[derive(Clone, Debug)]
 pub enum FileKind {
-    /// The console terminal.
-    Console,
+    /// The console terminal, opened through this device of the device
+    /// file system (its `st_rdev`: `console`, `ttyu0`, ...).
+    Console(u64),
     /// A file of a file system (`DTYPE_VNODE`).
     Vnode(Vnode),
     /// An end of a pipe (`DTYPE_PIPE`).
@@ -192,7 +193,7 @@ pub struct Filedesc {
 impl Filedesc {
     /// A table with the console as descriptors 0, 1 and 2.
     pub fn console() -> KResult<Self> {
-        let cons = File::new(FileKind::Console, FileFlags { read: true, write: true, ..FileFlags::default() })?;
+        let cons = File::new(FileKind::Console(crate::devfs::CONSOLE_DEV), FileFlags { read: true, write: true, ..FileFlags::default() })?;
         let mut files = KVec::with_capacity(3, &M_FILEDESC, M_WAITOK)?;
         for _ in 0..3 {
             files.push(Some(FdEntry { file: cons.clone(), cloexec: false }), M_WAITOK)?;
@@ -287,6 +288,21 @@ impl Filedesc {
         old.map(drop).ok_or(Errno::EBADF)
     }
 
+    /// Closes descriptors `lo..=hi`, or marks them close-on-exec
+    /// (`kern_close_range`).
+    pub fn close_range(&self, lo: usize, hi: usize, cloexec: bool) {
+        let mut files = self.files.lock();
+        for slot in files.iter_mut().skip(lo).take(hi.saturating_sub(lo).saturating_add(1)) {
+            if cloexec {
+                if let Some(e) = slot.as_mut() {
+                    e.cloexec = true;
+                }
+            } else {
+                *slot = None;
+            }
+        }
+    }
+
     /// Closes the descriptors marked close-on-exec (`fdcloseexec`).
     pub fn close_on_exec(&self) {
         let mut files = self.files.lock();
@@ -364,15 +380,15 @@ pub fn file_stat(f: &File) -> KResult<Stat> {
             ..dev(pipe.ino, 0o600)
         }),
         // FreeBSD's /dev/console: crw------- root wheel.
-        FileKind::Console => Ok(Stat {
+        FileKind::Console(rdev) => Ok(Stat {
             dev: 0,
-            ino: 0,
+            ino: *rdev,
             nlink: 1,
             kind: FileType::CharDevice,
             perm: 0o600,
             uid: 0,
             gid: 0,
-            rdev: 0,
+            rdev: *rdev,
             atime: zero,
             mtime: zero,
             ctime: zero,

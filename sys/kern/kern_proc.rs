@@ -77,6 +77,12 @@ impl Comm {
     }
 }
 
+impl fmt::Debug for Comm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
 impl fmt::Display for Comm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -98,10 +104,15 @@ pub struct Proc {
     comm: MtxSpin<Comm>,
     /// The path last executed (`p_textvp`'s name, `kern.proc.pathname`).
     execpath: Mutex<KVec<u8>>,
+    /// The arguments it was executed with, each with its NUL
+    /// (`p_args`, `kern.proc.args`).
+    args: Mutex<KVec<u8>>,
+    /// Its thread's id (`td_tid`), once it has one.
+    pub tid: AtomicU64,
+    /// When it was created, in clock ticks since boot (`p_stats->p_start`).
+    pub start_ticks: u64,
     /// Credentials (`p_ucred`).
-    pub cred: Cred,
-    /// User id (`cr_uid`), as in log messages.
-    pub uid: u32,
+    cred: MtxSpin<Cred>,
     /// Jail id (`pr_id`): 0, the host.
     pub jid: u32,
     /// The address space (`p_vmspace`).
@@ -129,6 +140,14 @@ pub struct Proc {
     pub cwd: MtxSpin<Option<Vnode>>,
     /// File creation mask (`pwd_cmask`).
     pub umask: AtomicU32,
+    /// Resource limits (`p_limit`).
+    pub rlimits: MtxSpin<[crate::kern_resource::Rlimit; crate::kern_resource::NRESOURCES]>,
+    /// Nice value (`p_nice`).
+    pub nice: core::sync::atomic::AtomicI32,
+    /// The real-time interval timer (`p_realtimer`).
+    pub itimer: MtxSpin<crate::kern_resource::Itimer>,
+    /// Login class (`cr_loginclass`), as `setloginclass` set it.
+    pub loginclass: MtxSpin<Comm>,
     /// How it ended, once it has: a zombie (`p_xexit`, `PRS_ZOMBIE`).
     exit: MtxSpin<Option<ExitStatus>>,
 }
@@ -142,17 +161,44 @@ pub enum StopEvent {
     Continued,
 }
 
+/// Most supplementary groups (`NGROUPS`; FreeBSD allows more).
+pub const NGROUPS: usize = 64;
+
 /// Who a process acts as (`struct ucred`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cred {
     /// Real user id.
     pub ruid: u32,
     /// Effective user id.
     pub euid: u32,
+    /// Saved user id.
+    pub svuid: u32,
     /// Real group id.
     pub rgid: u32,
     /// Effective group id.
     pub egid: u32,
+    /// Saved group id.
+    pub svgid: u32,
+    /// Supplementary groups in use.
+    pub ngroups: usize,
+    /// Supplementary groups.
+    pub groups: [u32; NGROUPS],
+}
+
+impl Cred {
+    /// Root, in group wheel (`proc0`'s credentials).
+    pub const ROOT: Cred = Cred { ruid: 0, euid: 0, svuid: 0, rgid: 0, egid: 0, svgid: 0, ngroups: 1, groups: [0; NGROUPS] };
+
+    /// The supplementary groups.
+    pub fn groups(&self) -> &[u32] {
+        self.groups.get(..self.ngroups).unwrap_or(&[])
+    }
+}
+
+impl Default for Cred {
+    fn default() -> Self {
+        Self::ROOT
+    }
 }
 
 /// A process's signal state. One thread per process for now, so the mask
@@ -239,8 +285,10 @@ impl Proc {
             sid: AtomicU32::new(pid),
             comm: MtxSpin::new(Comm::from_path(path)),
             execpath: Mutex::new(path_vec(path.as_bytes())?),
-            cred: Cred::default(),
-            uid: 0,
+            args: Mutex::new(KVec::new(&M_PROC)),
+            tid: AtomicU64::new(0),
+            start_ticks: crate::kern_clock::ticks(),
+            cred: MtxSpin::new(Cred::ROOT),
             jid: 0,
             vm: MtxSpin::new(vm),
             abi: MtxSpin::new(abi),
@@ -252,6 +300,10 @@ impl Proc {
             fd: Filedesc::console()?,
             cwd: MtxSpin::new(crate::vfs_mount::rootvnode()),
             umask: AtomicU32::new(0o022),
+            rlimits: MtxSpin::new(crate::kern_resource::DEFAULT_LIMITS),
+            nice: core::sync::atomic::AtomicI32::new(0),
+            itimer: MtxSpin::new(crate::kern_resource::Itimer { deadline: 0, interval: 0 }),
+            loginclass: MtxSpin::new(Comm::from_path("default")),
             exit: MtxSpin::new(None),
         })
     }
@@ -271,8 +323,10 @@ impl Proc {
             sid: AtomicU32::new(self.sid()),
             comm: MtxSpin::new(self.comm()),
             execpath: Mutex::new(path_vec(&self.execpath.lock())?),
-            cred: self.cred,
-            uid: self.uid,
+            args: Mutex::new(path_vec(&self.args.lock())?),
+            tid: AtomicU64::new(0),
+            start_ticks: crate::kern_clock::ticks(),
+            cred: MtxSpin::new(self.cred()),
             jid: self.jid,
             vm: MtxSpin::new(vm),
             abi: MtxSpin::new(self.abi()),
@@ -284,8 +338,33 @@ impl Proc {
             fd: self.fd.fork()?,
             cwd: MtxSpin::new(*self.cwd.lock()),
             umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
+            rlimits: MtxSpin::new(*self.rlimits.lock()),
+            nice: core::sync::atomic::AtomicI32::new(self.nice.load(Ordering::Relaxed)),
+            // A child has no timer running (`fork1`).
+            itimer: MtxSpin::new(crate::kern_resource::Itimer { deadline: 0, interval: 0 }),
+            loginclass: MtxSpin::new(*self.loginclass.lock()),
             exit: MtxSpin::new(None),
         })
+    }
+
+    /// Credentials (`td_ucred`), as they are now.
+    pub fn cred(&self) -> Cred {
+        *self.cred.lock()
+    }
+
+    /// Changes the credentials with `f` (`proc_set_cred`); its error
+    /// leaves them as they were.
+    pub fn set_cred(&self, f: impl FnOnce(&mut Cred) -> KResult<()>) -> KResult<()> {
+        let mut c = self.cred.lock();
+        let mut new = *c;
+        f(&mut new)?;
+        *c = new;
+        Ok(())
+    }
+
+    /// Effective user id (`cr_uid`), as in log messages.
+    pub fn uid(&self) -> u32 {
+        self.cred.lock().euid
     }
 
     /// Command name (`p_comm`).
@@ -297,6 +376,26 @@ impl Proc {
     pub fn set_comm(&self, path: &str, execpath: KVec<u8>) {
         *self.comm.lock() = Comm::from_path(path);
         *self.execpath.lock() = execpath;
+    }
+
+    /// Keeps the arguments of the image being executed (at most 4 KiB, as
+    /// `kern.ps_arg_cache_limit` does FreeBSD's).
+    pub fn set_args(&self, argv: &[&str]) -> KResult<()> {
+        let mut v = KVec::new(&M_PROC);
+        for a in argv {
+            if v.len() + a.len() + 1 > 4096 {
+                break;
+            }
+            v.extend_from_slice(a.as_bytes(), M_WAITOK)?;
+            v.push(0, M_WAITOK)?;
+        }
+        *self.args.lock() = v;
+        Ok(())
+    }
+
+    /// Calls `f` with the arguments, each NUL-terminated.
+    pub fn with_args<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(&self.args.lock())
     }
 
     /// Calls `f` with the path last executed.
@@ -552,4 +651,88 @@ pub fn kern_getsid(p: &Proc, pid: u32) -> KResult<u32> {
         return Ok(p.sid());
     }
     pfind(pid).map(|q| q.sid()).ok_or(Errno::ESRCH)
+}
+
+/// What a process is doing (`ki_stat`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcState {
+    /// Running or ready to.
+    Run,
+    /// Asleep in the kernel.
+    Sleep,
+    /// Stopped by a signal.
+    Stop,
+    /// Ended, not yet reaped.
+    Zombie,
+}
+
+/// A snapshot of a process, for `ps` (`struct kinfo_proc`, by name).
+#[derive(Clone, Copy, Debug)]
+pub struct ProcInfo {
+    /// Process id.
+    pub pid: u32,
+    /// Parent.
+    pub ppid: u32,
+    /// Process group.
+    pub pgid: u32,
+    /// Session.
+    pub sid: u32,
+    /// Credentials.
+    pub cred: Cred,
+    /// What it is doing.
+    pub state: ProcState,
+    /// Nice value.
+    pub nice: i32,
+    /// Thread id.
+    pub tid: u64,
+    /// Command name.
+    pub comm: Comm,
+    /// Login class.
+    pub loginclass: Comm,
+    /// The controlling terminal's device and foreground group, if its
+    /// session has one.
+    pub tty: Option<(u64, u32)>,
+    /// Address space size and resident bytes.
+    pub vsize: u64,
+    /// Resident bytes.
+    pub rss: u64,
+    /// When it started, in clock ticks since boot.
+    pub start_ticks: u64,
+    /// The ABI it runs under.
+    pub abi_name: &'static str,
+}
+
+impl Proc {
+    /// A snapshot of `self` (`fill_kinfo_proc`).
+    pub fn info(&self) -> ProcInfo {
+        let state = if self.exit_status().is_some() {
+            ProcState::Zombie
+        } else if self.stopped.load(Ordering::Acquire) {
+            ProcState::Stop
+        } else if self.wchan.lock().is_some() {
+            ProcState::Sleep
+        } else {
+            ProcState::Run
+        };
+        let (vsize, rss) = self.vm().sizes();
+        let sid = self.sid();
+        let tty = crate::tty::tty_is_ctty(sid).then(|| (crate::tty::tty_ctty_dev(), crate::tty::tty_fg_pgrp()));
+        ProcInfo {
+            pid: self.pid,
+            ppid: self.ppid(),
+            pgid: self.pgid(),
+            sid,
+            cred: self.cred(),
+            state,
+            nice: self.nice.load(Ordering::Relaxed),
+            tid: self.tid.load(Ordering::Relaxed),
+            comm: self.comm(),
+            loginclass: *self.loginclass.lock(),
+            tty,
+            vsize,
+            rss,
+            start_ticks: self.start_ticks,
+            abi_name: self.abi().name(),
+        }
+    }
 }

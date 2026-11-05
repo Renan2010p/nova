@@ -25,9 +25,9 @@ use sys::errno::{Errno, KResult};
 use crate::kern_descrip::{File, FileFlags, FileKind, Stat, vn_stat};
 use crate::kern_malloc::M_TEMP;
 use crate::kern_proc::Proc;
-use crate::vfs_lookup::{MAXPATHLEN, NAME_MAX, namei};
+use crate::vfs_lookup::{MAXPATHLEN, NAME_MAX, namei, namei_parent};
 use crate::vfs_mount::rootvnode;
-use crate::vnode::{DirEnt, Mount, PathConf, StatFs, VType, Vnode};
+use crate::vnode::{DirEnt, Mount, NewNode, Owner, PathConf, SetAttr, StatFs, VTime, VType, Vnode};
 
 
 /// Where a relative path starts (`AT_FDCWD` or a directory descriptor).
@@ -62,6 +62,8 @@ pub struct OpenFlags {
     pub cloexec: bool,
     /// Non-blocking I/O (`O_NONBLOCK`).
     pub nonblock: bool,
+    /// Permissions of a file created (before the creation mask).
+    pub mode: u16,
 }
 
 /// The root directory, or `ENOENT` without a root file system.
@@ -86,15 +88,17 @@ pub fn namei_at(p: &Proc, at: AtFd, path: &[u8], follow: bool) -> KResult<Vnode>
 
 /// Opens `path` (`kern_openat`); returns the descriptor.
 pub fn kern_openat(p: &Proc, at: AtFd, path: &[u8], flags: OpenFlags) -> KResult<i32> {
-    let vp = match namei_at(p, at, path, !flags.nofollow) {
-        Ok(vp) => vp,
-        // Creating needs a writable file system.
-        Err(Errno::ENOENT) if flags.create => return Err(Errno::EROFS),
+    let (vp, created) = match namei_at(p, at, path, !flags.nofollow) {
+        Ok(vp) => {
+            if flags.create && flags.excl {
+                return Err(Errno::EEXIST);
+            }
+            (vp, false)
+        }
+        // `O_CREAT`: a new regular file, with the creation mask applied.
+        Err(Errno::ENOENT) if flags.create => (create_at(p, at, path, NewNode::File, flags.mode)?, true),
         Err(e) => return Err(e),
     };
-    if flags.create && flags.excl {
-        return Err(Errno::EEXIST);
-    }
     let attr = vp.getattr()?;
     match attr.kind {
         VType::Lnk => return Err(Errno::ELOOP), // O_NOFOLLOW on a link
@@ -111,6 +115,9 @@ pub fn kern_openat(p: &Proc, at: AtFd, path: &[u8], flags: OpenFlags) -> KResult
     };
     if (flags.write || flags.trunc) && vp.mp.rdonly && matches!(kind, FileKind::Vnode(_)) {
         return Err(Errno::EROFS);
+    }
+    if flags.trunc && flags.write && !created && attr.kind == VType::Reg && attr.size > 0 {
+        vp.mp.ops.setattr(vp.ino, &SetAttr { size: Some(0), ..SetAttr::default() })?;
     }
     let file = File::new(
         kind,
@@ -206,11 +213,80 @@ fn name_in(dir: Vnode, child: Vnode, name: &mut [u8; NAME_MAX]) -> KResult<usize
     len.ok_or(Errno::ENOENT)
 }
 
-/// The current directory's path (`kern___getcwd`), found by walking up
-/// through `..` and naming each directory in its parent.
+/// The current directory's path (`kern___getcwd`).
 pub fn kern_getcwd(p: &Proc) -> KResult<KVec<u8>> {
+    let cwd = p.cwd.lock().ok_or(Errno::ENOENT)?;
+    vn_fullpath_dir(cwd)
+}
+
+/// The absolute path of a file without symbolic links (`kern___realpathat`):
+/// the directory holding it, named by walking up, then its name.
+pub fn kern_realpathat(p: &Proc, at: AtFd, path: &[u8]) -> KResult<KVec<u8>> {
+    let vp = namei_at(p, at, path, true)?;
+    if vp.getattr()?.kind == VType::Dir {
+        return vn_fullpath_dir(vp);
+    }
+    // A file: follow links in the last component by hand, so its
+    // directory is known.
+    let mut target = [0u8; MAXPATHLEN];
+    let mut cur_at = at;
+    let mut buf = [0u8; MAXPATHLEN];
+    let mut len = path.len().min(MAXPATHLEN);
+    buf.get_mut(..len).ok_or(Errno::ENAMETOOLONG)?.copy_from_slice(path.get(..len).ok_or(Errno::EINVAL)?);
+    for _ in 0..crate::vfs_lookup::MAXSYMLINKS {
+        let (dir, name) = parent_at_any(p, cur_at, buf.get(..len).unwrap_or(&[]))?;
+        let ino = dir.mp.ops.lookup(dir.ino, name)?;
+        let f = Vnode { mp: dir.mp, ino };
+        if f.getattr()?.kind != VType::Lnk {
+            let mut out = vn_fullpath_dir(dir)?;
+            if &*out != b"/" {
+                out.push(b'/', M_WAITOK)?;
+            }
+            out.extend_from_slice(name, M_WAITOK)?;
+            return Ok(out);
+        }
+        let n = f.mp.ops.readlink(f.ino, &mut target)?;
+        let t = target.get(..n).ok_or(Errno::EIO)?;
+        if t.first() == Some(&b'/') {
+            len = n;
+            buf.get_mut(..n).ok_or(Errno::ENAMETOOLONG)?.copy_from_slice(t);
+        } else {
+            // Relative to the link's directory: its path, then the target.
+            let d = vn_fullpath_dir(dir)?;
+            len = d.len() + 1 + n;
+            if len > MAXPATHLEN {
+                return Err(Errno::ENAMETOOLONG);
+            }
+            buf.get_mut(..d.len()).ok_or(Errno::ENAMETOOLONG)?.copy_from_slice(&d);
+            *buf.get_mut(d.len()).ok_or(Errno::ENAMETOOLONG)? = b'/';
+            buf.get_mut(d.len() + 1..len).ok_or(Errno::ENAMETOOLONG)?.copy_from_slice(t);
+        }
+        cur_at = AtFd::Cwd;
+    }
+    Err(Errno::ELOOP)
+}
+
+/// [`parent_at`] for reading: a read-only file system is fine.
+fn parent_at_any<'p>(p: &Proc, at: AtFd, path: &'p [u8]) -> KResult<(Vnode, &'p [u8])> {
     let root = root()?;
-    let mut cur = p.cwd.lock().ok_or(Errno::ENOENT)?;
+    let dir = if path.first() == Some(&b'/') { root } else { at_dir(p, at)? };
+    namei_parent(root, dir, path)
+}
+
+/// Unmounts what is mounted on `path` (`kern_unmount`): found by its
+/// name in the mount list, as FreeBSD does (`EINVAL` if nothing is);
+/// anything mounted is in use for now (`EBUSY`).
+pub fn kern_unmount(_p: &Proc, path: &[u8]) -> KResult<()> {
+    let mut found = false;
+    crate::vfs_mount::foreach_mount(|mp| found |= mp.on.as_str().as_bytes() == path);
+    if found { Err(Errno::EBUSY) } else { Err(Errno::EINVAL) }
+}
+
+/// The path of a directory, found by walking up through `..` and naming
+/// each directory in its parent (`vn_fullpath`).
+fn vn_fullpath_dir(dir: Vnode) -> KResult<KVec<u8>> {
+    let root = root()?;
+    let mut cur = dir;
     // Built from the end of `buf` towards its start.
     let mut buf = [0u8; MAXPATHLEN];
     let mut start = buf.len();
@@ -284,18 +360,209 @@ pub fn kern_pathconf(p: &Proc, at: Result<i32, &[u8]>, follow: bool, name: PathC
     vp.mp.ops.pathconf(name)
 }
 
-/// Copies between two open files in the kernel (`kern_copy_file_range`):
-/// both must be regular files of a file system, else `EINVAL` (and the
-/// program copies by itself, as `cat` does to a terminal).
-pub fn kern_copy_file_range(p: &Proc, infd: i32, outfd: i32) -> KResult<u64> {
+/// Copies up to `len` bytes between two open files in the kernel
+/// (`kern_copy_file_range`): from `inoff` and to `outoff` if given (the
+/// files' offsets stay), else from and to the files' offsets (which
+/// move). Both must be regular files of a file system, else `EINVAL`
+/// (and the program copies by itself, as `cat` does to a terminal).
+/// Returns the bytes copied, and the new explicit offsets.
+pub fn kern_copy_file_range(
+    p: &Proc,
+    infd: i32,
+    inoff: Option<u64>,
+    outfd: i32,
+    outoff: Option<u64>,
+    len: u64,
+) -> KResult<(u64, u64, u64)> {
     let (inf, outf) = (p.fd.get(infd)?, p.fd.get(outfd)?);
     let (Some(src), Some(dst)) = (inf.kind.vnode(), outf.kind.vnode()) else { return Err(Errno::EINVAL) };
     if src.getattr()?.kind != VType::Reg || dst.getattr()?.kind != VType::Reg {
         return Err(Errno::EINVAL);
     }
-    if !inf.flags.lock().read || !outf.flags.lock().write {
+    let (rf, wf) = (*inf.flags.lock(), *outf.flags.lock());
+    if !rf.read || !wf.write || wf.append {
         return Err(Errno::EBADF);
     }
-    // A writable file cannot be open on a read-only mount.
-    Err(Errno::EROFS)
+    if dst.mp.rdonly {
+        return Err(Errno::EROFS);
+    }
+    let mut ioff = match inoff {
+        Some(o) => o,
+        None => *inf.offset.lock(),
+    };
+    let mut ooff = match outoff {
+        Some(o) => o,
+        None => *outf.offset.lock(),
+    };
+    let mut chunk: KVec<u8> = KVec::with_capacity(4096, &M_TEMP, M_WAITOK)?;
+    for _ in 0..4096 {
+        chunk.push(0, M_WAITOK)?;
+    }
+    let mut done = 0u64;
+    while done < len {
+        let want = usize::try_from((len - done).min(4096)).map_err(|_| Errno::EINVAL)?;
+        let buf = chunk.get_mut(..want).ok_or(Errno::EIO)?;
+        let got = src.read(ioff, buf)?;
+        if got == 0 {
+            break;
+        }
+        let wrote = dst.mp.ops.write(dst.ino, ooff, buf.get(..got).ok_or(Errno::EIO)?)?;
+        let n = u64::try_from(wrote).map_err(|_| Errno::EIO)?;
+        ioff += n;
+        ooff += n;
+        done += n;
+        if wrote < got {
+            break;
+        }
+    }
+    if inoff.is_none() {
+        *inf.offset.lock() = ioff;
+    }
+    if outoff.is_none() {
+        *outf.offset.lock() = ooff;
+    }
+    Ok((done, ioff, ooff))
+}
+
+/// The directory that would hold `path`, and the name in it.
+fn parent_at<'p>(p: &Proc, at: AtFd, path: &'p [u8]) -> KResult<(Vnode, &'p [u8])> {
+    let root = root()?;
+    let dir = if path.first() == Some(&b'/') { root } else { at_dir(p, at)? };
+    let (dir, name) = namei_parent(root, dir, path)?;
+    if dir.mp.rdonly {
+        return Err(Errno::EROFS);
+    }
+    Ok((dir, name))
+}
+
+/// Creates `node` at `path` with permissions `mode` less the creation
+/// mask, owned by the caller (`vn_create`).
+fn create_at(p: &Proc, at: AtFd, path: &[u8], node: NewNode<'_>, mode: u16) -> KResult<Vnode> {
+    let (dir, name) = parent_at(p, at, path)?;
+    let umask = u16::try_from(p.umask.load(core::sync::atomic::Ordering::Relaxed) & 0o777).unwrap_or(0o022);
+    let cred = p.cred();
+    let owner = Owner { uid: cred.euid, gid: cred.egid, perm: mode & 0o7777 & !umask };
+    let ino = dir.mp.ops.create(dir.ino, name, node, owner)?;
+    Ok(Vnode { mp: dir.mp, ino })
+}
+
+/// Makes a directory (`kern_mkdirat`).
+pub fn kern_mkdirat(p: &Proc, at: AtFd, path: &[u8], mode: u16) -> KResult<()> {
+    if namei_at(p, at, path, false).is_ok() {
+        return Err(Errno::EEXIST);
+    }
+    create_at(p, at, path, NewNode::Dir, mode).map(drop)
+}
+
+/// Makes a symbolic link at `path` to `target` (`kern_symlinkat`).
+pub fn kern_symlinkat(p: &Proc, target: &[u8], at: AtFd, path: &[u8]) -> KResult<()> {
+    if namei_at(p, at, path, false).is_ok() {
+        return Err(Errno::EEXIST);
+    }
+    create_at(p, at, path, NewNode::Symlink(target), 0o777).map(drop)
+}
+
+/// Makes a named pipe (`kern_mkfifoat`).
+pub fn kern_mkfifoat(p: &Proc, at: AtFd, path: &[u8], mode: u16) -> KResult<()> {
+    if namei_at(p, at, path, false).is_ok() {
+        return Err(Errno::EEXIST);
+    }
+    create_at(p, at, path, NewNode::Fifo, mode).map(drop)
+}
+
+/// Removes a name (`kern_unlinkat`); with `dir`, an empty directory
+/// (`rmdir`, `AT_REMOVEDIR`).
+pub fn kern_unlinkat(p: &Proc, at: AtFd, path: &[u8], dir: bool) -> KResult<()> {
+    let (parent, name) = parent_at(p, at, path)?;
+    let vp = Vnode { mp: parent.mp, ino: parent.mp.ops.lookup(parent.ino, name)? };
+    let kind = vp.getattr()?.kind;
+    if dir && kind != VType::Dir {
+        return Err(Errno::ENOTDIR);
+    }
+    if !dir && kind == VType::Dir {
+        return Err(Errno::EPERM);
+    }
+    // A mount point, or a mounted file system's root, is busy.
+    if crate::vfs_mount::mounted_here(&vp).is_some() || vp.same(&root()?) {
+        return Err(Errno::EBUSY);
+    }
+    parent.mp.ops.remove(parent.ino, name, dir)
+}
+
+/// Renames `from` to `to` (`kern_renameat`), on one file system
+/// (`EXDEV` otherwise).
+pub fn kern_renameat(p: &Proc, from_at: AtFd, from: &[u8], to_at: AtFd, to: &[u8]) -> KResult<()> {
+    let (fdir, fname) = parent_at(p, from_at, from)?;
+    let (tdir, tname) = parent_at(p, to_at, to)?;
+    if !core::ptr::eq(fdir.mp, tdir.mp) {
+        return Err(Errno::EXDEV);
+    }
+    fdir.mp.ops.lookup(fdir.ino, fname)?;
+    fdir.mp.ops.rename(fdir.ino, fname, tdir.ino, tname)
+}
+
+/// Makes `to` another name for `from` (`kern_linkat`), on one file
+/// system; not for directories.
+pub fn kern_linkat(p: &Proc, from_at: AtFd, from: &[u8], to_at: AtFd, to: &[u8], follow: bool) -> KResult<()> {
+    let vp = namei_at(p, from_at, from, follow)?;
+    if vp.getattr()?.kind == VType::Dir {
+        return Err(Errno::EPERM);
+    }
+    if namei_at(p, to_at, to, false).is_ok() {
+        return Err(Errno::EEXIST);
+    }
+    let (dir, name) = parent_at(p, to_at, to)?;
+    if !core::ptr::eq(dir.mp, vp.mp) {
+        return Err(Errno::EXDEV);
+    }
+    dir.mp.ops.link(dir.ino, name, vp.ino)
+}
+
+/// A file named by a path or by a descriptor, for the calls that change
+/// attributes.
+#[derive(Clone, Copy, Debug)]
+pub enum Target<'a> {
+    /// The file open as this descriptor.
+    Fd(i32),
+    /// The file at this path; `follow` a final symbolic link.
+    Path(AtFd, &'a [u8], bool),
+}
+
+fn target_vnode(p: &Proc, t: Target<'_>) -> KResult<Vnode> {
+    let vp = match t {
+        Target::Fd(fd) => p.fd.get(fd)?.kind.vnode().ok_or(Errno::EINVAL)?,
+        Target::Path(at, path, follow) => namei_at(p, at, path, follow)?,
+    };
+    if vp.mp.rdonly {
+        return Err(Errno::EROFS);
+    }
+    Ok(vp)
+}
+
+/// Changes attributes of a file (`setfmode`, `setfown`, `setutimes`,
+/// `kern_truncate`): as root, any.
+pub fn kern_setattr(p: &Proc, t: Target<'_>, attr: &SetAttr) -> KResult<()> {
+    let vp = target_vnode(p, t)?;
+    if attr.size.is_some() {
+        match vp.getattr()?.kind {
+            VType::Dir => return Err(Errno::EISDIR),
+            VType::Reg => {}
+            _ => return Err(Errno::EINVAL),
+        }
+    }
+    vp.mp.ops.setattr(vp.ino, attr)
+}
+
+/// The time now, as a file time stamp (`vfs_timestamp`).
+pub fn vfs_timestamp() -> VTime {
+    let t = crate::kern_clock::kern_clock_gettime(crate::kern_clock::ClockId::Realtime);
+    VTime { sec: t.sec, nsec: t.nsec }
+}
+
+/// Mounts a file system of type `fstype` on directory `path`
+/// (`kern_nmount`).
+pub fn kern_nmount(p: &Proc, fstype: &str, path: &[u8], rdonly: bool) -> KResult<()> {
+    let vp = namei_at(p, AtFd::Cwd, path, true)?;
+    let path = core::str::from_utf8(path).map_err(|_| Errno::EINVAL)?;
+    crate::vfs_mount::kern_mount(fstype, vp, path, rdonly)
 }

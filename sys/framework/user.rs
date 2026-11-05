@@ -521,6 +521,14 @@ impl VmSpace {
         Ok(child)
     }
 
+    /// Bytes the regions span (`vm_map.size`), and bytes present
+    /// (resident), for `ps`.
+    pub fn sizes(&self) -> (u64, u64) {
+        let map = self.map.lock();
+        let total = map.regions.iter().map(|r| r.end - r.start).sum();
+        (total, u64_from_usize(map.pages.len()) * PAGE)
+    }
+
     /// Copies user memory at `va` into `buf` (`copyin`).
     pub fn copyin(&self, va: u64, buf: &mut [u8]) -> Result<(), VmError> {
         let mut map = self.map.lock();

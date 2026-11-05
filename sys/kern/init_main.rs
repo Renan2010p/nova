@@ -94,6 +94,7 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     kern_clock::initclocks(param.hz);
     mp_start();
     kern_clock::inittimecounter();
+    kern_clock::inittodr();
     framework::cpu::intr_enable();
     release_aps(bootverbose);
 
@@ -103,6 +104,9 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     crate::vfs_mount::vfs_mountroot(boot, &kenv);
     if let Err(e) = kern_kthread::kthread_add("ttysig", || crate::tty::tty_signal_thread()) {
         panic!("cannot start the terminal signal thread: {e:?}");
+    }
+    if let Err(e) = kern_kthread::kthread_add("itimer", || crate::kern_resource::itimer_thread()) {
+        panic!("cannot start the interval timer thread: {e:?}");
     }
     start_init(boot, &kenv, bootverbose);
     swapper(param.hz)
@@ -188,10 +192,13 @@ fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
                     Err(e) => panic!("start_init: cannot create init: {e:?}"),
                 };
                 let regs = image.regs;
-                if let Err(e) = kern_kthread::kthread_add("init", move || {
+                let _ = p.set_args(argv);
+                let me = p.clone();
+                match kern_kthread::kthread_add("init", move || {
                     subr_trap::userret_loop(&p, regs);
                 }) {
-                    panic!("start_init: cannot create init: {e:?}");
+                    Ok(t) => me.tid.store(t.tid(), core::sync::atomic::Ordering::Relaxed),
+                    Err(e) => panic!("start_init: cannot create init: {e:?}"),
                 }
                 return;
             }

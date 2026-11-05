@@ -29,14 +29,24 @@ use sys::errno::{Errno, KResult};
 
 use crate::kern_environment::StaticEnv;
 use crate::printf;
-use crate::vnode::{Mount, Vnode, VfsOps};
+use crate::vnode::{MntName, Mount, Vnode, VfsOps};
+
+/// What a file system is mounted from.
+#[derive(Clone, Copy, Debug)]
+pub enum MountFrom {
+    /// An image in memory (the memory disk).
+    Image(&'static [u8]),
+    /// Nothing: the file system lives in memory (`tmpfs`-like).
+    Nothing,
+}
 
 /// A file system type (`struct vfsconf`).
 pub struct VfsConf {
-    /// Its name, as in `vfs.root.mountfrom` (`vfc_name`).
+    /// Its name, as in `vfs.root.mountfrom` and `mount -t` (`vfc_name`).
     pub name: &'static str,
-    /// Mounts it on a memory image (`vfs_mount`).
-    pub mount: fn(&'static [u8]) -> KResult<&'static dyn VfsOps>,
+    /// Mounts a new instance (`vfs_mount`); `EINVAL` for a source it does
+    /// not take.
+    pub mount: fn(MountFrom) -> KResult<&'static dyn VfsOps>,
 }
 
 /// Most file system types a kernel is built with.
@@ -48,6 +58,9 @@ static DEV: OnceLock<Mount> = OnceLock::new();
 
 /// Most mounts at once.
 const MAX_MOUNTS: usize = 8;
+/// Mounts made by `mount(2)`: one slot each, taken in turn.
+static SLOTS: [OnceLock<Mount>; MAX_MOUNTS] = [const { OnceLock::new() }; MAX_MOUNTS];
+static NEXT_SLOT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// The mounted file systems (`mountlist`), the root first.
 static MOUNTS: MtxSpin<[Option<&'static Mount>; MAX_MOUNTS]> = MtxSpin::new([None; MAX_MOUNTS]);
 
@@ -95,8 +108,8 @@ fn mount_devfs(root: Vnode) {
     let mp = Mount {
         ops: &crate::devfs::DEVFS,
         fstype: "devfs",
-        from: "devfs",
-        on: "/dev",
+        from: MntName::new("devfs"),
+        on: MntName::new("/dev"),
         rdonly: false,
         covered: Some(dir),
         devices: true,
@@ -173,11 +186,49 @@ pub fn vfs_mountroot(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>) {
 }
 
 fn mount_root(vfc: &'static VfsConf, image: &'static [u8]) -> KResult<()> {
-    let ops = (vfc.mount)(image)?;
-    ROOT.set(Mount { ops, fstype: vfc.name, from: MD0, on: "/", rdonly: true, covered: None, devices: false })
-        .map_err(|_| Errno::EBUSY)?;
+    let ops = (vfc.mount)(MountFrom::Image(image))?;
+    let mp = Mount {
+        ops,
+        fstype: vfc.name,
+        from: MntName::new(MD0),
+        on: MntName::new("/"),
+        rdonly: true,
+        covered: None,
+        devices: false,
+    };
+    ROOT.set(mp).map_err(|_| Errno::EBUSY)?;
     let mp = ROOT.get().ok_or(Errno::EIO)?;
     add_mount(mp);
     mount_devfs(Vnode { mp, ino: mp.ops.root() });
+    Ok(())
+}
+
+/// Mounts a new file system of type `fstype` on directory `on`, whose path
+/// is `path` (`vfs_domount`). Only file systems that live in memory may
+/// be mounted for now; `ENODEV` for an unknown type, `EBUSY` if something
+/// is mounted there already.
+pub fn kern_mount(fstype: &str, on: Vnode, path: &str, rdonly: bool) -> KResult<()> {
+    let types = *VFSCONF.lock();
+    let vfc = types.iter().flatten().find(|v| v.name == fstype).ok_or(Errno::ENODEV)?;
+    if on.getattr()?.kind != crate::vnode::VType::Dir {
+        return Err(Errno::ENOTDIR);
+    }
+    if mounted_here(&on).is_some() {
+        return Err(Errno::EBUSY);
+    }
+    let i = NEXT_SLOT.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    let slot = SLOTS.get(i).ok_or(Errno::ENOMEM)?;
+    let ops = (vfc.mount)(MountFrom::Nothing)?;
+    let mp = Mount {
+        ops,
+        fstype: vfc.name,
+        from: MntName::new(vfc.name),
+        on: MntName::new(path),
+        rdonly,
+        covered: Some(on),
+        devices: false,
+    };
+    slot.set(mp).map_err(|_| Errno::EBUSY)?;
+    add_mount(slot.get().ok_or(Errno::EIO)?);
     Ok(())
 }

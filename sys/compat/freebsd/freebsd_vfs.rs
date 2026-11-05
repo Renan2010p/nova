@@ -23,9 +23,12 @@ use kern::kern_proc::Proc;
 use kern::sys_generic::{Whence, kern_lseek};
 use kern::sys_generic::{kern_read, kern_write};
 use kern::vfs_syscalls::{
-    AccessMode, AtFd, OpenFlags, kern_accessat, kern_chdir, kern_copy_file_range, kern_fchdir, kern_getcwd,
-    kern_getdirentries, kern_getfsstat, kern_openat, kern_pathconf, kern_readlinkat, kern_statat, kern_statfs,
+    AccessMode, AtFd, OpenFlags, Target, kern_accessat, kern_chdir, kern_copy_file_range, kern_fchdir, kern_getcwd,
+    kern_getdirentries, kern_getfsstat, kern_linkat, kern_mkdirat, kern_mkfifoat, kern_nmount, kern_openat,
+    kern_pathconf, kern_readlinkat, kern_renameat, kern_setattr, kern_statat, kern_statfs, kern_symlinkat,
+    kern_realpathat, kern_unlinkat, kern_unmount, vfs_timestamp,
 };
+use kern::vnode::{SetAttr, VTime};
 use kern::vnode::{DirEnt, Mount, PathConf, StatFs, VType};
 use libkern::conv::{u64_from_usize, usize_from_u64};
 use sys::errno::{Errno, KResult};
@@ -66,7 +69,7 @@ fn at_fd(fd: i32) -> AtFd {
 
 /// `open(path, flags, mode)` and `openat(fd, path, flags, mode)`.
 #[inline(never)] // its buffers stay out of `syscall`'s frame
-pub(crate) fn sys_openat(p: &Proc, fd: i32, path: u64, flags: i32) -> KResult<[u64; 2]> {
+pub(crate) fn sys_openat(p: &Proc, fd: i32, path: u64, flags: i32, mode: u64) -> KResult<[u64; 2]> {
     const O_ACCMODE: i32 = 3;
     const O_WRONLY: i32 = 1;
     const O_RDWR: i32 = 2;
@@ -96,6 +99,7 @@ pub(crate) fn sys_openat(p: &Proc, fd: i32, path: u64, flags: i32) -> KResult<[u
         nofollow: flags & O_NOFOLLOW != 0,
         cloexec: flags & O_CLOEXEC != 0,
         nonblock: flags & O_NONBLOCK != 0,
+        mode: u16::try_from(mode & 0o7777).unwrap_or(0),
     };
     let fd = kern_openat(p, at_fd(fd), buf.get(..n).unwrap_or(&[]), f)?;
     Ok([u64::from(fd.unsigned_abs()), 0])
@@ -333,7 +337,7 @@ fn statfs_out(s: &StatFs, mp: &Mount) -> [u8; STATFS_SIZE] {
         }
     };
     put(0, &STATFS_VERSION.to_le_bytes());
-    let flags = MNT_LOCAL | if mp.rdonly { MNT_RDONLY } else { 0 } | if mp.on == "/" { MNT_ROOTFS } else { 0 };
+    let flags = MNT_LOCAL | if mp.rdonly { MNT_RDONLY } else { 0 } | if mp.on.as_str() == "/" { MNT_ROOTFS } else { 0 };
     put(8, &flags.to_le_bytes());
     put(16, &s.bsize.to_le_bytes());
     put(24, &s.iosize.to_le_bytes());
@@ -346,8 +350,8 @@ fn statfs_out(s: &StatFs, mp: &Mount) -> [u8; STATFS_SIZE] {
     put(192, &s.fsid.to_le_bytes());
     // Names, NUL-terminated (the array is zeroed).
     put(280, mp.fstype.as_bytes().get(..15).unwrap_or(mp.fstype.as_bytes()));
-    put(296, mp.from.as_bytes());
-    put(1320, mp.on.as_bytes());
+    put(296, mp.from.as_str().as_bytes());
+    put(1320, mp.on.as_str().as_bytes());
     b
 }
 
@@ -430,8 +434,27 @@ pub(crate) fn sys_pathconf(p: &Proc, at: Result<i32, u64>, follow: bool, name: i
 
 /// `copy_file_range(infd, inoffp, outfd, outoffp, len, flags)`.
 #[inline(never)] // its buffers stay out of `syscall`'s frame
-pub(crate) fn sys_copy_file_range(p: &Proc, infd: i32, outfd: i32) -> KResult<[u64; 2]> {
-    Ok([kern_copy_file_range(p, infd, outfd)?, 0])
+pub(crate) fn sys_copy_file_range(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
+    let vm = p.vm();
+    let off = |ptr: u64| -> KResult<Option<u64>> {
+        if ptr == 0 {
+            return Ok(None);
+        }
+        let mut b = [0u8; 8];
+        vm.copyin(ptr, &mut b).map_err(vm_errno)?;
+        Ok(Some(u64::from_le_bytes(b)))
+    };
+    let (inoff, outoff) = (off(args[1])?, off(args[3])?);
+    let infd = libkern::conv::trunc_i32(args[0]);
+    let outfd = libkern::conv::trunc_i32(args[2]);
+    let (n, i, o) = kern_copy_file_range(p, infd, inoff, outfd, outoff, args[4])?;
+    if args[1] != 0 {
+        vm.copyout(args[1], &i.to_le_bytes()).map_err(vm_errno)?;
+    }
+    if args[3] != 0 {
+        vm.copyout(args[3], &o.to_le_bytes()).map_err(vm_errno)?;
+    }
+    Ok([n, 0])
 }
 
 /// Most entries of an I/O vector (`IOV_MAX`).
@@ -468,4 +491,265 @@ pub(crate) fn sys_rwv(p: &Proc, fd: i32, iov: u64, cnt: u64, write: bool) -> KRe
         }
     }
     Ok([total, 0])
+}
+
+/// A path argument, copied in.
+struct PathBuf {
+    buf: [u8; MAXPATHLEN],
+    len: usize,
+}
+
+impl PathBuf {
+    fn get(p: &Proc, addr: u64) -> KResult<Self> {
+        let mut buf = [0u8; MAXPATHLEN];
+        let len = copyinstr(&p.vm(), addr, &mut buf)?;
+        Ok(Self { buf, len })
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.buf.get(..self.len).unwrap_or(&[])
+    }
+}
+
+/// `mkdirat(fd, path, mode)` (and `mkdir`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_mkdirat(p: &Proc, fd: i32, path: u64, mode: u64) -> KResult<[u64; 2]> {
+    let path = PathBuf::get(p, path)?;
+    kern_mkdirat(p, at_fd(fd), path.as_bytes(), u16::try_from(mode & 0o7777).unwrap_or(0))?;
+    Ok([0, 0])
+}
+
+/// `mkfifoat(fd, path, mode)` (and `mkfifo`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_mkfifoat(p: &Proc, fd: i32, path: u64, mode: u64) -> KResult<[u64; 2]> {
+    let path = PathBuf::get(p, path)?;
+    kern_mkfifoat(p, at_fd(fd), path.as_bytes(), u16::try_from(mode & 0o7777).unwrap_or(0))?;
+    Ok([0, 0])
+}
+
+/// `unlinkat(fd, path, flag)` (and `unlink`, `rmdir`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_unlinkat(p: &Proc, fd: i32, path: u64, flag: i32) -> KResult<[u64; 2]> {
+    const AT_REMOVEDIR: i32 = 0x800;
+    let path = PathBuf::get(p, path)?;
+    kern_unlinkat(p, at_fd(fd), path.as_bytes(), flag & AT_REMOVEDIR != 0)?;
+    Ok([0, 0])
+}
+
+/// `renameat(fromfd, from, tofd, to)` (and `rename`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_renameat(p: &Proc, ffd: i32, from: u64, tfd: i32, to: u64) -> KResult<[u64; 2]> {
+    let (from, to) = (PathBuf::get(p, from)?, PathBuf::get(p, to)?);
+    kern_renameat(p, at_fd(ffd), from.as_bytes(), at_fd(tfd), to.as_bytes())?;
+    Ok([0, 0])
+}
+
+/// `symlinkat(target, fd, path)` (and `symlink`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_symlinkat(p: &Proc, target: u64, fd: i32, path: u64) -> KResult<[u64; 2]> {
+    let (target, path) = (PathBuf::get(p, target)?, PathBuf::get(p, path)?);
+    kern_symlinkat(p, target.as_bytes(), at_fd(fd), path.as_bytes())?;
+    Ok([0, 0])
+}
+
+/// `linkat(fd1, path1, fd2, path2, flag)` (and `link`).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_linkat(p: &Proc, fd1: i32, path1: u64, fd2: i32, path2: u64, flag: i32) -> KResult<[u64; 2]> {
+    const AT_SYMLINK_FOLLOW: i32 = 0x400;
+    let (a, b) = (PathBuf::get(p, path1)?, PathBuf::get(p, path2)?);
+    kern_linkat(p, at_fd(fd1), a.as_bytes(), at_fd(fd2), b.as_bytes(), flag & AT_SYMLINK_FOLLOW != 0)?;
+    Ok([0, 0])
+}
+
+/// The file a path or descriptor call changes: `fd` alone if `path` is
+/// 0, else the path from `fd` (`AT_FDCWD` for the plain calls).
+fn with_target<R>(p: &Proc, fd: i32, path: u64, follow: bool, f: impl FnOnce(Target<'_>) -> KResult<R>) -> KResult<R> {
+    if path == 0 {
+        return f(Target::Fd(fd));
+    }
+    let path = PathBuf::get(p, path)?;
+    f(Target::Path(at_fd(fd), path.as_bytes(), follow))
+}
+
+/// `fchmodat(fd, path, mode, flag)`, `chmod`, `lchmod`, `fchmod` (`path`
+/// 0).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_chmod(p: &Proc, fd: i32, path: u64, mode: u64, flag: i32) -> KResult<[u64; 2]> {
+    let a = SetAttr { perm: Some(u16::try_from(mode & 0o7777).unwrap_or(0)), ..SetAttr::default() };
+    with_target(p, fd, path, flag & AT_SYMLINK_NOFOLLOW == 0, |t| kern_setattr(p, t, &a))?;
+    Ok([0, 0])
+}
+
+/// `fchownat(fd, path, uid, gid, flag)`, `chown`, `lchown`, `fchown`:
+/// `-1` leaves an id as it is.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_chown(p: &Proc, fd: i32, path: u64, uid: u64, gid: u64, flag: i32) -> KResult<[u64; 2]> {
+    let id = |v: u64| u32::try_from(v & 0xffff_ffff).ok().filter(|&x| x != u32::MAX);
+    let a = SetAttr { uid: id(uid), gid: id(gid), ..SetAttr::default() };
+    with_target(p, fd, path, flag & AT_SYMLINK_NOFOLLOW == 0, |t| kern_setattr(p, t, &a))?;
+    Ok([0, 0])
+}
+
+/// `utimensat(fd, path, times, flag)` and `futimens(fd, times)`: two
+/// `timespec`s, `UTIME_NOW` and `UTIME_OMIT` allowed; none is "now".
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_utimensat(p: &Proc, fd: i32, path: u64, times: u64, flag: i32) -> KResult<[u64; 2]> {
+    const UTIME_NOW: i64 = -1;
+    const UTIME_OMIT: i64 = -2;
+    let now = vfs_timestamp();
+    let (atime, mtime) = if times == 0 {
+        (Some(now), Some(now))
+    } else {
+        let mut b = [0u8; 32];
+        p.vm().copyin(times, &mut b).map_err(vm_errno)?;
+        let ts = |o: usize| -> KResult<Option<VTime>> {
+            let sec = i64::from_le_bytes(b[o..o + 8].try_into().map_err(|_| Errno::EFAULT)?);
+            let nsec = i64::from_le_bytes(b[o + 8..o + 16].try_into().map_err(|_| Errno::EFAULT)?);
+            match nsec {
+                UTIME_NOW => Ok(Some(now)),
+                UTIME_OMIT => Ok(None),
+                n if (0..1_000_000_000).contains(&n) => Ok(Some(VTime { sec, nsec: n })),
+                _ => Err(Errno::EINVAL),
+            }
+        };
+        (ts(0)?, ts(16)?)
+    };
+    let a = SetAttr { atime, mtime, ..SetAttr::default() };
+    with_target(p, fd, path, flag & AT_SYMLINK_NOFOLLOW == 0, |t| kern_setattr(p, t, &a))?;
+    Ok([0, 0])
+}
+
+/// `utimes(path, times)`, `lutimes`, `futimes` (`path` 0): two
+/// `timeval`s (microseconds); none is "now".
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_utimes(p: &Proc, fd: i32, path: u64, times: u64, follow: bool) -> KResult<[u64; 2]> {
+    let (atime, mtime) = if times == 0 {
+        let now = vfs_timestamp();
+        (now, now)
+    } else {
+        let mut b = [0u8; 32];
+        p.vm().copyin(times, &mut b).map_err(vm_errno)?;
+        let tv = |o: usize| -> KResult<VTime> {
+            let sec = i64::from_le_bytes(b[o..o + 8].try_into().map_err(|_| Errno::EFAULT)?);
+            let usec = i64::from_le_bytes(b[o + 8..o + 16].try_into().map_err(|_| Errno::EFAULT)?);
+            if !(0..1_000_000).contains(&usec) {
+                return Err(Errno::EINVAL);
+            }
+            Ok(VTime { sec, nsec: usec * 1000 })
+        };
+        (tv(0)?, tv(16)?)
+    };
+    let a = SetAttr { atime: Some(atime), mtime: Some(mtime), ..SetAttr::default() };
+    with_target(p, fd, path, follow, |t| kern_setattr(p, t, &a))?;
+    Ok([0, 0])
+}
+
+/// `truncate(path, length)` and `ftruncate(fd, length)` (`path` 0).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_truncate(p: &Proc, fd: i32, path: u64, len: u64) -> KResult<[u64; 2]> {
+    if i64::try_from(len).is_err() {
+        return Err(Errno::EINVAL);
+    }
+    if path == 0 && !p.fd.get(fd)?.flags.lock().write {
+        return Err(Errno::EINVAL);
+    }
+    let a = SetAttr { size: Some(len), ..SetAttr::default() };
+    with_target(p, fd, path, true, |t| kern_setattr(p, t, &a))?;
+    Ok([0, 0])
+}
+
+/// `chflagsat(fd, path, flags, atflag)`, `chflags`, `lchflags`,
+/// `fchflags` (`path` 0).
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_chflags(p: &Proc, fd: i32, path: u64, flags: u64, atflag: i32) -> KResult<[u64; 2]> {
+    let a = SetAttr { flags: Some(u32::try_from(flags & 0xffff_ffff).unwrap_or(0)), ..SetAttr::default() };
+    with_target(p, fd, path, atflag & AT_SYMLINK_NOFOLLOW == 0, |t| kern_setattr(p, t, &a))?;
+    Ok([0, 0])
+}
+
+/// `fsync(fd)`, `fdatasync(fd)`: nothing is cached, so nothing to write
+/// back; the descriptor must be valid.
+pub(crate) fn sys_fsync(p: &Proc, fd: i32) -> KResult<[u64; 2]> {
+    p.fd.get(fd)?;
+    Ok([0, 0])
+}
+
+/// `flock(fd, operation)`: advisory locks always granted, as one process
+/// at a time uses a file for now. TODO(vfs): `vop_advlock`.
+pub(crate) fn sys_flock(p: &Proc, fd: i32) -> KResult<[u64; 2]> {
+    p.fd.get(fd)?;
+    Ok([0, 0])
+}
+
+/// `nmount(iov, iovcnt, flags)`: the `fstype` and `fspath` options of
+/// the `name`/`value` pairs (`from` and the rest are ignored); memory
+/// file systems only for now.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_nmount(p: &Proc, iov: u64, cnt: u64, flags: u64) -> KResult<[u64; 2]> {
+    const MNT_RDONLY: u64 = 0x1;
+    if !cnt.is_multiple_of(2) || cnt > 64 {
+        return Err(Errno::EINVAL);
+    }
+    let vm = p.vm();
+    let mut fstype = [0u8; 16];
+    let mut fstype_len = None;
+    let mut fspath = PathBuf { buf: [0; MAXPATHLEN], len: 0 };
+    let mut have_path = false;
+    let mut name = [0u8; 32];
+    for i in (0..cnt).step_by(2) {
+        let mut v = [0u8; 32];
+        vm.copyin(iov + 16 * i, &mut v).map_err(vm_errno)?;
+        let nbase = u64::from_le_bytes(v[..8].try_into().map_err(|_| Errno::EFAULT)?);
+        let vbase = u64::from_le_bytes(v[16..24].try_into().map_err(|_| Errno::EFAULT)?);
+        let n = copyinstr(&vm, nbase, &mut name).map_err(|_| Errno::EINVAL)?;
+        match &name[..n] {
+            b"fstype" => fstype_len = Some(copyinstr(&vm, vbase, &mut fstype).map_err(|_| Errno::EINVAL)?),
+            b"fspath" => {
+                fspath.len = copyinstr(&vm, vbase, &mut fspath.buf)?;
+                have_path = true;
+            }
+            _ => {}
+        }
+    }
+    let (Some(tlen), true) = (fstype_len, have_path) else { return Err(Errno::EINVAL) };
+    let fstype = core::str::from_utf8(&fstype[..tlen]).map_err(|_| Errno::EINVAL)?;
+    kern_nmount(p, fstype, fspath.as_bytes(), flags & MNT_RDONLY != 0)?;
+    Ok([0, 0])
+}
+
+/// `__realpathat(fd, path, buf, size, flags)`: the path without links,
+/// with its NUL.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_realpathat(p: &Proc, fd: i32, path: u64, buf: u64, size: u64) -> KResult<[u64; 2]> {
+    let path = PathBuf::get(p, path)?;
+    let out = kern_realpathat(p, at_fd(fd), path.as_bytes())?;
+    let need = u64_from_usize(out.len() + 1);
+    if size < need {
+        return Err(Errno::ENAMETOOLONG);
+    }
+    let vm = p.vm();
+    vm.copyout(buf, &out).map_err(vm_errno)?;
+    vm.copyout(buf + need - 1, &[0]).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// `unmount(path, flags)`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
+pub(crate) fn sys_unmount(p: &Proc, path: u64) -> KResult<[u64; 2]> {
+    let path = PathBuf::get(p, path)?;
+    kern_unmount(p, path.as_bytes())?;
+    Ok([0, 0])
+}
+
+/// `close_range(lowfd, highfd, flags)`: `CLOSE_RANGE_CLOEXEC` marks
+/// instead of closing.
+pub(crate) fn sys_close_range(p: &Proc, lo: u64, hi: u64, flags: i32) -> KResult<[u64; 2]> {
+    const CLOSE_RANGE_CLOEXEC: i32 = 1 << 2;
+    if flags & !CLOSE_RANGE_CLOEXEC != 0 || lo > hi {
+        return Err(Errno::EINVAL);
+    }
+    let lo = usize::try_from(lo.min(u64::from(u32::MAX))).unwrap_or(usize::MAX);
+    let hi = usize::try_from(hi.min(u64::from(u32::MAX))).unwrap_or(usize::MAX);
+    p.fd.close_range(lo, hi, flags & CLOSE_RANGE_CLOEXEC != 0);
+    Ok([0, 0])
 }

@@ -30,6 +30,7 @@ fn mi_startup(boot: &framework::BootInfo<'_>) -> ! {
     kern::kern_abi::abi_register(&compat_freebsd::ELF64_FREEBSD_SYSVEC);
     kern::kern_exec::register(&exec_elf::ELF64_ACTIVATOR);
     kern::vfs_mount::vfs_register(&ufs::UFS_VFSCONF);
+    kern::vfs_mount::vfs_register(&tmpfs::TMPFS_VFSCONF);
     kern::init_main::set_init_policy(&compat_freebsd::FREEBSD_INIT);
     kern::init_main::mi_startup(boot)
 }

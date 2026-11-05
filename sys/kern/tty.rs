@@ -68,6 +68,9 @@ struct Tty {
     session: u32,
     /// Its foreground process group (`t_pgrp`); 0: none.
     pgrp: u32,
+    /// The device it was made controlling terminal through (for
+    /// `/dev/tty`).
+    ctty_dev: u64,
 }
 
 static TTY: MtxSpin<Tty> = MtxSpin::new(Tty {
@@ -82,6 +85,7 @@ static TTY: MtxSpin<Tty> = MtxSpin::new(Tty {
     lnext: false,
     session: 0,
     pgrp: 0,
+    ctty_dev: 0,
 });
 
 /// A signal for the foreground group, typed (`Signal::index` + 1; 0:
@@ -348,6 +352,11 @@ pub fn tty_read(p: &Proc, out: &mut [u8]) -> KResult<usize> {
     }
 }
 
+/// Whether a read would not sleep (input, or end of file).
+pub fn tty_readable() -> bool {
+    READY.load(Ordering::Acquire)
+}
+
 /// Bytes ready to be read (`FIONREAD`).
 pub fn tty_nread() -> usize {
     TTY.lock().len
@@ -360,7 +369,7 @@ pub fn tty_is_ctty(sid: u32) -> bool {
 
 /// Makes the console `p`'s controlling terminal (`TIOCSCTTY`): `p` must
 /// lead its session, and the console belong to no other.
-pub fn tty_setctty(p: &Proc) -> KResult<()> {
+pub fn tty_setctty(p: &Proc, dev: u64) -> KResult<()> {
     if p.sid() != p.pid {
         return Err(Errno::EPERM);
     }
@@ -370,6 +379,7 @@ pub fn tty_setctty(p: &Proc) -> KResult<()> {
     }
     t.session = p.sid();
     t.pgrp = p.pgid();
+    t.ctty_dev = dev;
     Ok(())
 }
 
@@ -450,4 +460,14 @@ pub fn tty_getwinsize() -> Winsize {
 /// Sets the terminal's size (`TIOCSWINSZ`).
 pub fn tty_setwinsize(w: &Winsize) {
     TTY.lock().winsize = *w;
+}
+
+/// The device the console was made controlling terminal through.
+pub fn tty_ctty_dev() -> u64 {
+    TTY.lock().ctty_dev
+}
+
+/// The foreground process group of the console (0: none).
+pub fn tty_fg_pgrp() -> u32 {
+    TTY.lock().pgrp
 }

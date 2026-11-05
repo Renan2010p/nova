@@ -239,6 +239,11 @@ pub trait Clock {
     /// Starts the periodic clock interrupt on this CPU at `hz` ticks per
     /// second. Each tick is delivered as [`Interrupt::Clock`].
     fn cpu_initclocks(hz: u32);
+
+    /// The battery-backed real-time clock, in seconds since the Epoch
+    /// (UTC), if the machine has one that reads sanely (FreeBSD's
+    /// `atrtc` on the PC).
+    fn rtc_gettime() -> Option<u64>;
 }
 
 /// An interrupt delivered by the MD layer to the framework.

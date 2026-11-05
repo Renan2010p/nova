@@ -66,3 +66,8 @@ pub(crate) fn clock_intr() {
         hardclock();
     }
 }
+
+/// The machine's real-time clock, in seconds since the Epoch, if any.
+pub fn rtc_gettime() -> Option<u64> {
+    <crate::Md as mdi::Clock>::rtc_gettime()
+}

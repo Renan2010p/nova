@@ -25,8 +25,10 @@
 //! `vfs.root.mountfrom`, as a string. `checklayers` rule R19 keeps file
 //! system names out of every other crate.
 //!
-//! TODO(vfs): writing, a name cache, several mounts (`mount(2)`, mount
-//! points crossed by lookup), devices other than memory disks.
+//! A file system that may be written implements the write operations too
+//! (their default is `EROFS`).
+//!
+//! TODO(vfs): a name cache, unmounting, devices other than memory disks.
 
 use sys::errno::KResult;
 
@@ -108,6 +110,51 @@ pub struct DirEnt<'a> {
     pub next: u64,
 }
 
+/// What [`VfsOps::create`] makes.
+#[derive(Clone, Copy, Debug)]
+pub enum NewNode<'a> {
+    /// A regular file.
+    File,
+    /// A directory.
+    Dir,
+    /// A symbolic link to this target.
+    Symlink(&'a [u8]),
+    /// A named pipe.
+    Fifo,
+}
+
+/// Who owns a new file, and its permissions (`va_uid`, `va_gid`,
+/// `va_mode`).
+#[derive(Clone, Copy, Debug)]
+pub struct Owner {
+    /// Owner.
+    pub uid: u32,
+    /// Group.
+    pub gid: u32,
+    /// Permission bits, the creation mask applied.
+    pub perm: u16,
+}
+
+/// Attributes to change (`struct vattr` for `VOP_SETATTR`): `None` leaves
+/// one as it is.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SetAttr {
+    /// Permission bits.
+    pub perm: Option<u16>,
+    /// Owner.
+    pub uid: Option<u32>,
+    /// Group.
+    pub gid: Option<u32>,
+    /// Size (truncating or extending with zeros).
+    pub size: Option<u64>,
+    /// Last access.
+    pub atime: Option<VTime>,
+    /// Last modification.
+    pub mtime: Option<VTime>,
+    /// File flags.
+    pub flags: Option<u32>,
+}
+
 /// What a file system says of itself (`struct statfs`, the part a file
 /// system fills in).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -155,6 +202,36 @@ pub trait VfsOps: Sync {
     fn readdir(&self, dir: u64, off: u64, f: &mut dyn FnMut(&DirEnt<'_>) -> bool) -> KResult<u64>;
     /// Sizes and counts (`VFS_STATFS`).
     fn statfs(&self) -> StatFs;
+    /// Creates `name` in directory `dir` (`VOP_CREATE`, `VOP_MKDIR`,
+    /// `VOP_SYMLINK`, `VOP_MKNOD`); returns its number. `EEXIST` if the
+    /// name is taken.
+    fn create(&self, _dir: u64, _name: &[u8], _node: NewNode<'_>, _owner: Owner) -> KResult<u64> {
+        Err(sys::errno::Errno::EROFS)
+    }
+    /// Writes `data` at `off`, growing the file as needed; returns the
+    /// bytes written (`VOP_WRITE`).
+    fn write(&self, _ino: u64, _off: u64, _data: &[u8]) -> KResult<usize> {
+        Err(sys::errno::Errno::EROFS)
+    }
+    /// Changes what `attr` gives (`VOP_SETATTR`): permissions, owner,
+    /// size, times, flags.
+    fn setattr(&self, _ino: u64, _attr: &SetAttr) -> KResult<()> {
+        Err(sys::errno::Errno::EROFS)
+    }
+    /// Removes `name` from `dir` (`VOP_REMOVE`; `VOP_RMDIR` with `dir_only`,
+    /// which wants an empty directory and nothing else).
+    fn remove(&self, _dir: u64, _name: &[u8], _dir_only: bool) -> KResult<()> {
+        Err(sys::errno::Errno::EROFS)
+    }
+    /// Renames `from` in `fdir` to `to` in `tdir`, replacing what `to`
+    /// named (`VOP_RENAME`).
+    fn rename(&self, _fdir: u64, _from: &[u8], _tdir: u64, _to: &[u8]) -> KResult<()> {
+        Err(sys::errno::Errno::EROFS)
+    }
+    /// Adds the name `name` in `dir` for file `ino` (`VOP_LINK`).
+    fn link(&self, _dir: u64, _name: &[u8], _ino: u64) -> KResult<()> {
+        Err(sys::errno::Errno::EROFS)
+    }
     /// A limit or option of the file system (`VOP_PATHCONF`); the
     /// default answers what does not depend on the format.
     fn pathconf(&self, name: PathConf) -> KResult<i64> {
@@ -184,6 +261,33 @@ pub enum PathConf {
     AclNfs4,
 }
 
+/// A path a mount keeps (`f_mntonname`, `f_mntfromname`; `MNAMELEN`).
+#[derive(Clone, Copy)]
+pub struct MntName {
+    buf: [u8; 88],
+    len: usize,
+}
+
+impl MntName {
+    /// `s`, cut to 88 bytes at a character boundary.
+    pub fn new(s: &str) -> Self {
+        let mut len = s.len().min(88);
+        while !s.is_char_boundary(len) {
+            len -= 1;
+        }
+        let mut buf = [0u8; 88];
+        if let (Some(d), Some(b)) = (buf.get_mut(..len), s.as_bytes().get(..len)) {
+            d.copy_from_slice(b);
+        }
+        Self { buf, len }
+    }
+
+    /// The path.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.buf.get(..self.len).unwrap_or(&[])).unwrap_or("")
+    }
+}
+
 /// A mounted file system (`struct mount`).
 pub struct Mount {
     /// Its operations.
@@ -191,9 +295,9 @@ pub struct Mount {
     /// The file system's type name (`vfc_name`), as registered.
     pub fstype: &'static str,
     /// What was mounted (`f_mntfromname`), e.g. `/dev/md0`.
-    pub from: &'static str,
+    pub from: MntName,
     /// Where (`f_mntonname`).
-    pub on: &'static str,
+    pub on: MntName,
     /// Read-only.
     pub rdonly: bool,
     /// The directory it is mounted on (`mnt_vnodecovered`); `None` for
@@ -206,7 +310,7 @@ pub struct Mount {
 
 impl core::fmt::Debug for Mount {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Mount").field("fstype", &self.fstype).field("from", &self.from).finish_non_exhaustive()
+        f.debug_struct("Mount").field("fstype", &self.fstype).field("on", &self.on.as_str()).finish_non_exhaustive()
     }
 }
 

@@ -45,6 +45,7 @@ pub fn exit1(p: &Proc, status: ExitStatus) {
         crate::printf!("init died (signal {}, exit {})\n", signo, rval);
         panic!("Going nowhere without my init!");
     }
+    *p.itimer.lock() = crate::kern_resource::Itimer::default();
     p.fd.close_all();
     *p.cwd.lock() = None;
     // A session leader's end leaves its terminal free (`killjobc`).

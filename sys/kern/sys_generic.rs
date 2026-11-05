@@ -39,8 +39,7 @@ pub fn kern_write(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
         return Err(Errno::EBADF);
     }
     match &file.kind {
-        // Opening for writing failed already on a read-only mount.
-        FileKind::Vnode(vp) => return Err(if vp.mp.rdonly { Errno::EROFS } else { Errno::EBADF }),
+        FileKind::Vnode(vp) => return vn_write(p, &file, *vp, buf, nbyte, flags.append),
         FileKind::Null | FileKind::Zero => return Ok(nbyte),
         _ => {}
     }
@@ -55,7 +54,7 @@ pub fn kern_write(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
             return if done > 0 { Ok(done) } else { Err(vm_errno(e)) };
         }
         let wrote = match &file.kind {
-            FileKind::Console => {
+            FileKind::Console(_) => {
                 tty::tty_write(&chunk[..n]);
                 n
             }
@@ -79,6 +78,40 @@ pub fn kern_write(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
     Ok(done)
 }
 
+/// Writes to a file of a file system (`vn_write`): at the file's offset,
+/// or at its end with `O_APPEND`; the offset moves past what was written.
+fn vn_write(p: &Proc, file: &File, vp: crate::vnode::Vnode, buf: u64, nbyte: u64, append: bool) -> KResult<u64> {
+    if vp.mp.rdonly {
+        return Err(Errno::EROFS);
+    }
+    if vp.getattr()?.kind == VType::Dir {
+        return Err(Errno::EISDIR);
+    }
+    let vm = p.vm();
+    let mut off = file.offset.lock();
+    if append {
+        *off = vp.getattr()?.size;
+    }
+    let mut chunk = [0u8; 1024];
+    let mut done = 0u64;
+    while done < nbyte {
+        let n = usize_from_u64((nbyte - done).min(u64_from_usize(chunk.len())));
+        if let Err(e) = vm.copyin(buf + done, &mut chunk[..n]) {
+            return if done > 0 { Ok(done) } else { Err(vm_errno(e)) };
+        }
+        let wrote = match vp.mp.ops.write(vp.ino, *off, &chunk[..n]) {
+            Ok(w) => w,
+            Err(e) => return if done > 0 { Ok(done) } else { Err(e) },
+        };
+        *off += u64_from_usize(wrote);
+        done += u64_from_usize(wrote);
+        if wrote < n {
+            break;
+        }
+    }
+    Ok(done)
+}
+
 /// Reads up to `nbyte` bytes from descriptor `fd` into user address `buf`
 /// (`kern_readv`). Returns the bytes read; 0 at end of file.
 pub fn kern_read(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
@@ -94,7 +127,7 @@ pub fn kern_read(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
     let mut chunk = [0u8; 1024];
     let n = usize_from_u64(nbyte.min(u64_from_usize(chunk.len())));
     let vp = match &file.kind {
-        FileKind::Console => {
+        FileKind::Console(_) => {
             let got = tty::tty_read(p, &mut chunk[..n])?;
             vm.copyout(buf, &chunk[..got]).map_err(vm_errno)?;
             return Ok(u64_from_usize(got));
@@ -180,8 +213,8 @@ pub fn kern_lseek(p: &Proc, fd: i32, offset: i64, whence: Whence) -> KResult<u64
 
 /// The terminal behind `fd`, or `ENOTTY`.
 fn tty_of(file: &File) -> KResult<()> {
-    match file.kind {
-        FileKind::Console => Ok(()),
+    match &file.kind {
+        FileKind::Console(_) => Ok(()),
         _ => Err(Errno::ENOTTY),
     }
 }
@@ -190,7 +223,7 @@ fn tty_of(file: &File) -> KResult<()> {
 pub fn kern_fionread(p: &Proc, fd: i32) -> KResult<u64> {
     let file = p.fd.get(fd)?;
     Ok(match &file.kind {
-        FileKind::Console => u64_from_usize(tty::tty_nread()),
+        FileKind::Console(_) => u64_from_usize(tty::tty_nread()),
         FileKind::Pipe(pipe, _) => u64_from_usize(pipe.len()),
         FileKind::Vnode(vp) => vp.getattr()?.size.saturating_sub(*file.offset.lock()),
         FileKind::Null | FileKind::Zero => 0,
@@ -258,7 +291,11 @@ pub fn kern_tty_ioctl(p: &Proc, fd: i32, op: TtyOp) -> KResult<TtyReply> {
             TtyReply::Done
         }
         TtyOp::SetCtty => {
-            tty::tty_setctty(p)?;
+            let dev = match file.kind {
+                FileKind::Console(d) => d,
+                _ => crate::devfs::CONSOLE_DEV,
+            };
+            tty::tty_setctty(p, dev)?;
             TtyReply::Done
         }
         TtyOp::NotCtty => {
@@ -317,13 +354,118 @@ pub fn kern_pread(p: &Proc, fd: i32, buf: u64, nbyte: u64, offset: u64) -> KResu
     Ok(done)
 }
 
-/// Writes to `fd` at `offset` (`kern_pwrite`): files are read-only for
-/// now, so only the checks.
-pub fn kern_pwrite(p: &Proc, fd: i32) -> KResult<u64> {
+/// Writes to `fd` at `offset`, leaving its offset alone (`kern_pwrite`).
+pub fn kern_pwrite(p: &Proc, fd: i32, buf: u64, nbyte: u64, offset: u64) -> KResult<u64> {
     let file = p.fd.get(fd)?;
     if !file.flags.lock().write {
         return Err(Errno::EBADF);
     }
     let vp = file.kind.vnode().ok_or(Errno::ESPIPE)?;
-    Err(if vp.mp.rdonly { Errno::EROFS } else { Errno::EBADF })
+    if vp.mp.rdonly {
+        return Err(Errno::EROFS);
+    }
+    let vm = p.vm();
+    let mut chunk = [0u8; 1024];
+    let mut done = 0u64;
+    while done < nbyte {
+        let n = usize_from_u64((nbyte - done).min(u64_from_usize(chunk.len())));
+        if let Err(e) = vm.copyin(buf + done, &mut chunk[..n]) {
+            return if done > 0 { Ok(done) } else { Err(vm_errno(e)) };
+        }
+        let wrote = vp.mp.ops.write(vp.ino, offset + done, &chunk[..n])?;
+        done += u64_from_usize(wrote);
+        if wrote < n {
+            break;
+        }
+    }
+    Ok(done)
+}
+
+/// What `poll` asks of, and answers for, one descriptor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools, reason = "the independent POLL* bits")]
+pub struct PollFd {
+    /// The descriptor (negative: ignored).
+    pub fd: i32,
+    /// Wait until it can be read without sleeping.
+    pub read: bool,
+    /// Wait until it can be written without sleeping.
+    pub write: bool,
+    /// Answer: it can be read.
+    pub readable: bool,
+    /// Answer: it can be written.
+    pub writable: bool,
+    /// Answer: the other end is gone (`POLLHUP`).
+    pub hup: bool,
+    /// Answer: not an open descriptor (`POLLNVAL`).
+    pub invalid: bool,
+}
+
+/// Whether `file` can be read and written now, and whether its other
+/// end is gone (`fo_poll`).
+fn file_ready(file: &File) -> (bool, bool, bool) {
+    match &file.kind {
+        FileKind::Console(_) => (tty::tty_readable(), true, false),
+        FileKind::Pipe(pipe, crate::sys_pipe::PipeEnd::Read) => {
+            let hup = pipe.writers_gone();
+            (!pipe.is_empty() || hup, false, hup)
+        }
+        FileKind::Pipe(pipe, crate::sys_pipe::PipeEnd::Write) => {
+            let hup = pipe.readers_gone();
+            (false, pipe.has_room() || hup, hup)
+        }
+        FileKind::Vnode(_) | FileKind::Null | FileKind::Zero => (true, true, false),
+    }
+}
+
+/// Waits until one of `fds` is ready, `timeout_ns` passes (`None`:
+/// forever), or a signal comes (`kern_poll`); returns how many are ready
+/// (their answers filled in). Checked on every clock tick: a wakeup per
+/// file (`selwakeup`) is for later.
+pub fn kern_poll(p: &Proc, fds: &mut [PollFd], timeout_ns: Option<u64>) -> KResult<usize> {
+    let tick = 1_000_000_000 / u64::from(crate::kern_clock::hz().max(1));
+    let mut left = timeout_ns;
+    loop {
+        let mut n = 0;
+        for f in fds.iter_mut() {
+            f.readable = false;
+            f.writable = false;
+            f.hup = false;
+            f.invalid = false;
+            if f.fd < 0 {
+                continue;
+            }
+            match p.fd.get(f.fd) {
+                Ok(file) => {
+                    let (r, w, hup) = file_ready(&file);
+                    f.readable = f.read && r;
+                    f.writable = f.write && w;
+                    f.hup = hup;
+                }
+                Err(_) => f.invalid = true,
+            }
+            if f.readable || f.writable || f.hup || f.invalid {
+                n += 1;
+            }
+        }
+        if n > 0 || left == Some(0) {
+            return Ok(n);
+        }
+        let step = left.map_or(tick, |l| l.min(tick));
+        crate::kern_synch::kern_nanosleep_sig(p, step)?;
+        left = left.map(|l| l.saturating_sub(step));
+    }
+}
+
+/// The name of the device `fd` is open on (`FIODGNAME`, for `ttyname`):
+/// `EINVAL` for anything but a device.
+pub fn kern_fiodgname(p: &Proc, fd: i32) -> KResult<&'static [u8]> {
+    let file = p.fd.get(fd)?;
+    let rdev = match &file.kind {
+        FileKind::Console(d) => *d,
+        FileKind::Null => 4,
+        FileKind::Zero => 6,
+        _ => return Err(Errno::EINVAL),
+    };
+    crate::devfs::devname(rdev).ok_or(Errno::EINVAL)
 }

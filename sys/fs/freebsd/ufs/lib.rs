@@ -38,7 +38,7 @@
 #![forbid(unsafe_code)]
 
 use framework::sync::OnceLock;
-use kern::vfs_mount::VfsConf;
+use kern::vfs_mount::{MountFrom, VfsConf};
 use kern::vnode::{DirEnt, PathConf, StatFs, VAttr, VTime, VType, VfsOps};
 use libkern::conv::{u64_from_usize, usize_from_u64};
 use sys::errno::{Errno, KResult};
@@ -412,7 +412,8 @@ impl VfsOps for Ufs {
 static MOUNT: OnceLock<Ufs> = OnceLock::new();
 
 /// Mounts the UFS2 image `img` (`ffs_mount`), read-only.
-fn ufs_mount(img: &'static [u8]) -> KResult<&'static dyn VfsOps> {
+fn ufs_mount(from: MountFrom) -> KResult<&'static dyn VfsOps> {
+    let MountFrom::Image(img) = from else { return Err(Errno::EINVAL) };
     MOUNT.set(Ufs::new(img)?).map_err(|_| Errno::EBUSY)?;
     let ufs: &'static Ufs = MOUNT.get().ok_or(Errno::EIO)?;
     Ok(ufs)

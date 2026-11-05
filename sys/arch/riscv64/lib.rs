@@ -128,6 +128,10 @@ impl mdi::Clock for Machine {
     fn cpu_initclocks(_: u32) {
         todo("cpu_initclocks")
     }
+
+    fn rtc_gettime() -> Option<u64> {
+        None // TODO(riscv): the RTC device the device tree names
+    }
 }
 
 impl mdi::Context for Machine {

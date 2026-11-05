@@ -17,7 +17,7 @@
 # Environment: MEM (default 512M), CPUS (default 2), VERBOSE=1 (boot -v),
 # SELFTEST=pf|stack, INIT=program (preloaded as /sbin/init, or as
 # INIT_NAME), ROOTFS=1 (a UFS root file system with the host's /rescue,
-# loaded as the memory disk md0, with INIT_PATH, default /rescue/sh, as
+# loaded as the memory disk md0, with INIT_PATH, default /sbin/init, as
 # init; INIT is then not used), SINGLE=1 (boot -s: with
 # INIT_PATH=/rescue/init, FreeBSD's single-user shell), TIMEOUT=secs
 # (stop QEMU after that long; default none), CPU (QEMU CPU model, default
@@ -116,14 +116,14 @@ if [ -n "$ROOTFS" ]; then
 	# they need (tools/mkroot.sh).
 	MFS=$WORK/mfsroot
 	/rescue/sh "$(dirname "$0")/../mkroot.sh" "$MFS"
-	makefs -t ffs -o version=2 -f 64 -b 10% "$ROOT/boot/mfsroot" "$MFS" >/dev/null
+	makefs -t ffs -o version=2 -f 64 -b 10% -F "$MFS.mtree" "$ROOT/boot/mfsroot" "$MFS" >/dev/null
 	cat >> "$ROOT/boot/loader.conf" <<CONF
 mfsroot_load="YES"
 mfsroot_type="md_image"
 mfsroot_name="/boot/mfsroot"
 vfs.root.mountfrom="ufs:/dev/md0"
 CONF
-	echo "init_path=\"${INIT_PATH:-/rescue/sh}\"" >> "$ROOT/boot/loader.conf"
+	echo "init_path=\"${INIT_PATH:-/sbin/init}\"" >> "$ROOT/boot/loader.conf"
 fi
 
 makefs -t ffs -o version=2 -s 128m "$WORK/root.ufs" "$ROOT" >/dev/null

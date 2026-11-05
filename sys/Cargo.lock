@@ -73,6 +73,7 @@ dependencies = [
  "exec_elf",
  "framework",
  "kern",
+ "tmpfs",
  "ufs",
 ]
 
@@ -100,6 +101,16 @@ name = "sys"
 version = "0.1.0"
 dependencies = [
  "libkern",
+]
+
+[[package]]
+name = "tmpfs"
+version = "0.1.0"
+dependencies = [
+ "framework",
+ "kern",
+ "libkern",
+ "sys",
 ]
 
 [[package]]

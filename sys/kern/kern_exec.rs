@@ -210,6 +210,7 @@ pub fn kern_execve_path(p: &Proc, path: &[u8], argv: &[&str], envv: &[&str]) -> 
     let path = core::str::from_utf8(path).map_err(|_| Errno::EINVAL)?;
     let execpath = crate::kern_proc::path_vec(path.as_bytes())?;
     let image = kern_execve(&vp, path, argv, envv)?;
+    p.set_args(argv)?;
     Ok(exec_commit(p, path, execpath, image))
 }
 

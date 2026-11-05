@@ -17,8 +17,8 @@
 //! disk but the kernel's own names for its devices, so the kernel has it
 //! (as Linux has `devtmpfs`).
 //!
-//! The devices: `console`, the console terminal; `tty`, the caller's
-//! controlling terminal; `null` and `zero`.
+//! The devices: `console`, the console terminal (also as `ttyu0` and
+//! `ttyv0`); `tty`, the caller's controlling terminal; `null` and `zero`.
 //!
 //! TODO(devfs): disks, `fd/` (`fdescfs`), `stdin`/`stdout`/`stderr`,
 //! permissions and `devfs.rules`, devices that come and go.
@@ -40,12 +40,19 @@ enum Cdev {
 
 const ROOT: u64 = 2;
 
+/// The device number of `/dev/console`.
+pub const CONSOLE_DEV: u64 = 3;
+
 /// The devices, by name and file number (also their device number).
 const DEVICES: &[(&[u8], u64, Cdev, u16)] = &[
     (b"console", 3, Cdev::Console, 0o600),
     (b"null", 4, Cdev::Null, 0o666),
     (b"tty", 5, Cdev::Tty, 0o666),
     (b"zero", 6, Cdev::Zero, 0o666),
+    // The console under the names `/etc/ttys` uses: the serial line's
+    // and the first virtual terminal's (one terminal for now).
+    (b"ttyu0", 7, Cdev::Console, 0o600),
+    (b"ttyv0", 8, Cdev::Console, 0o600),
 ];
 
 fn device(ino: u64) -> Option<(&'static [u8], Cdev, u16)> {
@@ -144,11 +151,16 @@ impl VfsOps for Devfs {
 pub fn devopen(p: &Proc, ino: u64) -> KResult<FileKind> {
     let (_, cdev, _) = device(ino).ok_or(Errno::ENXIO)?;
     Ok(match cdev {
-        Cdev::Console => FileKind::Console,
+        Cdev::Console => FileKind::Console(ino),
         // `/dev/tty`: the controlling terminal (`cttyopen`), if any.
-        Cdev::Tty if crate::tty::tty_is_ctty(p.sid()) => FileKind::Console,
+        Cdev::Tty if crate::tty::tty_is_ctty(p.sid()) => FileKind::Console(crate::tty::tty_ctty_dev()),
         Cdev::Tty => return Err(Errno::ENXIO),
         Cdev::Null => FileKind::Null,
         Cdev::Zero => FileKind::Zero,
     })
+}
+
+/// The name of device `rdev` (`devtoname`, for `kern.devname`).
+pub fn devname(rdev: u64) -> Option<&'static [u8]> {
+    device(rdev).map(|(n, _, _)| n)
 }

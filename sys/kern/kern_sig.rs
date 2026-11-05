@@ -50,7 +50,7 @@ pub fn sigexit(p: &Proc, sig: Signal) -> ExitStatus {
             p.pid,
             p.comm(),
             p.jid,
-            p.uid,
+            p.uid(),
             p.abi().signals().map_or(0, |s| s.signal_number(sig)),
             if err.is_some() { "no core dump - " } else { "core dumped" },
             err.unwrap_or("")

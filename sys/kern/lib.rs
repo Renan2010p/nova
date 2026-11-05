@@ -51,6 +51,7 @@ pub mod kern_malloc;
 pub mod kern_mib;
 pub mod kern_proc;
 pub mod kern_random;
+pub mod kern_resource;
 pub mod kern_prot;
 pub mod kern_shutdown;
 pub mod kern_sig;

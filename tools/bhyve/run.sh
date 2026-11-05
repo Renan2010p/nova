@@ -23,7 +23,7 @@
 # (preloaded as /sbin/init, which Nova executes as process 1, when there
 # is no root file system), ROOTFS=1 (a UFS root file system holding the
 # host's /rescue, loaded as the memory disk md0, with INIT_PATH, default
-# /rescue/sh, as init; INIT is then not used), SINGLE=1 (boot -s: with
+# /sbin/init, as init; INIT is then not used), SINGLE=1 (boot -s: with
 # INIT_PATH=/rescue/init, FreeBSD's single-user shell).
 #
 # Nova halts like FreeBSD: "Please press any key to reboot." Press a key
@@ -101,13 +101,13 @@ if [ -n "$ROOTFS" ]; then
 	# they need (tools/mkroot.sh).
 	MFS=$ROOT/mfsroot
 	/rescue/sh "$(dirname "$0")/../mkroot.sh" "$MFS"
-	makefs -t ffs -o version=2 -f 64 -b 10% "$ROOT/boot/mfsroot" "$MFS" >/dev/null
+	makefs -t ffs -o version=2 -f 64 -b 10% -F "$MFS.mtree" "$ROOT/boot/mfsroot" "$MFS" >/dev/null
 	cat >> "$ROOT/boot/loader.conf" <<EOF
 mfsroot_load="YES"
 mfsroot_type="md_image"
 mfsroot_name="/boot/mfsroot"
 vfs.root.mountfrom="ufs:/dev/md0"
-init_path="${INIT_PATH:-/rescue/sh}"
+init_path="${INIT_PATH:-/sbin/init}"
 EOF
 fi
 if [ -n "$SELFTEST" ]; then

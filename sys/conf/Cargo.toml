@@ -22,6 +22,7 @@ exec_elf = { workspace = true }
 framework = { workspace = true }
 kern = { workspace = true }
 ufs = { workspace = true }
+tmpfs = { workspace = true }
 
 [lints]
 workspace = true

@@ -41,6 +41,7 @@
 mod db_trace;
 mod exception;
 mod fpu;
+mod rtc;
 mod locore;
 mod machdep;
 pub mod metadata;
@@ -218,6 +219,10 @@ impl mdi::Clock for Machine {
     fn cpu_initclocks(hz: u32) {
         let freq = lapic_calibrate_timer().unwrap_or_else(|e| panic!("local APIC timer: {e:?}"));
         lapic_timer_periodic(trap::APIC_TIMER_INT, freq / hz);
+    }
+
+    fn rtc_gettime() -> Option<u64> {
+        rtc::rtc_gettime()
     }
 }
 

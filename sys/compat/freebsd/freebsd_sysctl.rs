@@ -82,7 +82,13 @@ static NODES: &[Node] = &[
     Node { mib: &[1, 10], name: "kern.hostname", value: Value::Hostname },
     Node { mib: &[1, 18], name: "kern.ngroups", value: Value::Int(|| 1023) },
     Node { mib: &[1, 24], name: "kern.osreldate", value: Value::Int(|| i32::try_from(FREEBSD_VERSION).unwrap_or(0)) },
+    Node { mib: &[1, 9], name: "kern.securelevel", value: Value::Int(|| -1) },
+    Node { mib: &[1, 26], name: "kern.bootfile", value: Value::Str(|b| b.buf_str("/boot/kernel/kernel")) },
     Node { mib: &[1, 33], name: "kern.usrstack", value: Value::Ulong(|| USRSTACK) },
+    // OID_AUTO nodes: numbers from FreeBSD's dynamic range, stable here.
+    Node { mib: &[1, 0x1_0001], name: "kern.pid_max", value: Value::Int(|| 99_999) },
+    // `exp(-1/20)` in `FSCALE` fixed point: how fast %CPU decays.
+    Node { mib: &[1, 0x1_0002], name: "kern.ccpu", value: Value::Int(|| 1948) },
     Node { mib: &[1, 37], name: "kern.arandom", value: Value::Arandom },
     Node { mib: &[6, 1], name: "hw.machine", value: Value::Str(|b| b.buf_str(framework::MACHINE)) },
     Node { mib: &[6, 3], name: "hw.ncpu", value: Value::Int(ncpu) },
@@ -232,6 +238,22 @@ pub(crate) fn sys_sysctl(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     if let [1, 14, 12, pid] = *mib {
         return proc_pathname(p, pid, args[2], args[3]);
     }
+    if let [1, 14, 7, pid] = *mib {
+        return crate::freebsd_kinfo::sysctl_kern_proc_args(p, pid, args[2], args[3]);
+    }
+    if let [1, 14, op, ref rest @ ..] = *mib
+        && op & !0x10 != 7
+        && op & !0x10 <= 8
+        && rest.len() <= 1
+    {
+        return crate::freebsd_kinfo::sysctl_kern_proc(p, op, rest.first().copied(), args[2], args[3]);
+    }
+    if mib == [1, 21] {
+        return reply(p, &boottime(), args[2], args[3]);
+    }
+    if mib == [2, 2] {
+        return reply(p, &loadavg(), args[2], args[3]);
+    }
     let node = find_mib(mib).ok_or_else(|| unknown(p, format_args!("{mib:?}")))?;
     access(p, node, args[2], args[3], args[4], args[5])
 }
@@ -275,6 +297,15 @@ pub(crate) fn sys_sysctlbyname(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     if name == b"kern.msgbuf" {
         return msgbuf(p, args[2], args[3]);
     }
+    if name == b"kern.devname" {
+        return devname(p, args[2], args[3], args[4], args[5]);
+    }
+    if name == b"kern.boottime" {
+        return reply(p, &boottime(), args[2], args[3]);
+    }
+    if name == b"vm.loadavg" {
+        return reply(p, &loadavg(), args[2], args[3]);
+    }
     let node = find_name(name).ok_or_else(|| {
         unknown(p, format_args!("{}", core::str::from_utf8(name).unwrap_or("?")))
     })?;
@@ -304,4 +335,62 @@ fn msgbuf(p: &Proc, old: u64, oldlenp: u64) -> KResult<[u64; 2]> {
     let reported = if old == 0 { len } else { done };
     vm.copyout(oldlenp, &u64_from_usize(reported).to_le_bytes()).map_err(vm_errno)?;
     if old != 0 && done < len { Err(Errno::ENOMEM) } else { Ok([0, 0]) }
+}
+
+/// `kern.devname`: the name of the device number written in (`devname`,
+/// `ttyname`).
+fn devname(p: &Proc, old: u64, oldlenp: u64, new: u64, newlen: u64) -> KResult<[u64; 2]> {
+    if new == 0 || newlen != 8 {
+        return Err(Errno::EINVAL);
+    }
+    let vm = p.vm();
+    let mut b = [0u8; 8];
+    vm.copyin(new, &mut b).map_err(vm_errno)?;
+    let name = kern::devfs::devname(u64::from_le_bytes(b)).ok_or(Errno::ENOENT)?;
+    let mut lenb = [0u8; 8];
+    vm.copyin(oldlenp, &mut lenb).map_err(vm_errno)?;
+    let room = usize_from_u64(u64::from_le_bytes(lenb));
+    let need = name.len() + 1;
+    if old != 0 {
+        if room < need {
+            return Err(Errno::ENOMEM);
+        }
+        vm.copyout(old, name).map_err(vm_errno)?;
+        vm.copyout(old + u64_from_usize(name.len()), &[0]).map_err(vm_errno)?;
+    }
+    vm.copyout(oldlenp, &u64_from_usize(need).to_le_bytes()).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
+/// Answers a read of a sysctl whose value is `data`: its size with no
+/// buffer, else as much as fits (`ENOMEM` if not all).
+pub(crate) fn reply(p: &Proc, data: &[u8], old: u64, oldlenp: u64) -> KResult<[u64; 2]> {
+    let vm = p.vm();
+    if oldlenp == 0 {
+        return Ok([0, 0]);
+    }
+    let mut lenb = [0u8; 8];
+    vm.copyin(oldlenp, &mut lenb).map_err(vm_errno)?;
+    let room = usize_from_u64(u64::from_le_bytes(lenb));
+    let n = if old == 0 { data.len() } else { data.len().min(room) };
+    if old != 0 {
+        vm.copyout(old, data.get(..n).unwrap_or(&[])).map_err(vm_errno)?;
+    }
+    vm.copyout(oldlenp, &u64_from_usize(n).to_le_bytes()).map_err(vm_errno)?;
+    if old != 0 && n < data.len() { Err(Errno::ENOMEM) } else { Ok([0, 0]) }
+}
+
+/// `kern.boottime`: a `struct timeval`.
+fn boottime() -> [u8; 16] {
+    let mut b = [0u8; 16];
+    b[..8].copy_from_slice(&kern::kern_clock::boottime().to_le_bytes());
+    b
+}
+
+/// `vm.loadavg`: a `struct loadavg` (three fixed-point averages and
+/// `FSCALE`). TODO(sched): compute them; they read 0.
+fn loadavg() -> [u8; 24] {
+    let mut b = [0u8; 24];
+    b[16..].copy_from_slice(&2048u64.to_le_bytes());
+    b
 }
