@@ -303,6 +303,7 @@ pub(crate) static LOGIN: framework::sync::MtxSpin<([u8; 33], usize)> = framework
 /// `setlogin(name)`.
 #[inline(never)] // its buffers stay out of `syscall`'s frame
 pub(crate) fn sys_setlogin(p: &Proc, name: u64) -> KResult<[u64; 2]> {
+    kern::vfs_subr::suser(&p.cred())?;
     let mut b = [0u8; 33];
     let n = copyinstr(&p.vm(), name, &mut b).map_err(|e| if e == Errno::ENAMETOOLONG { Errno::EINVAL } else { e })?;
     *LOGIN.lock() = (b, n);

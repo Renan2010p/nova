@@ -101,20 +101,155 @@ pub enum Inherit {
     Zero,
 }
 
+/// Where the pages of a mapped file come from (FreeBSD's pager, behind a
+/// `vm_object`): the kernel's page cache, which the framework knows only
+/// through this interface.
+pub trait Pager: Sync {
+    /// Page `index` (in pages) of object `id`, shared from the cache: for
+    /// a page wholly inside the object. `None` if it cannot be read.
+    fn page(&self, id: u64, index: u64) -> Option<KArc<Frame>>;
+    /// Reads object `id` from `off` into `buf`, as far as the object goes
+    /// (for its last, partial page). False if it cannot be read.
+    fn read(&self, id: u64, off: u64, buf: &mut [u8]) -> bool;
+}
+
+/// A region's file: its pager, the object, where in it the region starts,
+/// and how many bytes of it the region shows (beyond: zeros, as a
+/// program's `bss`).
+#[derive(Clone, Copy)]
+pub struct Backing {
+    /// Where the pages come from.
+    pub pager: &'static dyn Pager,
+    /// The object (file) the pager knows.
+    pub id: u64,
+    /// Offset in the object of the region's first byte (page-aligned).
+    pub offset: u64,
+    /// Bytes of the object from that offset that the region shows.
+    pub len: u64,
+}
+
+impl core::fmt::Debug for Backing {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Backing").field("id", &self.id).field("offset", &self.offset).field("len", &self.len).finish()
+    }
+}
+
 /// A range of the address space that may be used (FreeBSD's
-/// `vm_map_entry`): pages in it are allocated when first touched.
+/// `vm_map_entry`): pages in it come, when first touched, from its file,
+/// or are zeroed.
 #[derive(Clone, Copy, Debug)]
 struct Region {
     start: u64,
     end: u64,
     prot: Prot,
     inherit: Inherit,
+    backing: Option<Backing>,
+}
+
+impl Region {
+    /// An anonymous region.
+    fn anon(start: u64, end: u64, prot: Prot) -> Self {
+        Region { start, end, prot, inherit: Inherit::Copy, backing: None }
+    }
+
+    /// The part from `at` on (`vm_map_clip_start`): its file offset moves
+    /// with it.
+    fn tail(self, at: u64) -> Self {
+        let skip = at.saturating_sub(self.start);
+        let backing = self.backing.map(|b| Backing { offset: b.offset + skip, len: b.len.saturating_sub(skip), ..b });
+        Region { start: at, backing, ..self }
+    }
+}
+
+/// The memory behind a present page: owned, or shared with other spaces
+/// after a `fork`, copy-on-write: read-only until written, when it is
+/// copied (or taken back, if no one else holds it any more).
+enum PageFrame {
+    Own(Frame),
+    Shared(KArc<Frame>),
+    /// Only while being converted, under the map's lock.
+    Moving,
+}
+
+impl PageFrame {
+    fn paddr(&self) -> u64 {
+        match self {
+            PageFrame::Own(f) => f.paddr(),
+            PageFrame::Shared(f) => f.paddr(),
+            PageFrame::Moving => 0,
+        }
+    }
+
+    fn read_bytes(&self, off: usize, buf: &mut [u8]) {
+        match self {
+            PageFrame::Own(f) => f.read_bytes(off, buf),
+            PageFrame::Shared(f) => f.read_bytes(off, buf),
+            PageFrame::Moving => buf.fill(0),
+        }
+    }
+
+    /// Shares the page (`fork`): a reference to its frame, which becomes
+    /// shared here too.
+    fn share(&mut self) -> Result<KArc<Frame>, VmError> {
+        if let PageFrame::Own(_) = self {
+            let PageFrame::Own(f) = core::mem::replace(self, PageFrame::Moving) else { return Err(VmError::NoMemory) };
+            *self = PageFrame::Shared(KArc::new(f, &M_VMSPACE, M_WAITOK)?);
+        }
+        match self {
+            PageFrame::Shared(a) => Ok(a.clone()),
+            _ => Err(VmError::NoMemory),
+        }
+    }
+
+    fn is_shared(&self) -> bool {
+        matches!(self, PageFrame::Shared(_))
+    }
+
+    /// Makes the page this space's own (`vm_fault`'s copy-on-write): the
+    /// shared frame if no one else holds it, else a copy. Returns true if
+    /// it changed (the mapping must be redone).
+    fn make_own(&mut self) -> Result<bool, VmError> {
+        if !self.is_shared() {
+            return Ok(false);
+        }
+        let PageFrame::Shared(shared) = core::mem::replace(self, PageFrame::Moving) else { return Err(VmError::NoMemory) };
+        match KArc::try_unwrap(shared) {
+            // The last holder: no copy.
+            Ok(f) => *self = PageFrame::Own(f),
+            Err(shared) => {
+                let Some(mut copy) = Frame::alloc() else {
+                    *self = PageFrame::Shared(shared);
+                    return Err(VmError::NoMemory);
+                };
+                let mut buf = [0u8; 512];
+                for off in (0..PAGE_SIZE).step_by(buf.len()) {
+                    shared.read_bytes(off, &mut buf);
+                    copy.write_bytes(off, &buf);
+                }
+                *self = PageFrame::Own(copy);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Writes into the page; it must be owned ([`PageFrame::make_own`]).
+    fn write_bytes(&mut self, off: usize, buf: &[u8]) {
+        if let PageFrame::Own(f) = self {
+            f.write_bytes(off, buf);
+        }
+    }
+}
+
+/// The protection a page is mapped with: its region's, without write
+/// while it is shared (copy-on-write).
+fn map_prot(prot: Prot, frame: &PageFrame) -> Prot {
+    Prot { write: prot.write && !frame.is_shared(), ..prot }
 }
 
 /// A page that is present.
 struct Page {
     va: u64,
-    frame: Frame,
+    frame: PageFrame,
     /// In the page tables; false while its region may not be read
     /// (`PROT_NONE`), when touching it must fault.
     mapped: bool,
@@ -198,19 +333,50 @@ impl VmSpace {
         page_range_end(va, len, VM_MAXUSER_ADDRESS, PAGE).ok_or(VmError::Invalid)
     }
 
-    /// Makes `va` present in `map`: allocates, zeroes and maps its page.
-    fn page_in(&self, map: &mut Map, va: u64, prot: Prot) -> Result<usize, VmError> {
+    /// The memory for page `va` of region `r` (`vm_fault`'s page-in):
+    /// its file's page shared from the cache, a private page holding the
+    /// file's last bytes and zeros, or a zeroed page.
+    fn new_frame(r: &Region, va: u64) -> Result<PageFrame, VmError> {
+        if let Some(b) = r.backing {
+            let rel = va - r.start;
+            if rel + PAGE <= b.len {
+                if let Some(f) = b.pager.page(b.id, (b.offset + rel) / PAGE) {
+                    return Ok(PageFrame::Shared(f));
+                }
+                return Err(VmError::Fault);
+            }
+            if rel < b.len {
+                let mut f = Frame::alloc().ok_or(VmError::NoMemory)?;
+                let mut buf = [0u8; 512];
+                let valid = usize_from_u64(b.len - rel);
+                let mut off = 0;
+                while off < valid {
+                    let n = buf.len().min(valid - off);
+                    if !b.pager.read(b.id, b.offset + rel + u64_from_usize(off), &mut buf[..n]) {
+                        return Err(VmError::Fault);
+                    }
+                    f.write_bytes(off, &buf[..n]);
+                    off += n;
+                }
+                return Ok(PageFrame::Own(f));
+            }
+        }
+        Ok(PageFrame::Own(Frame::alloc().ok_or(VmError::NoMemory)?))
+    }
+
+    /// Makes `va` present in `map`, as region `r` says, and maps it.
+    fn page_in(&self, map: &mut Map, va: u64, r: &Region) -> Result<usize, VmError> {
         let at = match map.find_page(va) {
             Ok(i) => return Ok(i),
             Err(at) => at,
         };
         map.pages.reserve(1, M_WAITOK)?;
-        let frame = Frame::alloc().ok_or(VmError::NoMemory)?;
+        let frame = Self::new_frame(r, va)?;
         // SAFETY: `root` is live (we own it); `va` is aligned, in user space
         // and not mapped (not in `pages`), under the lock that serializes
         // changes to `root`; the frame stays in `pages` as long as it is
         // mapped.
-        if !unsafe { Md::pmap_enter_user(self.root, va, frame.paddr(), prot, &mut pt_alloc) } {
+        if !unsafe { Md::pmap_enter_user(self.root, va, frame.paddr(), map_prot(r.prot, &frame), &mut pt_alloc) } {
             return Err(VmError::NoMemory);
         }
         // Room was reserved: this cannot fail after the page is mapped.
@@ -226,9 +392,10 @@ impl VmSpace {
         if map.overlaps(va, end) {
             return Err(VmError::Exists);
         }
-        map.add_region(Region { start: va, end, prot, inherit: Inherit::Copy })?;
+        let r = Region::anon(va, end, prot);
+        map.add_region(r)?;
         for page in (va..end).step_by(PAGE_SIZE) {
-            self.page_in(&mut map, page, prot)?;
+            self.page_in(&mut map, page, &r)?;
         }
         Ok(())
     }
@@ -247,7 +414,7 @@ impl VmSpace {
             MapPlace::Fixed => {
                 let end = Self::check(addr, len)?;
                 self.unmap(addr, len)?;
-                self.map.lock().add_region(Region { start: addr, end, prot, inherit: Inherit::Copy })?;
+                self.map.lock().add_region(Region::anon(addr, end, prot))?;
                 return Ok(addr);
             }
             MapPlace::FixedNoReplace => {
@@ -256,7 +423,7 @@ impl VmSpace {
                 if map.overlaps(addr, end) {
                     return Err(VmError::Exists);
                 }
-                map.add_region(Region { start: addr, end, prot, inherit: Inherit::Copy })?;
+                map.add_region(Region::anon(addr, end, prot))?;
                 return Ok(addr);
             }
             MapPlace::Hint { align_shift } => align_shift,
@@ -278,7 +445,23 @@ impl VmSpace {
             }
         }
         let end = Self::check(start, len)?;
-        map.add_region(Region { start, end, prot, inherit: Inherit::Copy })?;
+        map.add_region(Region::anon(start, end, prot))?;
+        Ok(start)
+    }
+
+    /// Maps `len` bytes of a file as `backing` says, with `prot`, where
+    /// `place` says (`vm_mmap_object`); its pages come from the file when
+    /// first touched, shared from the page cache until written. Returns
+    /// the address. May sleep.
+    pub fn map_backed(&self, addr: u64, len: u64, prot: Prot, place: MapPlace, backing: Backing) -> Result<u64, VmError> {
+        if !backing.offset.is_multiple_of(PAGE) {
+            return Err(VmError::Invalid);
+        }
+        let start = self.map_anon(addr, len, prot, place)?;
+        let mut map = self.map.lock();
+        let i = map.regions.partition_point(|r| r.end <= start);
+        let r = map.regions.get_mut(i).filter(|r| r.start == start).ok_or(VmError::Invalid)?;
+        r.backing = Some(backing);
         Ok(start)
     }
 
@@ -303,7 +486,7 @@ impl VmSpace {
                 i += 1;
             }
             if r.end > end {
-                map.regions.insert(i, Region { start: end, ..r }, M_WAITOK)?;
+                map.regions.insert(i, r.tail(end), M_WAITOK)?;
                 i += 1;
             }
         }
@@ -344,12 +527,12 @@ impl VmSpace {
                 map.regions.insert(i, Region { end: va, ..r }, M_WAITOK)?;
                 i += 1;
             }
-            let mut mid = Region { start: r.start.max(va), end: r.end.min(end), ..r };
+            let mut mid = Region { end: r.end.min(end), ..r.tail(r.start.max(va)) };
             f(&mut mid);
             map.regions.insert(i, mid, M_WAITOK)?;
             i += 1;
             if r.end > end {
-                map.regions.insert(i, Region { start: end, ..r }, M_WAITOK)?;
+                map.regions.insert(i, r.tail(end), M_WAITOK)?;
                 i += 1;
             }
         }
@@ -398,6 +581,7 @@ impl VmSpace {
                 Md::pmap_remove_user(self.root, page.va);
                 page.mapped = false;
                 if prot.read {
+                    let prot = map_prot(prot, &page.frame);
                     if !Md::pmap_enter_user(self.root, page.va, page.frame.paddr(), prot, &mut pt_alloc) {
                         return Err(VmError::NoMemory);
                     }
@@ -423,21 +607,33 @@ impl VmSpace {
             return Err(VmError::Fault);
         }
         if let Ok(i) = map.find_page(page) {
-            // Present: either a genuine protection fault, or a page whose
-            // region was made accessible again after `protect` unmapped it.
+            // Present: a write to a shared page (copy-on-write), a page
+            // whose region was made accessible again after `protect`
+            // unmapped it, or a stale translation (the access is allowed
+            // and the page mapped as it should be: retry).
             let Some(p) = map.pages.get_mut(i) else { return Err(VmError::Fault) };
-            if p.mapped {
-                return Err(VmError::Fault);
+            let broke = write && p.frame.make_own()?;
+            if p.mapped && !broke {
+                return Ok(());
             }
-            // SAFETY: as in `page_in`: `root` live, `page` unmapped (not
-            // `mapped`), the frame owned by `pages`, under the lock.
-            if !unsafe { Md::pmap_enter_user(self.root, page, p.frame.paddr(), r.prot, &mut pt_alloc) } {
-                return Err(VmError::NoMemory);
+            // SAFETY: as in `page_in`: `root` live, `page` aligned in user
+            // space, the frame owned by `pages`, under the lock; a mapping
+            // there is removed first (this CPU's TLB is updated by it).
+            unsafe {
+                if p.mapped {
+                    Md::pmap_remove_user(self.root, page);
+                }
+                if !Md::pmap_enter_user(self.root, page, p.frame.paddr(), map_prot(r.prot, &p.frame), &mut pt_alloc) {
+                    return Err(VmError::NoMemory);
+                }
             }
             p.mapped = true;
+            if broke {
+                self.generation.fetch_add(1, Ordering::AcqRel);
+            }
             return Ok(());
         }
-        self.page_in(&mut map, page, r.prot)?;
+        self.page_in(&mut map, page, &r)?;
         Ok(())
     }
 
@@ -461,7 +657,7 @@ impl VmSpace {
             if (!r.prot.read && !init) || (need_write && !r.prot.write) {
                 return Err(VmError::Fault);
             }
-            self.page_in(map, a, r.prot)?;
+            self.page_in(map, a, &r)?;
             a += PAGE;
         }
         let mut a = va;
@@ -481,41 +677,60 @@ impl VmSpace {
 
     /// A copy of this space for a child process (`vmspace_fork`): each
     /// region as its inheritance says (`minherit`): copied, left out, or
-    /// fresh zeroed memory. May sleep.
+    /// fresh zeroed memory. Copied pages are shared, read-only in both
+    /// spaces, until one writes them (copy-on-write): forking copies no
+    /// memory. May sleep.
     ///
-    /// TODO(vm): copy-on-write, and `Share` really shared (it is copied).
+    /// TODO(vm): `Share` really shared (it is copy-on-write too).
     pub fn fork(&self) -> Result<KArc<VmSpace>, VmError> {
         let child = VmSpace::new()?;
         {
-            let map = self.map.lock();
+            let mut map = self.map.lock();
             let mut cmap = child.map.lock();
             for r in map.regions.iter().filter(|r| r.inherit != Inherit::None) {
                 cmap.regions.push(*r, M_WAITOK)?;
             }
-            let mut buf = [0u8; 512];
-            for page in map.pages.iter() {
-                let Some(r) = map.region(page.va) else { continue };
+            let m = &mut *map;
+            let mut changed = false;
+            for page in m.pages.iter_mut() {
+                let i = m.regions.partition_point(|r| r.end <= page.va);
+                let Some(r) = m.regions.get(i).filter(|r| r.start <= page.va).copied() else { continue };
                 if !matches!(r.inherit, Inherit::Copy | Inherit::Share) {
                     continue;
                 }
                 cmap.pages.reserve(1, M_WAITOK)?;
-                let mut frame = Frame::alloc().ok_or(VmError::NoMemory)?;
-                for off in (0..PAGE_SIZE).step_by(buf.len()) {
-                    page.frame.read_bytes(off, &mut buf);
-                    frame.write_bytes(off, &buf);
+                // The parent's page becomes shared, and read-only if it
+                // was writable.
+                let was_own = !page.frame.is_shared();
+                let shared = page.frame.share()?;
+                if was_own && page.mapped && r.prot.write {
+                    // SAFETY: `root` is live; `va` was mapped by `page_in`
+                    // to this same frame, under this lock; remapped
+                    // read-only (this CPU's TLB updated).
+                    unsafe {
+                        Md::pmap_remove_user(self.root, page.va);
+                        if !Md::pmap_enter_user(self.root, page.va, page.frame.paddr(), map_prot(r.prot, &page.frame), &mut pt_alloc) {
+                            return Err(VmError::NoMemory);
+                        }
+                    }
+                    changed = true;
                 }
-                // As the parent's page: unmapped while its region may not
-                // be read.
-                let mapped = page.mapped;
-                // SAFETY: `child.root` is live (we own it); `page.va` is
-                // aligned, in user space and not mapped in the child (pages
-                // are copied once each, in order), under the child's map
-                // lock; the frame stays in `pages` as long as it is mapped.
-                if mapped && !unsafe { Md::pmap_enter_user(child.root, page.va, frame.paddr(), r.prot, &mut pt_alloc) } {
+                let frame = PageFrame::Shared(shared);
+                let (va, mapped) = (page.va, page.mapped);
+                // SAFETY: `child.root` is live (we own it); `va` is aligned,
+                // in user space and not mapped in the child (pages come
+                // once each, in order), under the child's map lock; the
+                // frame stays in `pages` as long as it is mapped.
+                if mapped && !unsafe { Md::pmap_enter_user(child.root, va, frame.paddr(), map_prot(r.prot, &frame), &mut pt_alloc) } {
                     return Err(VmError::NoMemory);
                 }
                 // Room was reserved, and pages come in address order.
-                cmap.pages.push(Page { va: page.va, frame, mapped }, M_WAITOK)?;
+                cmap.pages.push(Page { va, frame, mapped }, M_WAITOK)?;
+            }
+            if changed {
+                // Other CPUs that ran this space reload it (stale writable
+                // translations).
+                self.generation.fetch_add(1, Ordering::AcqRel);
             }
         }
         Ok(child)
@@ -551,6 +766,32 @@ impl VmSpace {
 
     fn write(&self, va: u64, buf: &[u8], need_write: bool) -> Result<(), VmError> {
         let mut map = self.map.lock();
+        // Shared pages in the range become this space's own first, as a
+        // write by the program would make them.
+        let end = range_end(va, u64_from_usize(buf.len()), VM_MAXUSER_ADDRESS).ok_or(VmError::Fault)?;
+        let mut a = va & !(PAGE - 1);
+        while a < end {
+            if let Ok(i) = map.find_page(a) {
+                let prot = map.region(a).map(|r| r.prot);
+                if let (Some(p), Some(prot)) = (map.pages.get_mut(i), prot)
+                    && p.frame.make_own()?
+                    && p.mapped
+                {
+                    {
+                        // SAFETY: as in `fault`: the page was mapped to
+                        // the shared frame; remapped to its own copy.
+                        unsafe {
+                            Md::pmap_remove_user(self.root, a);
+                            if !Md::pmap_enter_user(self.root, a, p.frame.paddr(), map_prot(prot, &p.frame), &mut pt_alloc) {
+                                return Err(VmError::NoMemory);
+                            }
+                        }
+                        self.generation.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
+            }
+            a += PAGE;
+        }
         self.each_page(&mut map, va, buf.len(), need_write, !need_write, |p, off, done, n| {
             p.frame.write_bytes(off, &buf[done..done + n]);
         })

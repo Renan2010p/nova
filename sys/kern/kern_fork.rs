@@ -31,8 +31,25 @@ use crate::{kern_kthread, subr_trap};
 /// Forks `p` (`fork1`); the child starts in user mode with `regs`.
 /// Returns the child's pid.
 pub fn kern_fork(p: &Proc, regs: UserRegs) -> KResult<u32> {
+    fork1(p, regs, false)
+}
+
+/// Forks `p` with a process descriptor for the child (`pdfork`): returns
+/// the child's pid and the descriptor's number.
+pub fn kern_pdfork(p: &Proc, regs: UserRegs, daemon: bool, cloexec: bool) -> KResult<(u32, i32)> {
+    let pid = fork1(p, regs, true)?;
+    let pd = crate::sys_procdesc::ProcDesc::new(pid, daemon);
+    let pd = framework::mm::KArc::new(pd, &crate::kern_malloc::M_TEMP, framework::mm::M_WAITOK)?;
+    let file = crate::kern_descrip::File::new(crate::kern_descrip::FileKind::ProcDesc(pd), crate::kern_descrip::FileFlags::default())?;
+    let fd = p.fd.alloc(file, 0, cloexec)?;
+    Ok((pid, fd))
+}
+
+fn fork1(p: &Proc, regs: UserRegs, procdesc: bool) -> KResult<u32> {
     let vm = p.vm().fork().map_err(vm_errno)?;
-    let child = proc_register(p.fork(vm)?)?;
+    let child = p.fork(vm)?;
+    child.procdesc.store(procdesc, core::sync::atomic::Ordering::Release);
+    let child = proc_register(child)?;
     let pid = child.pid;
     let comm = child.comm();
     let me = child.clone();

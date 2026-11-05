@@ -89,6 +89,32 @@ pub enum Errno {
     ENOTEMPTY,
     /// Cross-device link.
     EXDEV,
+    /// Socket operation on non-socket.
+    ENOTSOCK,
+    /// Destination address required.
+    EDESTADDRREQ,
+    /// Message too long.
+    EMSGSIZE,
+    /// Protocol wrong type for socket.
+    EPROTOTYPE,
+    /// Protocol not available.
+    ENOPROTOOPT,
+    /// Protocol not supported.
+    EPROTONOSUPPORT,
+    /// Operation not supported.
+    EOPNOTSUPP,
+    /// Address family not supported by protocol family.
+    EAFNOSUPPORT,
+    /// Address already in use.
+    EADDRINUSE,
+    /// No buffer space available.
+    ENOBUFS,
+    /// Socket is already connected.
+    EISCONN,
+    /// Socket is not connected.
+    ENOTCONN,
+    /// Connection refused.
+    ECONNREFUSED,
     /// Not an error a program sees: the system call is restarted, as a
     /// signal whose handler has `SA_RESTART` interrupted it (FreeBSD's
     /// kernel-only `ERESTART`).

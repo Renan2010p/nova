@@ -87,10 +87,55 @@ struct Loaded {
     entry: u64,
 }
 
-/// Maps the `PT_LOAD` segments of `ehdr` at `bias` plus their addresses,
-/// with their protections merged where they share a page, and fills them
-/// from `file` (`__elfN(load_sections)`).
+/// Maps the `PT_LOAD` segments of `ehdr` at `bias` plus their addresses
+/// (`__elfN(load_sections)`): from the page cache when the file has one
+/// and no two segments share a page (`vm_mmap_object` per segment, pages
+/// read when touched), else copied.
 fn load_segments(vm: &VmSpace, head: &[u8], ehdr: &Ehdr, file: &dyn ImageFile, bias: u64) -> KResult<Loaded> {
+    if let Some(l) = map_segments(vm, head, ehdr, file, bias)? {
+        return Ok(l);
+    }
+    copy_segments(vm, head, ehdr, file, bias)
+}
+
+/// Maps each `PT_LOAD` segment from the file's pages, if it can: `None`
+/// if the file has no page cache, a segment is not page-congruent with
+/// its file offset, or two segments share a page.
+fn map_segments(vm: &VmSpace, head: &[u8], ehdr: &Ehdr, file: &dyn ImageFile, bias: u64) -> KResult<Option<Loaded>> {
+    let page = u64_from_usize(PAGE_SIZE);
+    let size = file.size()?;
+    let mut last_end = 0;
+    let mut phdr = 0;
+    // First check every segment; nothing is mapped until all can be.
+    for ph in phdrs(head, ehdr).filter(|ph| ph.kind == PT_LOAD) {
+        let start = ph.vaddr.checked_add(bias).ok_or(Errno::ENOEXEC)?;
+        let end = start.checked_add(ph.memsz).filter(|&e| e <= VM_MAXUSER_ADDRESS).ok_or(Errno::ENOEXEC)?;
+        if ph.filesz > ph.memsz || ph.offset.checked_add(ph.filesz).is_none_or(|e| e > size) {
+            return Err(Errno::ENOEXEC);
+        }
+        if start % page != ph.offset % page || (start & !(page - 1)) < last_end || file.backing(0, 0).is_none() {
+            return Ok(None);
+        }
+        last_end = end.next_multiple_of(page);
+        if (ph.offset..ph.offset + ph.filesz).contains(&ehdr.phoff) {
+            phdr = start + (ehdr.phoff - ph.offset);
+        }
+    }
+    for ph in phdrs(head, ehdr).filter(|ph| ph.kind == PT_LOAD) {
+        let start = ph.vaddr + bias;
+        let base = start & !(page - 1);
+        let delta = start - base;
+        let prot = Prot { read: true, write: ph.flags & PF_W != 0, exec: ph.flags & PF_X != 0 };
+        let b = file.backing(ph.offset - delta, delta + ph.filesz).ok_or(Errno::ENOEXEC)?;
+        let len = (start + ph.memsz).next_multiple_of(page) - base;
+        vm.map_backed(base, len, prot, MapPlace::FixedNoReplace, b).map_err(vm_errno)?;
+    }
+    Ok(Some(Loaded { phdr, entry: ehdr.entry.wrapping_add(bias) }))
+}
+
+/// Copies the segments in, page by page, with their protections merged
+/// where they share a page.
+fn copy_segments(vm: &VmSpace, head: &[u8], ehdr: &Ehdr, file: &dyn ImageFile, bias: u64) -> KResult<Loaded> {
     let size = file.size()?;
     let page = u64_from_usize(PAGE_SIZE);
     let mut pages: KVec<(u64, Prot)> = KVec::new(&M_EXEC);

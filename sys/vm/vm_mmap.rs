@@ -66,6 +66,23 @@ pub fn kern_mmap_anon(vm: &VmSpace, at: MmapAt, len: u64, prot: Prot) -> KResult
     })
 }
 
+/// Maps `len` bytes of a file, as `backing` says (`kern_mmap` with a
+/// descriptor): its pages come from the page cache when touched.
+pub fn kern_mmap_backed(vm: &VmSpace, at: MmapAt, len: u64, prot: Prot, backing: framework::user::Backing) -> KResult<u64> {
+    if len == 0 {
+        return Err(Errno::EINVAL);
+    }
+    let r = match at {
+        MmapAt::Hint { addr, align_shift } => vm.map_backed(addr & !0xfff, len, prot, MapPlace::Hint { align_shift }, backing),
+        MmapAt::Fixed(addr) => vm.map_backed(addr, len, prot, MapPlace::Fixed, backing),
+        MmapAt::FixedNoReplace(addr) => vm.map_backed(addr, len, prot, MapPlace::FixedNoReplace, backing),
+    };
+    r.map_err(|e| match e {
+        VmError::NoMemory => Errno::ENOMEM,
+        other => vm_errno(other),
+    })
+}
+
 /// Removes mappings (`kern_munmap`).
 pub fn kern_munmap(vm: &VmSpace, addr: u64, len: u64) -> KResult<()> {
     if len == 0 {

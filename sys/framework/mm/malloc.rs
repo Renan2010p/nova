@@ -450,6 +450,24 @@ impl<T> KArc<T> {
         a.ptr == b.ptr
     }
 
+    /// The value, if `this` is its only reference (`Arc::try_unwrap`);
+    /// `this` back otherwise. The heap memory is freed.
+    pub fn try_unwrap(this: Self) -> Result<T, Self> {
+        if this.inner().count.compare_exchange(1, 0, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            return Err(this);
+        }
+        let this = core::mem::ManuallyDrop::new(this);
+        let mtype = this.inner().mtype;
+        // SAFETY: the count went from 1 to 0, so no other reference exists
+        // or can appear: the value is moved out once, and the memory freed
+        // once without dropping it again (`this` is not dropped).
+        unsafe {
+            let value = ptr::read(&raw const (*this.ptr.as_ptr()).value);
+            free(this.ptr.cast(), Layout::new::<ArcInner<T>>(), mtype);
+            Ok(value)
+        }
+    }
+
     fn inner(&self) -> &ArcInner<T> {
         // SAFETY: alive while any reference, such as `self`, exists.
         unsafe { self.ptr.as_ref() }

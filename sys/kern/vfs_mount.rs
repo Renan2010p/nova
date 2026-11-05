@@ -102,7 +102,7 @@ pub fn covered(vp: &Vnode) -> Option<Vnode> {
 /// Mounts the device file system on `/dev`, as FreeBSD's
 /// `vfs_mountroot` does, if the root has that directory.
 fn mount_devfs(root: Vnode) {
-    let Ok(dir) = crate::vfs_lookup::namei(root, root, b"/dev", true) else { return };
+    let Ok(dir) = crate::vfs_lookup::namei(root, root, b"/dev", true, &crate::kern_proc::Cred::ROOT) else { return };
     if dir.getattr().map(|a| a.kind) != Ok(crate::vnode::VType::Dir) {
         return;
     }

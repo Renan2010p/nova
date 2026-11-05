@@ -73,6 +73,12 @@ pub trait ImageFile {
     fn size(&self) -> KResult<u64>;
     /// Fills `buf` from `off`; `ENOEXEC` if the file ends first.
     fn read_at(&self, off: u64, buf: &mut [u8]) -> KResult<()>;
+    /// A region's backing by this file, from `offset`, showing `len`
+    /// bytes, if its pages can come from the page cache (a file of a file
+    /// system); `None` and the image is copied.
+    fn backing(&self, _offset: u64, _len: u64) -> Option<framework::user::Backing> {
+        None
+    }
 }
 
 /// A file in memory (preloaded by the loader).
@@ -92,8 +98,12 @@ impl ImageFile for MemFile<'_> {
     }
 }
 
-/// A file of a file system.
+/// A file of a file system: mapped from the page cache.
 impl ImageFile for Vnode {
+    fn backing(&self, offset: u64, len: u64) -> Option<framework::user::Backing> {
+        crate::vnode_pager::vnode_backing(self, offset, len).ok()
+    }
+
     fn size(&self) -> KResult<u64> {
         Ok(self.getattr()?.size)
     }
@@ -180,7 +190,7 @@ pub fn kern_execve(file: &dyn ImageFile, path: &str, argv: &[&str], envv: &[&str
 /// file.
 pub fn image_open(path: &[u8]) -> KResult<Vnode> {
     let root = crate::vfs_mount::rootvnode().ok_or(Errno::ENOENT)?;
-    let vp = crate::vfs_lookup::namei(root, root, path, true)?;
+    let vp = crate::vfs_lookup::namei(root, root, path, true, &crate::kern_proc::Cred::ROOT)?;
     if vp.getattr()?.kind != VType::Reg {
         return Err(Errno::EACCES);
     }
@@ -204,9 +214,10 @@ pub fn image_head(file: &dyn ImageFile) -> KResult<KVec<u8>> {
 pub fn kern_execve_path(p: &Proc, path: &[u8], argv: &[&str], envv: &[&str]) -> KResult<UserRegs> {
     let vp = namei_at(p, AtFd::Cwd, path, true)?;
     let attr = vp.getattr()?;
-    if attr.kind != VType::Reg || attr.perm & 0o111 == 0 {
+    if attr.kind != VType::Reg {
         return Err(Errno::EACCES);
     }
+    crate::vfs_subr::vaccess(&attr, &p.cred(), crate::vfs_subr::Want { exec: true, ..Default::default() })?;
     let path = core::str::from_utf8(path).map_err(|_| Errno::EINVAL)?;
     let execpath = crate::kern_proc::path_vec(path.as_bytes())?;
     let image = kern_execve(&vp, path, argv, envv)?;

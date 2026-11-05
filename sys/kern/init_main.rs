@@ -137,7 +137,7 @@ fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
         let image = match crate::vfs_mount::rootvnode() {
             // On the root file system, through a process with no image yet
             // only for the lookup: the root is its directory.
-            Some(root) => match crate::vfs_lookup::namei(root, root, path.as_bytes(), true) {
+            Some(root) => match crate::vfs_lookup::namei(root, root, path.as_bytes(), true, &crate::kern_proc::Cred::ROOT) {
                 Ok(vp) => kern_exec::kern_execve(&vp, path, argv, &[]),
                 Err(e) => {
                     if bootverbose {

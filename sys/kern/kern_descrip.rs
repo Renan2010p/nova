@@ -48,6 +48,10 @@ pub enum FileKind {
     Null,
     /// `/dev/zero`: reads zeros, writes everything.
     Zero,
+    /// A socket (`DTYPE_SOCKET`).
+    Socket(KArc<crate::uipc_socket::Socket>),
+    /// A process descriptor (`DTYPE_PROCDESC`).
+    ProcDesc(KArc<crate::sys_procdesc::ProcDesc>),
 }
 
 impl FileKind {
@@ -92,8 +96,11 @@ impl core::fmt::Debug for File {
 impl Drop for File {
     /// The last descriptor of it is gone (`closef`).
     fn drop(&mut self) {
-        if let FileKind::Pipe(pipe, end) = &self.kind {
-            pipe.close(*end);
+        match &self.kind {
+            FileKind::Pipe(pipe, end) => pipe.close(*end),
+            FileKind::Socket(s) => crate::uipc_socket::Socket::close(s),
+            FileKind::ProcDesc(pd) => pd.close(),
+            _ => {}
         }
     }
 }
@@ -379,6 +386,14 @@ pub fn file_stat(f: &File) -> KResult<Stat> {
             blksize: 4096,
             ..dev(pipe.ino, 0o600)
         }),
+        FileKind::Socket(s) => Ok(Stat {
+            kind: FileType::Socket,
+            size: i64::try_from(s.nread()).unwrap_or(0),
+            uid: s.cred.euid,
+            gid: s.cred.egid,
+            ..dev(0, 0o777)
+        }),
+        FileKind::ProcDesc(pd) => Ok(Stat { kind: FileType::Regular, ..dev(u64::from(pd.pid), 0o600) }),
         // FreeBSD's /dev/console: crw------- root wheel.
         FileKind::Console(rdev) => Ok(Stat {
             dev: 0,

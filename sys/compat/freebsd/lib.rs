@@ -57,6 +57,7 @@ mod freebsd_proc;
 mod freebsd_prot;
 mod freebsd_resource;
 mod freebsd_signal;
+mod freebsd_socket;
 mod freebsd_syscalls;
 mod freebsd_sysctl;
 mod freebsd_sysent;

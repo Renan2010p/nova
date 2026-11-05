@@ -284,6 +284,7 @@ impl VfsOps for Tmpfs {
             NewNode::Dir => (VType::Dir, KVec::new(&M_TMPFS), 2),
             NewNode::Symlink(target) => (VType::Lnk, bytes(target)?, 1),
             NewNode::Fifo => (VType::Fifo, KVec::new(&M_TMPFS), 1),
+            NewNode::Socket => (VType::Sock, KVec::new(&M_TMPFS), 1),
         };
         let perm = if kind == VType::Lnk { 0o755 } else { owner.perm };
         let n = Node {

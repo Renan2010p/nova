@@ -26,6 +26,7 @@ use crate::kern_descrip::{File, FileFlags, FileKind, Stat, vn_stat};
 use crate::kern_malloc::M_TEMP;
 use crate::kern_proc::Proc;
 use crate::vfs_lookup::{MAXPATHLEN, NAME_MAX, namei, namei_parent};
+use crate::vfs_subr::{Want, may_chown, may_unlink, owner_or_root, suser, vaccess};
 use crate::vfs_mount::rootvnode;
 use crate::vnode::{DirEnt, Mount, NewNode, Owner, PathConf, SetAttr, StatFs, VTime, VType, Vnode};
 
@@ -83,7 +84,7 @@ fn at_dir(p: &Proc, at: AtFd) -> KResult<Vnode> {
 pub fn namei_at(p: &Proc, at: AtFd, path: &[u8], follow: bool) -> KResult<Vnode> {
     let root = root()?;
     let dir = if path.first() == Some(&b'/') { root } else { at_dir(p, at)? };
-    namei(root, dir, path, follow)
+    namei(root, dir, path, follow, &p.cred())
 }
 
 /// Opens `path` (`kern_openat`); returns the descriptor.
@@ -116,7 +117,13 @@ pub fn kern_openat(p: &Proc, at: AtFd, path: &[u8], flags: OpenFlags) -> KResult
     if (flags.write || flags.trunc) && vp.mp.rdonly && matches!(kind, FileKind::Vnode(_)) {
         return Err(Errno::EROFS);
     }
+    // A file just created may be opened as asked, whatever its mode.
+    if !created {
+        let want = Want { read: flags.read, write: flags.write || flags.trunc, exec: false };
+        vaccess(&attr, &p.cred(), want)?;
+    }
     if flags.trunc && flags.write && !created && attr.kind == VType::Reg && attr.size > 0 {
+        crate::vnode_pager::vnode_pager_invalidate(&vp);
         vp.mp.ops.setattr(vp.ino, &SetAttr { size: Some(0), ..SetAttr::default() })?;
     }
     let file = File::new(
@@ -149,19 +156,22 @@ pub struct AccessMode {
     pub exec: bool,
 }
 
-/// Checks access to a path (`kern_accessat`), as root: anything may be
-/// read; writing needs a writable file system; executing needs an execute
-/// bit (or a directory).
-pub fn kern_accessat(p: &Proc, at: AtFd, path: &[u8], mode: AccessMode, follow: bool) -> KResult<()> {
+/// Checks access to a path (`kern_accessat`) by the file's permissions,
+/// with the real ids (`access`) or the effective ones (`eaccess`,
+/// `AT_EACCESS`); writing needs a writable file system too.
+pub fn kern_accessat(p: &Proc, at: AtFd, path: &[u8], mode: AccessMode, follow: bool, effective: bool) -> KResult<()> {
     let vp = namei_at(p, at, path, follow)?;
     let attr = vp.getattr()?;
     if mode.write && vp.mp.rdonly {
         return Err(Errno::EROFS);
     }
-    if mode.exec && attr.kind != VType::Dir && attr.perm & 0o111 == 0 {
-        return Err(Errno::EACCES);
+    // `access` asks with the real ids, `eaccess` with the effective ones.
+    let mut cred = p.cred();
+    if !effective {
+        cred.euid = cred.ruid;
+        cred.egid = cred.rgid;
     }
-    Ok(())
+    vaccess(&attr, &cred, Want { read: mode.read, write: mode.write, exec: mode.exec })
 }
 
 /// Reads a symbolic link into `buf` (`kern_readlinkat`); returns its
@@ -179,9 +189,11 @@ pub fn kern_readlinkat(p: &Proc, at: AtFd, path: &[u8], buf: &mut [u8]) -> KResu
 }
 
 fn set_cwd(p: &Proc, vp: Vnode) -> KResult<()> {
-    if vp.getattr()?.kind != VType::Dir {
+    let a = vp.getattr()?;
+    if a.kind != VType::Dir {
         return Err(Errno::ENOTDIR);
     }
+    vaccess(&a, &p.cred(), Want::SEARCH)?;
     *p.cwd.lock() = Some(vp);
     Ok(())
 }
@@ -270,7 +282,7 @@ pub fn kern_realpathat(p: &Proc, at: AtFd, path: &[u8]) -> KResult<KVec<u8>> {
 fn parent_at_any<'p>(p: &Proc, at: AtFd, path: &'p [u8]) -> KResult<(Vnode, &'p [u8])> {
     let root = root()?;
     let dir = if path.first() == Some(&b'/') { root } else { at_dir(p, at)? };
-    namei_parent(root, dir, path)
+    namei_parent(root, dir, path, &p.cred())
 }
 
 /// Unmounts what is mounted on `path` (`kern_unmount`): found by its
@@ -386,6 +398,7 @@ pub fn kern_copy_file_range(
     if dst.mp.rdonly {
         return Err(Errno::EROFS);
     }
+    crate::vnode_pager::vnode_pager_invalidate(&dst);
     let mut ioff = match inoff {
         Some(o) => o,
         None => *inf.offset.lock(),
@@ -428,10 +441,12 @@ pub fn kern_copy_file_range(
 fn parent_at<'p>(p: &Proc, at: AtFd, path: &'p [u8]) -> KResult<(Vnode, &'p [u8])> {
     let root = root()?;
     let dir = if path.first() == Some(&b'/') { root } else { at_dir(p, at)? };
-    let (dir, name) = namei_parent(root, dir, path)?;
+    let (dir, name) = namei_parent(root, dir, path, &p.cred())?;
     if dir.mp.rdonly {
         return Err(Errno::EROFS);
     }
+    // Adding or removing a name writes the directory.
+    vaccess(&dir.getattr()?, &p.cred(), Want::MODIFY_DIR)?;
     Ok((dir, name))
 }
 
@@ -486,6 +501,8 @@ pub fn kern_unlinkat(p: &Proc, at: AtFd, path: &[u8], dir: bool) -> KResult<()> 
     if crate::vfs_mount::mounted_here(&vp).is_some() || vp.same(&root()?) {
         return Err(Errno::EBUSY);
     }
+    may_unlink(&parent.getattr()?, &vp.getattr()?, &p.cred())?;
+    crate::vnode_pager::vnode_pager_invalidate(&vp);
     parent.mp.ops.remove(parent.ino, name, dir)
 }
 
@@ -497,7 +514,13 @@ pub fn kern_renameat(p: &Proc, from_at: AtFd, from: &[u8], to_at: AtFd, to: &[u8
     if !core::ptr::eq(fdir.mp, tdir.mp) {
         return Err(Errno::EXDEV);
     }
-    fdir.mp.ops.lookup(fdir.ino, fname)?;
+    let from_ino = fdir.mp.ops.lookup(fdir.ino, fname)?;
+    let cred = p.cred();
+    may_unlink(&fdir.getattr()?, &fdir.mp.ops.getattr(from_ino)?, &cred)?;
+    if let Ok(to_ino) = tdir.mp.ops.lookup(tdir.ino, tname) {
+        may_unlink(&tdir.getattr()?, &tdir.mp.ops.getattr(to_ino)?, &cred)?;
+        crate::vnode_pager::vnode_pager_invalidate(&Vnode { mp: tdir.mp, ino: to_ino });
+    }
     fdir.mp.ops.rename(fdir.ino, fname, tdir.ino, tname)
 }
 
@@ -543,7 +566,28 @@ fn target_vnode(p: &Proc, t: Target<'_>) -> KResult<Vnode> {
 /// `kern_truncate`): as root, any.
 pub fn kern_setattr(p: &Proc, t: Target<'_>, attr: &SetAttr) -> KResult<()> {
     let vp = target_vnode(p, t)?;
+    let cur = vp.getattr()?;
+    let cred = p.cred();
+    if attr.perm.is_some() || attr.flags.is_some() {
+        owner_or_root(&cur, &cred)?;
+    }
+    if attr.uid.is_some() || attr.gid.is_some() {
+        may_chown(&cur, &cred, attr.uid, attr.gid)?;
+    }
     if attr.size.is_some() {
+        vaccess(&cur, &cred, Want { write: true, ..Want::default() })?;
+    }
+    if attr.atime.is_some() || attr.mtime.is_some() {
+        // Setting them to now needs only the right to write; other times
+        // need the file's ownership (`VA_UTIMES_NULL`).
+        let now = vfs_timestamp();
+        let to_now = |t: Option<VTime>| t.is_none_or(|t| t.sec.abs_diff(now.sec) <= 1);
+        if !(to_now(attr.atime) && to_now(attr.mtime) && vaccess(&cur, &cred, Want { write: true, ..Want::default() }).is_ok()) {
+            owner_or_root(&cur, &cred)?;
+        }
+    }
+    if attr.size.is_some() {
+        crate::vnode_pager::vnode_pager_invalidate(&vp);
         match vp.getattr()?.kind {
             VType::Dir => return Err(Errno::EISDIR),
             VType::Reg => {}
@@ -562,7 +606,30 @@ pub fn vfs_timestamp() -> VTime {
 /// Mounts a file system of type `fstype` on directory `path`
 /// (`kern_nmount`).
 pub fn kern_nmount(p: &Proc, fstype: &str, path: &[u8], rdonly: bool) -> KResult<()> {
+    suser(&p.cred())?;
     let vp = namei_at(p, AtFd::Cwd, path, true)?;
     let path = core::str::from_utf8(path).map_err(|_| Errno::EINVAL)?;
     crate::vfs_mount::kern_mount(fstype, vp, path, rdonly)
+}
+
+/// Gives socket `s` the name `path` (`unp_bind`): a socket node is
+/// created there (`EADDRINUSE` if the name exists).
+pub fn kern_bind_path(p: &Proc, at: AtFd, s: &KArc<crate::uipc_socket::Socket>, path: &[u8]) -> KResult<()> {
+    if namei_at(p, at, path, false).is_ok() {
+        return Err(Errno::EADDRINUSE);
+    }
+    let vp = create_at(p, at, path, NewNode::Socket, 0o777)?;
+    crate::uipc_socket::kern_bind(s, vp, path)
+}
+
+/// The socket node at `path`, which the caller may write to
+/// (`unp_connect`'s lookup).
+pub fn kern_socket_node(p: &Proc, at: AtFd, path: &[u8]) -> KResult<Vnode> {
+    let vp = namei_at(p, at, path, true)?;
+    let a = vp.getattr()?;
+    if a.kind != VType::Sock {
+        return Err(Errno::ECONNREFUSED);
+    }
+    vaccess(&a, &p.cred(), Want { write: true, ..Want::default() })?;
+    Ok(vp)
 }

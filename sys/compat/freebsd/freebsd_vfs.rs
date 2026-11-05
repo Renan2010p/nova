@@ -143,7 +143,8 @@ pub(crate) fn sys_faccessat(p: &Proc, fd: i32, path: u64, mode: i32, flag: i32) 
     let mut buf = [0u8; MAXPATHLEN];
     let n = copyinstr(&p.vm(), path, &mut buf)?;
     let m = AccessMode { read: mode & R_OK != 0, write: mode & W_OK != 0, exec: mode & X_OK != 0 };
-    kern_accessat(p, at_fd(fd), buf.get(..n).unwrap_or(&[]), m, flag & AT_SYMLINK_NOFOLLOW == 0)?;
+    const AT_EACCESS: i32 = 0x100;
+    kern_accessat(p, at_fd(fd), buf.get(..n).unwrap_or(&[]), m, flag & AT_SYMLINK_NOFOLLOW == 0, flag & AT_EACCESS != 0)?;
     Ok([0, 0])
 }
 
@@ -197,12 +198,16 @@ fn dtype(kind: Option<VType>) -> u8 {
 #[inline(never)] // its buffers stay out of `syscall`'s frame
 pub(crate) fn sys_getdirentries(p: &Proc, fd: i32, buf: u64, nbytes: u64, basep: u64) -> KResult<[u64; 2]> {
     let vm = p.vm();
-    let mut used = 0u64;
+    // The records are built in kernel memory and copied out after: the
+    // file system may hold its lock while it lists, and copying out may
+    // take the address space's (see LOCKING.md).
+    let room = usize_from_u64(nbytes.min(64 * 1024));
+    let mut out: framework::mm::KVec<u8> = framework::mm::KVec::with_capacity(room, &kern::kern_malloc::M_TEMP, framework::mm::M_WAITOK)?;
     let mut err = None;
     let base = kern_getdirentries(p, fd, &mut |e: &DirEnt<'_>| {
         let namlen = e.name.len();
         let reclen = (24 + namlen + 1).next_multiple_of(8);
-        if used + u64_from_usize(reclen) > nbytes {
+        if out.len() + reclen > room {
             return false;
         }
         let mut rec = [0u8; 24 + 256 + 8];
@@ -214,16 +219,17 @@ pub(crate) fn sys_getdirentries(p: &Proc, fd: i32, buf: u64, nbytes: u64, basep:
         if let Some(dst) = rec.get_mut(24..24 + namlen) {
             dst.copy_from_slice(e.name);
         }
-        if let Err(e) = vm.copyout(buf + used, rec.get(..reclen).unwrap_or(&[])) {
-            err = Some(vm_errno(e));
+        if let Err(e) = out.extend_from_slice(rec.get(..reclen).unwrap_or(&[]), framework::mm::M_WAITOK) {
+            err = Some(Errno::from(e));
             return false;
         }
-        used += u64_from_usize(reclen);
         true
     })?;
     if let Some(e) = err {
         return Err(e);
     }
+    vm.copyout(buf, &out).map_err(vm_errno)?;
+    let used = u64_from_usize(out.len());
     // Room for not even one entry.
     if used == 0 && nbytes < 32 {
         return Err(Errno::EINVAL);

@@ -58,6 +58,18 @@ pub fn kern_write(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
                 tty::tty_write(&chunk[..n]);
                 n
             }
+            FileKind::Socket(sock) => {
+                let extra = crate::uipc_socket::SendExtra {
+                    rights: framework::mm::KVec::new(&crate::kern_malloc::M_TEMP),
+                    to: None,
+                    nosignal: false,
+                    nonblock: flags.nonblock,
+                };
+                match crate::uipc_socket::kern_send(p, sock, &chunk[..n], extra) {
+                    Ok(k) => k,
+                    Err(e) => return if done > 0 { Ok(done) } else { Err(e) },
+                }
+            }
             FileKind::Pipe(pipe, _) => {
                 let mut put = 0;
                 while put < n {
@@ -87,6 +99,7 @@ fn vn_write(p: &Proc, file: &File, vp: crate::vnode::Vnode, buf: u64, nbyte: u64
     if vp.getattr()?.kind == VType::Dir {
         return Err(Errno::EISDIR);
     }
+    crate::vnode_pager::vnode_pager_invalidate(&vp);
     let vm = p.vm();
     let mut off = file.offset.lock();
     if append {
@@ -137,6 +150,12 @@ pub fn kern_read(p: &Proc, fd: i32, buf: u64, nbyte: u64) -> KResult<u64> {
             vm.copyout(buf, &chunk[..got]).map_err(vm_errno)?;
             return Ok(u64_from_usize(got));
         }
+        FileKind::Socket(sock) => {
+            let r = crate::uipc_socket::kern_recv(p, sock, &mut chunk[..n], false, flags.nonblock)?;
+            vm.copyout(buf, &chunk[..r.len]).map_err(vm_errno)?;
+            return Ok(u64_from_usize(r.len));
+        }
+        FileKind::ProcDesc(_) => return Err(Errno::EOPNOTSUPP),
         FileKind::Null => return Ok(0),
         FileKind::Zero => {
             vm.copyout(buf, &chunk[..n]).map_err(vm_errno)?;
@@ -226,7 +245,8 @@ pub fn kern_fionread(p: &Proc, fd: i32) -> KResult<u64> {
         FileKind::Console(_) => u64_from_usize(tty::tty_nread()),
         FileKind::Pipe(pipe, _) => u64_from_usize(pipe.len()),
         FileKind::Vnode(vp) => vp.getattr()?.size.saturating_sub(*file.offset.lock()),
-        FileKind::Null | FileKind::Zero => 0,
+        FileKind::Socket(s) => u64_from_usize(s.nread()),
+        FileKind::Null | FileKind::Zero | FileKind::ProcDesc(_) => 0,
     })
 }
 
@@ -364,6 +384,7 @@ pub fn kern_pwrite(p: &Proc, fd: i32, buf: u64, nbyte: u64, offset: u64) -> KRes
     if vp.mp.rdonly {
         return Err(Errno::EROFS);
     }
+    crate::vnode_pager::vnode_pager_invalidate(&vp);
     let vm = p.vm();
     let mut chunk = [0u8; 1024];
     let mut done = 0u64;
@@ -413,6 +434,14 @@ fn file_ready(file: &File) -> (bool, bool, bool) {
         FileKind::Pipe(pipe, crate::sys_pipe::PipeEnd::Write) => {
             let hup = pipe.readers_gone();
             (false, pipe.has_room() || hup, hup)
+        }
+        FileKind::Socket(s) => {
+            let hup = s.hung_up();
+            (s.readable() || hup, s.writable(), hup)
+        }
+        FileKind::ProcDesc(pd) => {
+            let gone = pd.exited();
+            (gone, false, gone)
         }
         FileKind::Vnode(_) | FileKind::Null | FileKind::Zero => (true, true, false),
     }

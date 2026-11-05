@@ -13,7 +13,8 @@
 
 //! Page faults from user mode (FreeBSD's `vm/vm_fault.c`): memory that is
 //! mapped but not yet present (anonymous memory is allocated and zeroed
-//! when first touched) is made present, and the program resumes.
+//! when first touched) is made present, a page shared since a `fork` is
+//! copied when first written, and the program resumes.
 
 use framework::user::{FaultKind, UserFault, VmSpace};
 
@@ -22,8 +23,9 @@ use framework::user::{FaultKind, UserFault, VmSpace};
 pub fn vm_fault_trap(vm: &VmSpace, fault: &UserFault) -> bool {
     let write = match fault.kind {
         FaultKind::NotMapped { write } => write,
-        // A present page accessed against its protection: no paging fixes
-        // that (until copy-on-write).
+        // A present page written: copy-on-write, if its region allows
+        // writing (else the program gets its signal).
+        FaultKind::Protection { write: true } => true,
         _ => return false,
     };
     vm.fault(fault.addr, write).is_ok()

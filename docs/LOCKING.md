@@ -38,6 +38,11 @@ document gives the rules, and the order the kernel follows today.
 5. **Snapshot, then act.** Code walking the process table under its
    lock collects what it needs (`foreach_proc` filling a `KVec`,
    `kern_kill`), then copies out or sleeps after releasing it.
+   Reading a directory collects the entries in a kernel buffer under
+   the file system's lock and copies them out after (`getdirentries`).
+6. **A page fault may read a file**: the address space's lock is held
+   while the page cache asks the file system for a page, so a file
+   system never touches user memory or address spaces under its locks.
 
 ## The order today
 
@@ -45,7 +50,10 @@ Sleep mutexes, outer first (an arrow: may be held while taking):
 
 ```
 process table (ALLPROC) ──► a process's address space (VmSpace map)
+a process's address space ──► page cache (vnode_pager) ──► a file system's nodes
 open file's offset ──► a file system's nodes (tmpfs) ──► nothing
+a socket's state ──► nothing (never two sockets at once: a send
+    takes the peer's lock only, a connect drops the listener's first)
 descriptor table ──► (closing a pipe end: only spin locks and wake-ups)
 pipe ring ──► nothing
 a process's exec path / arguments ──► nothing

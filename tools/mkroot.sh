@@ -21,7 +21,8 @@
 #   /etc       an rc that mounts tmpfs on /tmp and /var, ttys with a login
 #              on the console (ttyu0), a master.passwd of its own (root
 #              without a password: nothing is copied from the host's
-#              users) compiled with pwd_mkdb, login.conf, pam.d, gettytab,
+#              users) and an ordinary user, nova (uid 1001, no password,
+#              home /tmp), compiled with pwd_mkdb, login.conf, pam.d, gettytab,
 #              termcap;
 #   /dev /tmp /var /root, empty.
 #
@@ -111,6 +112,7 @@ cat > "$DEST/etc/master.passwd" <<'PW'
 root::0:0::0:0:Charlie &:/root:/bin/sh
 daemon:*:1:1::0:0:Owner of many system processes:/root:/usr/sbin/nologin
 nobody:*:65534:65534::0:0:Unprivileged user:/nonexistent:/usr/sbin/nologin
+nova::1001:1001::0:0:Nova user:/tmp:/bin/sh
 PW
 cat > "$DEST/etc/group" <<'GR'
 wheel:*:0:root
@@ -118,8 +120,11 @@ daemon:*:1:
 tty:*:4:
 nogroup:*:65533:
 nobody:*:65534:
+nova:*:1001:
 GR
 pwd_mkdb -i -p -d "$DEST/etc" "$DEST/etc/master.passwd"
+chmod 600 "$DEST/etc/master.passwd"
+chmod 700 "$DEST/root"
 printf 'group: files\npasswd: files\nhosts: files\n' > "$DEST/etc/nsswitch.conf"
 echo /bin/sh > "$DEST/etc/shells"
 cp /etc/login.conf /etc/login.access /etc/gettytab "$DEST/etc/"

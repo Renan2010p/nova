@@ -13,22 +13,19 @@
 
 
 //! Mapping files into memory (`vn_mmap`, FreeBSD's `vm/vm_mmap.c` for
-//! vnodes): the file's pages are copied into anonymous memory when it is
-//! mapped, so a private mapping is the file as it was, and a shared one
-//! is the same on a read-only file system.
+//! vnodes): the region is backed by the page cache (`vnode_pager`); pages
+//! are read when touched and shared until written, when a private
+//! mapping gets its own copy.
 //!
-//! TODO(vm): a page cache, pages read on demand and shared between
-//! mappings, writable shared mappings.
+//! TODO(vm): writable shared mappings (written back to the file).
 
 use framework::PAGE_SIZE;
-use framework::mm::{KVec, M_WAITOK};
 use framework::user::Prot;
-use libkern::conv::{u64_from_usize, usize_from_u64};
+use libkern::conv::u64_from_usize;
 use sys::errno::{Errno, KResult};
-use vm::vm_mmap::{MmapAt, kern_mmap_anon, vm_errno};
+use vm::vm_mmap::{MmapAt, kern_mmap_anon};
 
 use crate::kern_descrip::FileKind;
-use crate::kern_malloc::M_TEMP;
 use crate::kern_proc::Proc;
 use crate::vnode::VType;
 
@@ -53,31 +50,8 @@ pub fn kern_mmap_fd(p: &Proc, at: MmapAt, len: u64, prot: Prot, shared: bool, fd
     if !offset.is_multiple_of(u64_from_usize(PAGE_SIZE)) {
         return Err(Errno::EINVAL);
     }
-    let vm = p.vm();
-    let addr = kern_mmap_anon(&vm, at, len, prot)?;
-    // The file's bytes, a page at a time; past its end, zeros.
-    let fill = || -> KResult<()> {
-        let mut chunk: KVec<u8> = KVec::with_capacity(PAGE_SIZE, &M_TEMP, M_WAITOK)?;
-        for _ in 0..PAGE_SIZE {
-            chunk.push(0, M_WAITOK)?;
-        }
-        let avail = attr.size.saturating_sub(offset).min(len);
-        let mut done = 0u64;
-        while done < avail {
-            let want = usize_from_u64((avail - done).min(u64_from_usize(PAGE_SIZE)));
-            let buf = chunk.get_mut(..want).ok_or(Errno::EIO)?;
-            let got = vp.read(offset + done, buf)?;
-            if got == 0 {
-                break;
-            }
-            vm.copyout_init(addr + done, buf.get(..got).ok_or(Errno::EIO)?).map_err(vm_errno)?;
-            done += u64_from_usize(got);
-        }
-        Ok(())
-    };
-    if let Err(e) = fill() {
-        let _ = vm.unmap(addr, len);
-        return Err(e);
-    }
-    Ok(addr)
+    // The file's pages, from the page cache when touched; past its end,
+    // zeros.
+    let backing = crate::vnode_pager::vnode_backing(&vp, offset, attr.size.saturating_sub(offset))?;
+    vm::vm_mmap::kern_mmap_backed(&p.vm(), at, len, prot, backing)
 }

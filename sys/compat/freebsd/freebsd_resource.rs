@@ -209,6 +209,7 @@ pub(crate) fn sys_gettimeofday(p: &Proc, tp: u64, tzp: u64) -> KResult<[u64; 2]>
 /// `settimeofday(tp, tzp)`: as root, sets the wall clock.
 #[inline(never)] // its buffers stay out of `syscall`'s frame
 pub(crate) fn sys_settimeofday(p: &Proc, tp: u64) -> KResult<[u64; 2]> {
+    kern::vfs_subr::suser(&p.cred())?;
     if tp != 0 {
         let mut b = [0u8; 16];
         p.vm().copyin(tp, &mut b).map_err(vm_errno)?;
@@ -223,6 +224,7 @@ pub(crate) fn sys_clock_settime(p: &Proc, id: i32, tp: u64) -> KResult<[u64; 2]>
     if id != 0 {
         return Err(Errno::EINVAL);
     }
+    kern::vfs_subr::suser(&p.cred())?;
     let mut b = [0u8; 16];
     p.vm().copyin(tp, &mut b).map_err(vm_errno)?;
     let sec = i64::from_le_bytes(b[..8].try_into().map_err(|_| Errno::EFAULT)?);

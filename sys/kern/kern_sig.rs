@@ -284,11 +284,26 @@ pub enum KillWho {
     All,
 }
 
+/// Whether `p` may signal `q` (`p_cansignal`): root, the same real or
+/// effective user as the target's real or saved one, or `SIGCONT` within
+/// the session.
+fn cansignal(p: &Proc, q: &Proc, sig: Option<Signal>) -> bool {
+    let (a, b) = (p.cred(), q.cred());
+    a.euid == 0
+        || a.ruid == b.ruid
+        || a.ruid == b.svuid
+        || a.euid == b.ruid
+        || a.euid == b.svuid
+        || (sig == Some(Signal::SIGCONT) && p.sid() == q.sid())
+}
+
 /// Sends `sig` (`None`: only check) to `who` (`kern_kill`); `ESRCH` if no
-/// process matched. As root, every process may be signalled.
+/// process matched, `EPERM` if every one that did is not the caller's to
+/// signal.
 pub fn kern_kill(p: &Proc, who: KillWho, sig: Option<Signal>) -> KResult<()> {
     let own = p.pgid();
     let mut targets = 0;
+    let mut denied = 0;
     foreach_proc(|q| {
         let hit = match who {
             KillWho::Pid(pid) => q.pid == pid,
@@ -299,12 +314,20 @@ pub fn kern_kill(p: &Proc, who: KillWho, sig: Option<Signal>) -> KResult<()> {
         if !hit || q.exit_status().is_some() {
             return;
         }
+        if !cansignal(p, q, sig) {
+            denied += 1;
+            return;
+        }
         targets += 1;
         if let Some(sig) = sig {
             psignal(q, sig);
         }
     });
-    if targets > 0 { Ok(()) } else { Err(Errno::ESRCH) }
+    match (targets, denied) {
+        (0, 0) => Err(Errno::ESRCH),
+        (0, _) => Err(Errno::EPERM),
+        _ => Ok(()),
+    }
 }
 
 /// Sends `sig` to process group `pgid` (`pgsignal`), from the kernel (a

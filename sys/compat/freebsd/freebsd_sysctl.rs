@@ -49,6 +49,31 @@ enum Value {
     Hostname,
     /// `kern.arandom`: random bytes, as many as asked (at most 256).
     Arandom,
+    /// A C structure, with its `sysctl(8)` format (`S,timeval`): the bytes
+    /// written, and their count.
+    Struct(fn(&mut [u8; 64]) -> usize, &'static str),
+}
+
+impl Value {
+    /// `oid_kind` (type and flags) and `oid_fmt`, as `sysctl(8)` asks
+    /// with `{0, 4, ...}`.
+    fn kind_fmt(self) -> (u32, &'static str) {
+        const CTLTYPE_INT: u32 = 2;
+        const CTLTYPE_STRING: u32 = 3;
+        const CTLTYPE_OPAQUE: u32 = 5;
+        const CTLTYPE_ULONG: u32 = 8;
+        const RD: u32 = 0x8000_0000;
+        const WR: u32 = 0x4000_0000;
+        const MPSAFE: u32 = 0x0004_0000;
+        match self {
+            Value::Int(_) => (CTLTYPE_INT | RD | MPSAFE, "I"),
+            Value::Ulong(_) => (CTLTYPE_ULONG | RD | MPSAFE, "LU"),
+            Value::Str(_) => (CTLTYPE_STRING | RD | MPSAFE, "A"),
+            Value::Hostname => (CTLTYPE_STRING | RD | WR | MPSAFE, "A"),
+            Value::Arandom => (CTLTYPE_OPAQUE | RD | MPSAFE, ""),
+            Value::Struct(_, fmt) => (CTLTYPE_OPAQUE | RD | MPSAFE, fmt),
+        }
+    }
 }
 
 /// One node: its numbers, its name, its value.
@@ -83,13 +108,17 @@ static NODES: &[Node] = &[
     Node { mib: &[1, 18], name: "kern.ngroups", value: Value::Int(|| 1023) },
     Node { mib: &[1, 24], name: "kern.osreldate", value: Value::Int(|| i32::try_from(FREEBSD_VERSION).unwrap_or(0)) },
     Node { mib: &[1, 9], name: "kern.securelevel", value: Value::Int(|| -1) },
+    Node { mib: &[1, 21], name: "kern.boottime", value: Value::Struct(boottime, "S,timeval") },
     Node { mib: &[1, 26], name: "kern.bootfile", value: Value::Str(|b| b.buf_str("/boot/kernel/kernel")) },
     Node { mib: &[1, 33], name: "kern.usrstack", value: Value::Ulong(|| USRSTACK) },
     // OID_AUTO nodes: numbers from FreeBSD's dynamic range, stable here.
     Node { mib: &[1, 0x1_0001], name: "kern.pid_max", value: Value::Int(|| 99_999) },
     // `exp(-1/20)` in `FSCALE` fixed point: how fast %CPU decays.
     Node { mib: &[1, 0x1_0002], name: "kern.ccpu", value: Value::Int(|| 1948) },
+    // `FSCALE`: the scale of fixed-point load and CPU figures.
+    Node { mib: &[1, 0x1_0003], name: "kern.fscale", value: Value::Int(|| 2048) },
     Node { mib: &[1, 37], name: "kern.arandom", value: Value::Arandom },
+    Node { mib: &[2, 2], name: "vm.loadavg", value: Value::Struct(loadavg, "S,loadavg") },
     Node { mib: &[6, 1], name: "hw.machine", value: Value::Str(|b| b.buf_str(framework::MACHINE)) },
     Node { mib: &[6, 3], name: "hw.ncpu", value: Value::Int(ncpu) },
     Node { mib: &[6, 4], name: "hw.byteorder", value: Value::Int(|| 1234) },
@@ -152,10 +181,17 @@ fn access(p: &Proc, node: &Node, old: u64, oldlenp: u64, new: u64, newlen: u64) 
         }
         // Filled below, as much as the caller asks for.
         Value::Arandom => 0,
+        Value::Struct(f, _) => {
+            let mut b = [0u8; 64];
+            let n = f(&mut b).min(64);
+            val[..n].copy_from_slice(&b[..n]);
+            n
+        }
     };
     if new != 0 {
         match node.value {
             Value::Hostname => {
+                kern::vfs_subr::suser(&p.cred())?;
                 let n = usize_from_u64(newlen).min(MAXHOSTNAMELEN + 1);
                 let mut b = [0u8; MAXHOSTNAMELEN + 1];
                 p.vm().copyin(new, &mut b[..n]).map_err(vm_errno)?;
@@ -248,11 +284,14 @@ pub(crate) fn sys_sysctl(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     {
         return crate::freebsd_kinfo::sysctl_kern_proc(p, op, rest.first().copied(), args[2], args[3]);
     }
-    if mib == [1, 21] {
-        return reply(p, &boottime(), args[2], args[3]);
-    }
-    if mib == [2, 2] {
-        return reply(p, &loadavg(), args[2], args[3]);
+    // The tree's own nodes (`sysctl(8)`): a name, the next name, a type.
+    if let [0, op, ref oid @ ..] = *mib {
+        return match op {
+            1 => oid_name(p, oid, args[2], args[3]),
+            2 | 7 => oid_next(p, oid, args[2], args[3]),
+            4 => oid_fmt(p, oid, args[2], args[3]),
+            _ => Err(unknown(p, format_args!("{mib:?}"))),
+        };
     }
     let node = find_mib(mib).ok_or_else(|| unknown(p, format_args!("{mib:?}")))?;
     access(p, node, args[2], args[3], args[4], args[5])
@@ -300,12 +339,7 @@ pub(crate) fn sys_sysctlbyname(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     if name == b"kern.devname" {
         return devname(p, args[2], args[3], args[4], args[5]);
     }
-    if name == b"kern.boottime" {
-        return reply(p, &boottime(), args[2], args[3]);
-    }
-    if name == b"vm.loadavg" {
-        return reply(p, &loadavg(), args[2], args[3]);
-    }
+
     let node = find_name(name).ok_or_else(|| {
         unknown(p, format_args!("{}", core::str::from_utf8(name).unwrap_or("?")))
     })?;
@@ -381,16 +415,50 @@ pub(crate) fn reply(p: &Proc, data: &[u8], old: u64, oldlenp: u64) -> KResult<[u
 }
 
 /// `kern.boottime`: a `struct timeval`.
-fn boottime() -> [u8; 16] {
-    let mut b = [0u8; 16];
+fn boottime(b: &mut [u8; 64]) -> usize {
     b[..8].copy_from_slice(&kern::kern_clock::boottime().to_le_bytes());
-    b
+    16
 }
 
 /// `vm.loadavg`: a `struct loadavg` (three fixed-point averages and
 /// `FSCALE`). TODO(sched): compute them; they read 0.
-fn loadavg() -> [u8; 24] {
-    let mut b = [0u8; 24];
-    b[16..].copy_from_slice(&2048u64.to_le_bytes());
-    b
+fn loadavg(b: &mut [u8; 64]) -> usize {
+    b[16..24].copy_from_slice(&2048u64.to_le_bytes());
+    24
+}
+
+/// The node of `oid`, if it is one.
+fn oid_node(oid: &[i32]) -> Option<&'static Node> {
+    NODES.iter().find(|n| n.mib == oid)
+}
+
+/// `{0, 1, oid...}`: the node's dotted name.
+fn oid_name(p: &Proc, oid: &[i32], old: u64, oldlenp: u64) -> KResult<[u64; 2]> {
+    let n = oid_node(oid).ok_or(Errno::ENOENT)?;
+    let mut b = [0u8; 128];
+    let len = n.name.len().min(127);
+    b[..len].copy_from_slice(&n.name.as_bytes()[..len]);
+    reply(p, &b[..=len], old, oldlenp)
+}
+
+/// `{0, 4, oid...}`: the node's kind (type and flags) and format.
+fn oid_fmt(p: &Proc, oid: &[i32], old: u64, oldlenp: u64) -> KResult<[u64; 2]> {
+    let n = oid_node(oid).ok_or(Errno::ENOENT)?;
+    let (kind, fmt) = n.value.kind_fmt();
+    let mut b = [0u8; 64];
+    b[..4].copy_from_slice(&kind.to_le_bytes());
+    let len = fmt.len().min(59);
+    b[4..4 + len].copy_from_slice(&fmt.as_bytes()[..len]);
+    reply(p, &b[..4 + len + 1], old, oldlenp)
+}
+
+/// `{0, 2, oid...}`: the node after `oid` in the tree's order (numbers
+/// compared one by one, a prefix first), for `sysctl -a`.
+fn oid_next(p: &Proc, oid: &[i32], old: u64, oldlenp: u64) -> KResult<[u64; 2]> {
+    let next = NODES.iter().filter(|n| n.mib > oid).min_by(|a, b| a.mib.cmp(b.mib)).ok_or(Errno::ENOENT)?;
+    let mut b = [0u8; 4 * CTL_MAXNAME];
+    for (i, x) in next.mib.iter().enumerate() {
+        b[4 * i..4 * i + 4].copy_from_slice(&x.to_le_bytes());
+    }
+    reply(p, &b[..4 * next.mib.len()], old, oldlenp)
 }

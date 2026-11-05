@@ -59,7 +59,9 @@ pub fn exit1(p: &Proc, status: ExitStatus) {
         drop(p.set_vm(empty));
     }
     proc_zombie(p, status);
-    if let Some(parent) = crate::kern_proc::pfind(p.ppid()) {
+    // A process with a descriptor tells through it, not with SIGCHLD.
+    let pd = p.procdesc.load(core::sync::atomic::Ordering::Acquire);
+    if let (false, Some(parent)) = (pd, crate::kern_proc::pfind(p.ppid())) {
         crate::kern_sig::psignal(&parent, Signal::SIGCHLD);
     }
 }

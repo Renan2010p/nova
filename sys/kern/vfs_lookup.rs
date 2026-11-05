@@ -18,6 +18,8 @@ use framework::mm::{KVec, M_WAITOK};
 use sys::errno::{Errno, KResult};
 
 use crate::kern_malloc::M_TEMP;
+use crate::kern_proc::Cred;
+use crate::vfs_subr::{Want, vaccess};
 use crate::vnode::{VType, Vnode};
 
 /// Longest path (`MAXPATHLEN`, with its NUL).
@@ -29,8 +31,9 @@ pub const NAME_MAX: usize = 255;
 
 /// Looks `path` up (`namei`): from the root if it starts with `/`, from
 /// `dir` otherwise. The last component is followed if it is a symbolic
-/// link and `follow` (`FOLLOW`/`NOFOLLOW`).
-pub fn namei(root: Vnode, dir: Vnode, path: &[u8], follow: bool) -> KResult<Vnode> {
+/// link and `follow` (`FOLLOW`/`NOFOLLOW`). Each directory walked
+/// through must be searchable by `cred`.
+pub fn namei(root: Vnode, dir: Vnode, path: &[u8], follow: bool, cred: &Cred) -> KResult<Vnode> {
     if path.is_empty() {
         return Err(Errno::ENOENT);
     }
@@ -61,9 +64,12 @@ pub fn namei(root: Vnode, dir: Vnode, path: &[u8], follow: bool) -> KResult<Vnod
             return Err(Errno::ENAMETOOLONG);
         }
         let last = rest.get(end..).is_none_or(|r| r.iter().all(|&c| c == b'/'));
-        if cur.getattr()?.kind != VType::Dir {
+        let dattr = cur.getattr()?;
+        if dattr.kind != VType::Dir {
             return Err(Errno::ENOTDIR);
         }
+        // Searching a directory needs its `x` bit.
+        vaccess(&dattr, cred, Want::SEARCH)?;
         let next = if name == b"." || (name == b".." && cur.same(&root)) {
             cur
         } else if name == b".." {
@@ -116,7 +122,7 @@ pub fn namei(root: Vnode, dir: Vnode, path: &[u8], follow: bool) -> KResult<Vnod
 /// (`namei` with `LOCKPARENT`, for `CREATE`, `DELETE`, `RENAME`): the
 /// directory and that name. Trailing slashes are dropped; `EINVAL` for
 /// `.` or `..` as the name, `ENOENT` for an empty path.
-pub fn namei_parent(root: Vnode, dir: Vnode, path: &[u8]) -> KResult<(Vnode, &[u8])> {
+pub fn namei_parent<'p>(root: Vnode, dir: Vnode, path: &'p [u8], cred: &Cred) -> KResult<(Vnode, &'p [u8])> {
     let mut end = path.len();
     while end > 1 && path.get(end - 1) == Some(&b'/') {
         end -= 1;
@@ -136,9 +142,11 @@ pub fn namei_parent(root: Vnode, dir: Vnode, path: &[u8]) -> KResult<(Vnode, &[u
     if name.len() > NAME_MAX {
         return Err(Errno::ENAMETOOLONG);
     }
-    let parent = namei(root, dir, dirpart, true)?;
-    if parent.getattr()?.kind != VType::Dir {
+    let parent = namei(root, dir, dirpart, true, cred)?;
+    let pattr = parent.getattr()?;
+    if pattr.kind != VType::Dir {
         return Err(Errno::ENOTDIR);
     }
+    vaccess(&pattr, cred, Want::SEARCH)?;
     Ok((parent, name))
 }

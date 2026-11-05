@@ -150,6 +150,11 @@ pub struct Proc {
     pub loginclass: MtxSpin<Comm>,
     /// How it ended, once it has: a zombie (`p_xexit`, `PRS_ZOMBIE`).
     exit: MtxSpin<Option<ExitStatus>>,
+    /// Created by `pdfork`: reached through a descriptor, not its
+    /// parent's `wait` for any child, and no `SIGCHLD` (`P2_PROCDESC`).
+    pub procdesc: AtomicBool,
+    /// Reaped as soon as it ends (its descriptor is closed).
+    autoreap: AtomicBool,
 }
 
 /// A change of a process's state that `wait` reports, besides its end.
@@ -305,6 +310,8 @@ impl Proc {
             itimer: MtxSpin::new(crate::kern_resource::Itimer { deadline: 0, interval: 0 }),
             loginclass: MtxSpin::new(Comm::from_path("default")),
             exit: MtxSpin::new(None),
+            procdesc: AtomicBool::new(false),
+            autoreap: AtomicBool::new(false),
         })
     }
 
@@ -344,6 +351,8 @@ impl Proc {
             itimer: MtxSpin::new(crate::kern_resource::Itimer { deadline: 0, interval: 0 }),
             loginclass: MtxSpin::new(*self.loginclass.lock()),
             exit: MtxSpin::new(None),
+            procdesc: AtomicBool::new(false),
+            autoreap: AtomicBool::new(false),
         })
     }
 
@@ -450,6 +459,15 @@ impl Proc {
         self.sig_hint.load(Ordering::Acquire)
     }
 
+    /// Reaps it as soon as it ends, or now if it has (its process
+    /// descriptor was closed).
+    pub fn set_autoreap(&self) {
+        self.autoreap.store(true, Ordering::Release);
+        if self.exit_status().is_some() {
+            drop(proc_unregister(self.pid));
+        }
+    }
+
     /// How it ended, if it is a zombie.
     pub fn exit_status(&self) -> Option<ExitStatus> {
         *self.exit.lock()
@@ -497,6 +515,9 @@ pub(crate) fn proc_zombie(p: &Proc, status: ExitStatus) {
         q.ppid.store(PID_INIT, Ordering::Release);
     }
     *p.exit.lock() = Some(status);
+    if p.autoreap.load(Ordering::Acquire) {
+        drop(proc_unregister(p.pid));
+    }
     wakeup_waiters();
 }
 
@@ -554,10 +575,12 @@ pub fn kern_wait(p: &Proc, who: WaitWho, opts: WaitOptions) -> KResult<Option<(u
         let mut matched = false;
         let mut found = None;
         for q in ALLPROC.lock().iter().filter(|q| q.ppid() == p.pid) {
+            // A child with a process descriptor is waited for only by pid.
+            let pd = q.procdesc.load(Ordering::Acquire);
             let wanted = match who {
-                WaitWho::Any => true,
+                WaitWho::Any => !pd,
                 WaitWho::Pid(pid) => q.pid == pid,
-                WaitWho::Pgid(g) => q.pgid() == g,
+                WaitWho::Pgid(g) => q.pgid() == g && !pd,
             };
             if !wanted {
                 continue;

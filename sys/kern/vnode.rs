@@ -121,6 +121,8 @@ pub enum NewNode<'a> {
     Symlink(&'a [u8]),
     /// A named pipe.
     Fifo,
+    /// A socket's name (`bind` in the local domain).
+    Socket,
 }
 
 /// Who owns a new file, and its permissions (`va_uid`, `va_gid`,

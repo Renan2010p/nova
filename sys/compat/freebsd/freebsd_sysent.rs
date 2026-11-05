@@ -34,7 +34,7 @@ use kern::kern_sig::psignal;
 use vm::vm_mmap::{MmapAt, kern_minherit, kern_mmap_anon, kern_mprotect, kern_munmap};
 use kern::sys_generic::{TtyOp, TtyReply, kern_tty_ioctl};
 use crate::freebsd_types::{STAT_SIZE, TERMIOS_SIZE, WINSIZE_SIZE, stat_out, termios_in, termios_out, winsize_in, winsize_out};
-use crate::{freebsd_poll, freebsd_proc, freebsd_prot, freebsd_resource, freebsd_vfs};
+use crate::{freebsd_poll, freebsd_proc, freebsd_prot, freebsd_resource, freebsd_socket, freebsd_vfs};
 
 use crate::arch::sysarch;
 use crate::freebsd_sysctl;
@@ -61,7 +61,9 @@ use crate::freebsd_syscalls::{
     SYS_setitimer, SYS_getitimer, SYS___realpathat, SYS_close_range, SYS_gettimeofday, SYS_settimeofday,
     SYS_clock_settime, SYS_poll, SYS_ppoll, SYS_select, SYS_pselect, SYS_setuid, SYS_seteuid, SYS_setgid,
     SYS_setegid, SYS_setreuid, SYS_setregid, SYS_setresuid, SYS_setresgid, SYS_getresuid, SYS_getresgid,
-    SYS_getgroups, SYS_setgroups,
+    SYS_getgroups, SYS_setgroups, SYS_socket, SYS_socketpair, SYS_bind, SYS_listen, SYS_accept, SYS_accept4,
+    SYS_connect, SYS_sendto, SYS_recvfrom, SYS_sendmsg, SYS_recvmsg, SYS_shutdown, SYS_getsockopt, SYS_setsockopt,
+    SYS_getsockname, SYS_getpeername, SYS_pdfork, SYS_pdkill, SYS_pdgetpid,
 };
 
 /// The outcome of one system call.
@@ -107,7 +109,7 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_open => freebsd_vfs::sys_openat(p, -100, args[0], int(1), args[2]).into(),
         SYS_openat => freebsd_vfs::sys_openat(p, int(0), args[1], int(2), args[3]).into(),
         SYS_access => freebsd_vfs::sys_faccessat(p, -100, args[0], int(1), 0).into(),
-        SYS_eaccess => freebsd_vfs::sys_faccessat(p, -100, args[0], int(1), 0).into(),
+        SYS_eaccess => freebsd_vfs::sys_faccessat(p, -100, args[0], int(1), 0x100).into(),
         SYS_faccessat => freebsd_vfs::sys_faccessat(p, int(0), args[1], int(2), int(3)).into(),
         SYS_chdir => freebsd_vfs::sys_chdir(p, args[0]).into(),
         SYS_fchdir => freebsd_vfs::sys_fchdir(p, int(0)).into(),
@@ -183,6 +185,25 @@ pub(crate) fn syscall(p: &Proc, regs: &mut UserRegs, code: u64, args: &[u64; 6])
         SYS_getresgid => freebsd_prot::sys_getres(p, true, [args[0], args[1], args[2]]).into(),
         SYS_getgroups => freebsd_prot::sys_getgroups(p, args[0], args[1]).into(),
         SYS_setgroups => freebsd_prot::sys_setgroups(p, args[0], args[1]).into(),
+        SYS_socket => freebsd_socket::sys_socket(p, int(0), int(1), int(2)).into(),
+        SYS_socketpair => freebsd_socket::sys_socketpair(p, int(0), int(1), int(2), args[3]).into(),
+        SYS_bind => freebsd_socket::sys_bind(p, int(0), args[1], args[2]).into(),
+        SYS_listen => freebsd_socket::sys_listen(p, int(0), int(1)).into(),
+        SYS_accept => freebsd_socket::sys_accept(p, int(0), args[1], args[2], 0).into(),
+        SYS_accept4 => freebsd_socket::sys_accept(p, int(0), args[1], args[2], int(3)).into(),
+        SYS_connect => freebsd_socket::sys_connect(p, int(0), args[1], args[2]).into(),
+        SYS_sendto => freebsd_socket::sys_sendto(p, args).into(),
+        SYS_recvfrom => freebsd_socket::sys_recvfrom(p, args).into(),
+        SYS_sendmsg => freebsd_socket::sys_sendmsg(p, int(0), args[1], int(2)).into(),
+        SYS_recvmsg => freebsd_socket::sys_recvmsg(p, int(0), args[1], int(2)).into(),
+        SYS_shutdown => freebsd_socket::sys_shutdown(p, int(0), int(1)).into(),
+        SYS_getsockopt => freebsd_socket::sys_getsockopt(p, args).into(),
+        SYS_setsockopt => freebsd_socket::sys_setsockopt(p, int(0)).into(),
+        SYS_getsockname => freebsd_socket::sys_getname(p, int(0), args[1], args[2], false).into(),
+        SYS_getpeername => freebsd_socket::sys_getname(p, int(0), args[1], args[2], true).into(),
+        SYS_pdfork => freebsd_socket::sys_pdfork(p, regs, args[0], int(1)).into(),
+        SYS_pdkill => freebsd_socket::sys_pdkill(p, int(0), int(1)).into(),
+        SYS_pdgetpid => freebsd_socket::sys_pdgetpid(p, int(0), args[1]).into(),
         SYS_poll => freebsd_poll::sys_poll(p, args[0], args[1], int(2)).into(),
         SYS_ppoll => freebsd_poll::sys_ppoll(p, args[0], args[1], args[2], args[3]).into(),
         SYS_select => freebsd_poll::sys_select(p, args).into(),
@@ -643,8 +664,12 @@ fn sys_ioctl(p: &Proc, fd: i32, cmd: u64, data: u64) -> KResult<[u64; 2]> {
             let n = i32::try_from(n).unwrap_or(i32::MAX);
             p.vm().copyout(data, &n.to_le_bytes()).map_err(vm_errno)?;
         }
-        // Close-on-exec and non-blocking I/O: nothing to change yet.
-        FIONBIO | FIOCLEX | FIONCLEX => sys_generic::kern_fd_valid(p, fd)?,
+        FIONBIO => {
+            let mut b = [0u8; 4];
+            p.vm().copyin(data, &mut b).map_err(vm_errno)?;
+            p.fd.get(fd)?.flags.lock().nonblock = i32::from_le_bytes(b) != 0;
+        }
+        FIOCLEX | FIONCLEX => p.fd.set_cloexec(fd, libkern::conv::trunc_u32(cmd) == FIOCLEX)?,
         _ => {
             sys_generic::kern_fd_valid(p, fd)?;
             return Err(Errno::ENOTTY);
