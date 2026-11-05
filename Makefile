@@ -114,12 +114,14 @@ kani:
 # FreeBSD host only, as root: boots the kernel with the system loader(8).
 # VERBOSE=1 boots verbose (boot -v); SELFTEST=pf|stack takes a fatal kernel
 # page fault or stack overflow on purpose; INIT=program is preloaded as
-# /sbin/init (default: ${USERLAND}/hello; INIT= for none).
+# /sbin/init (default: ${USERLAND}/hello; INIT= for none); ROOTFS=1 boots
+# with a UFS root holding the host's /rescue, and /rescue/sh as init.
 # It does not build: run `make` as yourself first, so that the kernel is
 # never built as root.
 bhyve:
 	@test -f ${KERNEL} || { echo "bhyve: ${KERNEL} not found; run make first" >&2; exit 1; }
 	VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" INIT_NAME="${INIT_NAME}" \
+	    ROOTFS="${ROOTFS}" INIT_PATH="${INIT_PATH}" \
 	    sh tools/bhyve/run.sh ${KERNEL}
 
 # Boots the kernel under QEMU as a real PC (BIOS, gptboot, the host's
@@ -128,12 +130,14 @@ bhyve:
 # console on the screen too); GUI=1 shows the screen in a window, VNC=1
 # over VNC; STAND=1 boots with the Nova stand's stand.efi instead of the
 # host's (implies UEFI=1); KERNEL_FILE= boots another kernel (for instance
-# /boot/kernel/kernel, FreeBSD's own).
+# /boot/kernel/kernel, FreeBSD's own); ROOTFS=1 boots with a UFS root
+# file system holding the host's /rescue, and /rescue/sh as init.
 KERNEL_FILE?=	${KERNEL}
 qemu:
 	@test -f ${KERNEL_FILE} || { echo "qemu: ${KERNEL_FILE} not found; run make first" >&2; exit 1; }
 	CPUS="${CPUS}" VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" INIT_NAME="${INIT_NAME}" TIMEOUT="${TIMEOUT}" \
 	    UEFI="${UEFI}" GUI="${GUI}" VNC="${VNC}" STAND="${STAND}" STAND_EFI="${STAND_EFI}" \
+	    ROOTFS="${ROOTFS}" INIT_PATH="${INIT_PATH}" \
 	    sh tools/qemu/run.sh ${KERNEL_FILE}
 
 clean:

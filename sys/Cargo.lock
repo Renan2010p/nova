@@ -24,6 +24,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "compat_freebsd_ufs"
+version = "0.1.0"
+dependencies = [
+ "framework",
+ "kern",
+ "libkern",
+ "sys",
+]
+
+[[package]]
 name = "framework"
 version = "0.1.0"
 dependencies = [
@@ -50,6 +60,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "compat_freebsd",
+ "compat_freebsd_ufs",
  "framework",
  "kern",
 ]

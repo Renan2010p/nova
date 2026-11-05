@@ -23,10 +23,12 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-/// Registers the ABIs this kernel is built with, then starts the kernel.
-/// This is the only place that names them (rule R9).
+/// Registers the ABIs and file systems this kernel is built with, then
+/// starts the kernel. This is the only place that names them (rules R9,
+/// R15 and R19).
 fn mi_startup(boot: &framework::BootInfo<'_>) -> ! {
     kern::kern_abi::abi_register(&compat_freebsd::ELF64_FREEBSD_SYSVEC);
+    kern::vfs_mount::vfs_register(&compat_freebsd_ufs::UFS_VFSCONF);
     kern::init_main::mi_startup(boot)
 }
 

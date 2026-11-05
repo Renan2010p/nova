@@ -27,10 +27,15 @@ use crate::kern_abi::SyscallOutcome;
 
 /// Runs `p` from `regs` until it exits. Called on `p`'s thread.
 pub fn userret_loop(p: &Proc, mut regs: UserRegs) -> ExitStatus {
-    user::set_vmspace(Some(p.vm.clone()));
+    user::set_vmspace(Some(p.vm()));
     let status = loop {
-        match user::enter(&mut regs) {
-            UserExit::Syscall => match p.abi.syscall(p, &mut regs) {
+        let exit = user::enter(&mut regs);
+        // Killed by another process meanwhile (`ast`).
+        if let Some(sig) = p.killed.lock().take() {
+            break sigexit(p, sig);
+        }
+        match exit {
+            UserExit::Syscall => match p.abi().syscall(p, &mut regs) {
                 SyscallOutcome::Return => {}
                 SyscallOutcome::Exit(rv) => break ExitStatus::Exited(rv),
                 SyscallOutcome::Signal(sig) => break sigexit(p, sig),
@@ -38,14 +43,13 @@ pub fn userret_loop(p: &Proc, mut regs: UserRegs) -> ExitStatus {
             UserExit::Interrupt => {}
             UserExit::Fault(fault) => {
                 // Memory mapped but not present yet is paged in.
-                if vm::vm_fault::vm_fault_trap(&p.vm, &fault) {
+                if vm::vm_fault::vm_fault_trap(&p.vm(), &fault) {
                     continue;
                 }
-                break sigexit(p, p.abi.trapsignal(p, &fault, &regs));
+                break sigexit(p, p.abi().trapsignal(p, &fault, &regs));
             }
         }
     };
     exit1(p, status);
-    user::set_vmspace(None);
     status
 }

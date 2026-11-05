@@ -38,3 +38,14 @@ pub fn pause(wmesg: &'static str, timo: u32) {
 pub(crate) fn tick_wakeup() {
     TICK_WAIT.wake_all();
 }
+
+/// Sleeps at least `ns` nanoseconds (`kern_nanosleep`): whole clock ticks,
+/// rounded up, plus one, since the current tick is partly gone.
+///
+/// TODO(signal): interrupted by a signal (`EINTR`, with the time left).
+pub fn kern_nanosleep(ns: u64) {
+    let hz = u64::from(kern_clock::hz());
+    let ticks = u128::from(ns) * u128::from(hz);
+    let ticks = u32::try_from(ticks.div_ceil(1_000_000_000) + 1).unwrap_or(u32::MAX);
+    pause("nanslp", ticks);
+}

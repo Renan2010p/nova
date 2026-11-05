@@ -18,6 +18,7 @@ bench = false
 
 [dependencies]
 compat_freebsd = { workspace = true }
+compat_freebsd_ufs = { workspace = true }
 framework = { workspace = true }
 kern = { workspace = true }
 

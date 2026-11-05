@@ -11,41 +11,92 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Processes (FreeBSD's `kern/kern_proc.c` and `struct proc`).
+//! Processes (FreeBSD's `kern/kern_proc.c` and `struct proc`), and the
+//! process table (`allproc`).
 //!
-//! For now a process is one thread running one image, as root, with the
-//! console as its standard descriptors.
+//! A process is one thread running one image. What `exec` replaces (the
+//! address space, the ABI, the command name) sits behind locks; the rest
+//! is fixed at creation or atomic.
 //!
-//! TODO(proc): process table, fork, wait, real credentials.
+//! TODO(proc): threads, real credentials, sessions as objects (a
+//! controlling terminal), `kinfo_proc`.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::fmt;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use framework::mm::KArc;
-use framework::sync::MtxSpin;
+use framework::mm::{KArc, KBox, KVec, M_WAITOK, MallocType};
+use framework::sync::{Mutex, MtxSpin, WaitQueue};
 use framework::user::VmSpace;
-use sys::signal::{NSIG, SigAction, SigSet};
-
-use sys::errno::KResult;
+use sys::errno::{Errno, KResult};
+use sys::signal::{NSIG, SigAction, SigHandler, SigSet, Signal};
 
 use crate::kern_abi::SysEntVec;
 use crate::kern_descrip::Filedesc;
+use crate::kern_exit::ExitStatus;
+use crate::vnode::Vnode;
+
+/// Processes (`M_PROC`).
+static M_PROC: MallocType = MallocType::new("proc");
 
 /// The pid of `init`.
 pub const PID_INIT: u32 = 1;
+/// Largest pid (`PID_MAX`); pids wrap around below it.
+pub const PID_MAX: u32 = 99_999;
 
 static NEXT_PID: AtomicU32 = AtomicU32::new(PID_INIT);
+
+/// Longest command name (`MAXCOMLEN`).
+pub const MAXCOMLEN: usize = framework::task::MAXCOMLEN;
+
+/// A command name (`p_comm`): at most [`MAXCOMLEN`] bytes, valid UTF-8.
+#[derive(Clone, Copy)]
+pub struct Comm {
+    buf: [u8; MAXCOMLEN],
+    len: usize,
+}
+
+impl Comm {
+    /// The last component of `path`, truncated at a character boundary.
+    pub fn from_path(path: &str) -> Self {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let mut len = name.len().min(MAXCOMLEN);
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        let mut buf = [0u8; MAXCOMLEN];
+        if let (Some(dst), Some(src)) = (buf.get_mut(..len), name.as_bytes().get(..len)) {
+            dst.copy_from_slice(src);
+        }
+        Self { buf, len }
+    }
+
+    /// The name.
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.buf.get(..self.len).unwrap_or(&[])).unwrap_or("?")
+    }
+}
+
+impl fmt::Display for Comm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// A process.
 pub struct Proc {
     /// Process id (`p_pid`).
     pub pid: u32,
-    /// Command name (`p_comm`): the last component of the path executed,
-    /// at most [`MAXCOMLEN`] bytes, in a fixed buffer as in FreeBSD.
-    comm: [u8; MAXCOMLEN],
-    comm_len: usize,
     /// Parent's pid (`p_pptr->p_pid`): 0 for init, whose parent is the
-    /// kernel.
-    pub ppid: u32,
+    /// kernel; init's when the parent exits first.
+    ppid: AtomicU32,
+    /// Process group (`p_pgrp->pg_id`).
+    pgid: AtomicU32,
+    /// Session (`p_session->s_sid`).
+    sid: AtomicU32,
+    /// Command name (`p_comm`).
+    comm: MtxSpin<Comm>,
+    /// The path last executed (`p_textvp`'s name, `kern.proc.pathname`).
+    execpath: Mutex<KVec<u8>>,
     /// Credentials (`p_ucred`).
     pub cred: Cred,
     /// User id (`cr_uid`), as in log messages.
@@ -53,13 +104,23 @@ pub struct Proc {
     /// Jail id (`pr_id`): 0, the host.
     pub jid: u32,
     /// The address space (`p_vmspace`).
-    pub vm: KArc<VmSpace>,
+    vm: MtxSpin<KArc<VmSpace>>,
     /// The ABI the image runs under (`p_sysent`).
-    pub abi: &'static dyn SysEntVec,
-    /// Signal mask and actions (`td_sigmask`, `p_sigacts`).
-    pub sig: MtxSpin<SigState>,
+    abi: MtxSpin<&'static dyn SysEntVec>,
+    /// Signal mask and actions (`td_sigmask`, `p_sigacts`): a few
+    /// kilobytes, so on the heap, as FreeBSD's `struct sigacts`.
+    pub sig: KBox<MtxSpin<SigState>>,
+    /// A signal sent by another process that kills it, acted on when it
+    /// next returns to user mode. TODO(signal): pending signals.
+    pub killed: MtxSpin<Option<Signal>>,
     /// Open files (`p_fd`).
     pub fd: Filedesc,
+    /// Current directory (`pwd_cdir`); `None` without a root file system.
+    pub cwd: MtxSpin<Option<Vnode>>,
+    /// File creation mask (`pwd_cmask`).
+    pub umask: AtomicU32,
+    /// How it ended, once it has: a zombie (`p_xexit`, `PRS_ZOMBIE`).
+    exit: MtxSpin<Option<ExitStatus>>,
 }
 
 /// Who a process acts as (`struct ucred`).
@@ -90,6 +151,16 @@ impl SigState {
     pub const fn new() -> Self {
         Self { mask: SigSet::EMPTY, actions: [SigAction::DEFAULT; NSIG] }
     }
+
+    /// After `exec`: caught signals go back to their default (`execsigs`);
+    /// ignored ones stay ignored, and the mask is kept.
+    pub fn exec(&mut self) {
+        for a in self.actions.iter_mut() {
+            if matches!(a.handler, SigHandler::Catch(_)) {
+                *a = SigAction::DEFAULT;
+            }
+        }
+    }
 }
 
 impl Default for SigState {
@@ -98,41 +169,289 @@ impl Default for SigState {
     }
 }
 
-impl Proc {
-    /// Command name (`p_comm`).
-    pub fn comm(&self) -> &str {
-        let bytes = self.comm.get(..self.comm_len).unwrap_or(&[]);
-        core::str::from_utf8(bytes).unwrap_or("?")
-    }
+/// `path` in kernel memory, as kept in a process.
+pub fn path_vec(path: &[u8]) -> KResult<KVec<u8>> {
+    let mut v = KVec::with_capacity(path.len(), &M_PROC, M_WAITOK)?;
+    v.extend_from_slice(path, M_WAITOK)?;
+    Ok(v)
+}
 
-    /// A new process for an image just executed, with the next pid, as
-    /// root, with the console as descriptors 0, 1 and 2.
-    pub fn new(path: &str, vm: KArc<VmSpace>, abi: &'static dyn SysEntVec) -> KResult<Self> {
-        let name = path.rsplit('/').next().unwrap_or(path);
-        // Truncated at a character boundary, so `comm()` is valid UTF-8.
-        let mut comm_len = name.len().min(MAXCOMLEN);
-        while !name.is_char_boundary(comm_len) {
-            comm_len -= 1;
+/// The next free pid (`fork_findpid`): counting up, wrapping below
+/// [`PID_MAX`], skipping pids in use as a process, group or session.
+fn next_pid() -> u32 {
+    loop {
+        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        if pid > PID_MAX {
+            let _ = NEXT_PID.compare_exchange(pid + 1, 2, Ordering::Relaxed, Ordering::Relaxed);
+            continue;
         }
-        let mut comm = [0u8; MAXCOMLEN];
-        if let (Some(dst), Some(src)) = (comm.get_mut(..comm_len), name.as_bytes().get(..comm_len)) {
-            dst.copy_from_slice(src);
+        let used = ALLPROC.lock().iter().any(|q| q.pid == pid || q.pgid() == pid || q.sid() == pid);
+        if !used {
+            return pid;
         }
-        Ok(Self {
-            pid: NEXT_PID.fetch_add(1, Ordering::Relaxed),
-            ppid: 0,
-            cred: Cred::default(),
-            comm,
-            comm_len,
-            uid: 0,
-            jid: 0,
-            vm,
-            abi,
-            sig: MtxSpin::new(SigState::new()),
-            fd: Filedesc::console()?,
-        })
     }
 }
 
-/// Longest command name (`MAXCOMLEN`).
-pub const MAXCOMLEN: usize = framework::task::MAXCOMLEN;
+impl Proc {
+    /// A new process for an image just executed (init), with the next
+    /// pid, as root, with the console as descriptors 0, 1 and 2, in the
+    /// root directory, its own group and session leader.
+    pub fn new(path: &str, vm: KArc<VmSpace>, abi: &'static dyn SysEntVec) -> KResult<Self> {
+        let pid = next_pid();
+        Ok(Self {
+            pid,
+            ppid: AtomicU32::new(0),
+            pgid: AtomicU32::new(pid),
+            sid: AtomicU32::new(pid),
+            comm: MtxSpin::new(Comm::from_path(path)),
+            execpath: Mutex::new(path_vec(path.as_bytes())?),
+            cred: Cred::default(),
+            uid: 0,
+            jid: 0,
+            vm: MtxSpin::new(vm),
+            abi: MtxSpin::new(abi),
+            sig: KBox::new(MtxSpin::new(SigState::new()), &M_PROC, M_WAITOK)?,
+            killed: MtxSpin::new(None),
+            fd: Filedesc::console()?,
+            cwd: MtxSpin::new(crate::vfs_mount::rootvnode()),
+            umask: AtomicU32::new(0o022),
+            exit: MtxSpin::new(None),
+        })
+    }
+
+    /// A child of `self` with address space `vm` (the copy `fork1` makes):
+    /// the same files, directory, signal actions and mask, group and
+    /// session.
+    pub fn fork(&self, vm: KArc<VmSpace>) -> KResult<Self> {
+        let sig = KBox::new(MtxSpin::new(SigState::new()), &M_PROC, M_WAITOK)?;
+        *sig.lock() = *self.sig.lock();
+        Ok(Self {
+            pid: next_pid(),
+            ppid: AtomicU32::new(self.pid),
+            pgid: AtomicU32::new(self.pgid()),
+            sid: AtomicU32::new(self.sid()),
+            comm: MtxSpin::new(self.comm()),
+            execpath: Mutex::new(path_vec(&self.execpath.lock())?),
+            cred: self.cred,
+            uid: self.uid,
+            jid: self.jid,
+            vm: MtxSpin::new(vm),
+            abi: MtxSpin::new(self.abi()),
+            sig,
+            killed: MtxSpin::new(None),
+            fd: self.fd.fork()?,
+            cwd: MtxSpin::new(*self.cwd.lock()),
+            umask: AtomicU32::new(self.umask.load(Ordering::Relaxed)),
+            exit: MtxSpin::new(None),
+        })
+    }
+
+    /// Command name (`p_comm`).
+    pub fn comm(&self) -> Comm {
+        *self.comm.lock()
+    }
+
+    /// Sets the command name and the path executed, at `exec`.
+    pub fn set_comm(&self, path: &str, execpath: KVec<u8>) {
+        *self.comm.lock() = Comm::from_path(path);
+        *self.execpath.lock() = execpath;
+    }
+
+    /// Calls `f` with the path last executed.
+    pub fn with_execpath<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(&self.execpath.lock())
+    }
+
+    /// The address space.
+    pub fn vm(&self) -> KArc<VmSpace> {
+        self.vm.lock().clone()
+    }
+
+    /// Replaces the address space (at `exec`, and at exit); returns the
+    /// old one, to be dropped by the caller outside the lock.
+    pub fn set_vm(&self, vm: KArc<VmSpace>) -> KArc<VmSpace> {
+        core::mem::replace(&mut *self.vm.lock(), vm)
+    }
+
+    /// The ABI the image runs under.
+    pub fn abi(&self) -> &'static dyn SysEntVec {
+        *self.abi.lock()
+    }
+
+    /// Sets the ABI, at `exec`.
+    pub fn set_abi(&self, abi: &'static dyn SysEntVec) {
+        *self.abi.lock() = abi;
+    }
+
+    /// Parent's pid.
+    pub fn ppid(&self) -> u32 {
+        self.ppid.load(Ordering::Acquire)
+    }
+
+    /// Process group.
+    pub fn pgid(&self) -> u32 {
+        self.pgid.load(Ordering::Acquire)
+    }
+
+    /// Session.
+    pub fn sid(&self) -> u32 {
+        self.sid.load(Ordering::Acquire)
+    }
+
+    /// How it ended, if it is a zombie.
+    pub fn exit_status(&self) -> Option<ExitStatus> {
+        *self.exit.lock()
+    }
+}
+
+/// Every process not yet reaped (`allproc`), zombies included.
+static ALLPROC: Mutex<KVec<KArc<Proc>>> = Mutex::new(KVec::new(&M_PROC));
+/// Woken whenever a process exits (the parent sleeps on it in `wait`).
+static PROC_EXITED: WaitQueue = WaitQueue::new();
+/// Counts exits, so a waiter can tell one happened since it looked.
+static EXIT_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Puts `p` in the table, as a `KArc` its thread and the table share.
+pub fn proc_register(p: Proc) -> KResult<KArc<Proc>> {
+    let p = KArc::new(p, &M_PROC, M_WAITOK)?;
+    ALLPROC.lock().push(p.clone(), M_WAITOK)?;
+    Ok(p)
+}
+
+/// Takes `pid` out of the table (a failed fork, or a reaped zombie).
+fn proc_unregister(pid: u32) -> Option<KArc<Proc>> {
+    let mut all = ALLPROC.lock();
+    let i = all.iter().position(|q| q.pid == pid)?;
+    Some(all.remove(i))
+}
+
+/// The process `pid` (`pfind`), zombies included.
+pub fn pfind(pid: u32) -> Option<KArc<Proc>> {
+    ALLPROC.lock().iter().find(|q| q.pid == pid).cloned()
+}
+
+/// Calls `f` on every process (`FOREACH_PROC_IN_SYSTEM`), with the table
+/// locked: `f` must not take it again.
+pub fn foreach_proc(mut f: impl FnMut(&KArc<Proc>)) {
+    for q in ALLPROC.lock().iter() {
+        f(q);
+    }
+}
+
+/// Marks `p` a zombie with `status`, gives its children to init, and
+/// wakes its parent (the end of `exit1`).
+pub(crate) fn proc_zombie(p: &Proc, status: ExitStatus) {
+    for q in ALLPROC.lock().iter().filter(|q| q.ppid() == p.pid) {
+        q.ppid.store(PID_INIT, Ordering::Release);
+    }
+    *p.exit.lock() = Some(status);
+    EXIT_GEN.fetch_add(1, Ordering::AcqRel);
+    PROC_EXITED.wake_all();
+}
+
+/// Undoes [`proc_register`] when a fork fails after it.
+pub(crate) fn proc_forget(pid: u32) {
+    drop(proc_unregister(pid));
+}
+
+/// Which children `wait` waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitWho {
+    /// Any child (`WAIT_ANY`).
+    Any,
+    /// This one.
+    Pid(u32),
+    /// Any in this process group.
+    Pgid(u32),
+}
+
+/// Waits for a child of `p` to end, and reaps it (`kern_wait6`): its pid
+/// and how it ended; `None` if `nohang` and none has ended yet. `ECHILD`
+/// if no child matches.
+pub fn kern_wait(p: &Proc, who: WaitWho, nohang: bool) -> KResult<Option<(u32, ExitStatus)>> {
+    loop {
+        let seen = EXIT_GEN.load(Ordering::Acquire);
+        let mut matched = false;
+        let mut zombie = None;
+        for q in ALLPROC.lock().iter().filter(|q| q.ppid() == p.pid) {
+            let wanted = match who {
+                WaitWho::Any => true,
+                WaitWho::Pid(pid) => q.pid == pid,
+                WaitWho::Pgid(g) => q.pgid() == g,
+            };
+            if !wanted {
+                continue;
+            }
+            matched = true;
+            if let Some(st) = q.exit_status() {
+                zombie = Some((q.pid, st));
+                break;
+            }
+        }
+        if let Some((pid, st)) = zombie {
+            // Reaped: the table's reference goes; the rest went at exit.
+            drop(proc_unregister(pid));
+            return Ok(Some((pid, st)));
+        }
+        if !matched {
+            return Err(Errno::ECHILD);
+        }
+        if nohang {
+            return Ok(None);
+        }
+        PROC_EXITED.wait_until(|| EXIT_GEN.load(Ordering::Acquire) != seen);
+    }
+}
+
+/// Sets the process group of `pid` (0: `p`) to `pgid` (0: the same as
+/// the pid) (`setpgid`). Only `p` and its children, in its session.
+pub fn kern_setpgid(p: &Proc, pid: u32, pgid: u32) -> KResult<()> {
+    let target = if pid == 0 || pid == p.pid { None } else { Some(pfind(pid).ok_or(Errno::ESRCH)?) };
+    let q: &Proc = target.as_deref().unwrap_or(p);
+    if q.pid != p.pid && q.ppid() != p.pid {
+        return Err(Errno::ESRCH);
+    }
+    if q.sid() != p.sid() || q.sid() == q.pid {
+        return Err(Errno::EPERM);
+    }
+    let pgid = if pgid == 0 { q.pid } else { pgid };
+    if pgid != q.pid {
+        // Joining an existing group: it must be in the same session.
+        let mut found = false;
+        foreach_proc(|r| found |= r.pgid() == pgid && r.sid() == q.sid());
+        if !found {
+            return Err(Errno::EPERM);
+        }
+    }
+    q.pgid.store(pgid, Ordering::Release);
+    Ok(())
+}
+
+/// Makes `p` the leader of a new session and group (`setsid`); `EPERM` if
+/// it already leads a group.
+pub fn kern_setsid(p: &Proc) -> KResult<u32> {
+    let mut leads = false;
+    foreach_proc(|q| leads |= q.pgid() == p.pid);
+    if leads {
+        return Err(Errno::EPERM);
+    }
+    p.pgid.store(p.pid, Ordering::Release);
+    p.sid.store(p.pid, Ordering::Release);
+    Ok(p.pid)
+}
+
+/// The group of `pid` (0: `p`) (`getpgid`).
+pub fn kern_getpgid(p: &Proc, pid: u32) -> KResult<u32> {
+    if pid == 0 || pid == p.pid {
+        return Ok(p.pgid());
+    }
+    pfind(pid).map(|q| q.pgid()).ok_or(Errno::ESRCH)
+}
+
+/// The session of `pid` (0: `p`) (`getsid`).
+pub fn kern_getsid(p: &Proc, pid: u32) -> KResult<u32> {
+    if pid == 0 || pid == p.pid {
+        return Ok(p.sid());
+    }
+    pfind(pid).map(|q| q.sid()).ok_or(Errno::ESRCH)
+}

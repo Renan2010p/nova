@@ -11,13 +11,14 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-//! Process exit (FreeBSD's `kern/kern_exit.c`).
-//!
-//! TODO(proc): zombies, `wait`, reparenting to init.
 
+//! Process exit (FreeBSD's `kern/kern_exit.c`); waiting for children is
+//! [`crate::kern_proc::kern_wait`].
+
+use framework::user;
 use sys::signal::Signal;
 
-use crate::kern_proc::{PID_INIT, Proc};
+use crate::kern_proc::{PID_INIT, Proc, proc_zombie};
 
 /// How a process ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +29,9 @@ pub enum ExitStatus {
     Signaled(Signal),
 }
 
-/// Ends process `p` (`exit1`). The caller's thread then exits.
+/// Ends process `p` (`exit1`): its files, directory and memory go, it
+/// becomes a zombie its parent reaps, and its children go to init. Called
+/// on `p`'s thread, which then exits.
 ///
 /// # Panics
 ///
@@ -37,9 +40,18 @@ pub fn exit1(p: &Proc, status: ExitStatus) {
     if p.pid == PID_INIT {
         let (signo, rval) = match status {
             ExitStatus::Exited(rv) => (0, rv),
-            ExitStatus::Signaled(sig) => (p.abi.signal_number(sig), 0),
+            ExitStatus::Signaled(sig) => (p.abi().signal_number(sig), 0),
         };
         crate::printf!("init died (signal {}, exit {})\n", signo, rval);
         panic!("Going nowhere without my init!");
     }
+    p.fd.close_all();
+    *p.cwd.lock() = None;
+    // The memory goes now, not when the zombie is reaped: an empty space
+    // takes its place (`vmspace_exit`).
+    user::set_vmspace(None);
+    if let Ok(empty) = user::VmSpace::new() {
+        drop(p.set_vm(empty));
+    }
+    proc_zombie(p, status);
 }

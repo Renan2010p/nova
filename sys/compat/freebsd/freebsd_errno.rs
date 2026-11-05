@@ -36,5 +36,15 @@ pub(crate) const fn errno(e: Errno) -> i32 {
         Errno::ERANGE => 34,
         Errno::EAGAIN => 35,
         Errno::ENOSYS => 78,
+        Errno::ECHILD => 10,
+        Errno::EBUSY => 16,
+        Errno::EEXIST => 17,
+        Errno::ENOTDIR => 20,
+        Errno::EISDIR => 21,
+        Errno::EMFILE => 24,
+        Errno::ESPIPE => 29,
+        Errno::EROFS => 30,
+        Errno::ELOOP => 62,
+        Errno::ENAMETOOLONG => 63,
     }
 }

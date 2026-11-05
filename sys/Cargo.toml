@@ -27,6 +27,7 @@ members = [
     "dev/vt",
     "kern",
     "compat/freebsd",
+    "compat/freebsd/fs/ufs",
     # conf: the kernel binary
     "conf",
 ]
@@ -54,6 +55,7 @@ vm = { path = "vm" }
 vt = { path = "dev/vt" }
 kern = { path = "kern" }
 compat_freebsd = { path = "compat/freebsd" }
+compat_freebsd_ufs = { path = "compat/freebsd/fs/ufs" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

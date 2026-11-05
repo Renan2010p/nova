@@ -57,6 +57,26 @@ pub enum Errno {
     EAGAIN,
     /// Function not implemented.
     ENOSYS,
+    /// No child processes.
+    ECHILD,
+    /// Device busy.
+    EBUSY,
+    /// File exists.
+    EEXIST,
+    /// Not a directory.
+    ENOTDIR,
+    /// Is a directory.
+    EISDIR,
+    /// Too many open files.
+    EMFILE,
+    /// Illegal seek.
+    ESPIPE,
+    /// Read-only file system.
+    EROFS,
+    /// Too many levels of symbolic links.
+    ELOOP,
+    /// File name too long.
+    ENAMETOOLONG,
 }
 
 /// The result of a kernel operation.

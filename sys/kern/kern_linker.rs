@@ -26,6 +26,7 @@ use core::fmt::{self, Write};
 use framework::BootInfo;
 use framework::sync::OnceLock;
 use sys::elf::KSymTab;
+use sys::linker::Module;
 
 static KSYMS: OnceLock<KSymTab<'static>> = OnceLock::new();
 
@@ -40,6 +41,12 @@ pub fn linker_init(boot: &BootInfo<'_>) {
 /// (`preload_search_by_name` and `preload_fetch_addr`), if any.
 pub fn preload_file(boot: &BootInfo<'_>, name: &str) -> Option<&'static [u8]> {
     let m = boot.preload.modules().find(|m| m.name() == Some(name))?;
+    preload_module(boot, &m)
+}
+
+/// The contents of a preloaded file (`preload_fetch_addr`,
+/// `preload_fetch_size`).
+pub fn preload_module(boot: &BootInfo<'_>, m: &Module<'_>) -> Option<&'static [u8]> {
     let off = usize::try_from(m.addr()?.checked_sub(boot.loaded_base)?).ok()?;
     let size = usize::try_from(m.size()?).ok()?;
     boot.loaded.get(off..off.checked_add(size)?)

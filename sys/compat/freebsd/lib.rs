@@ -45,12 +45,14 @@
 mod arch;
 mod freebsd_errno;
 mod freebsd_exec;
+mod freebsd_proc;
 mod freebsd_signal;
 mod freebsd_syscalls;
 mod freebsd_sysctl;
 mod freebsd_sysent;
 mod freebsd_sysvec;
 mod freebsd_types;
+mod freebsd_vfs;
 
 
 pub use freebsd_sysvec::ELF64_FREEBSD_SYSVEC;

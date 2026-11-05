@@ -20,8 +20,10 @@
 # VERBOSE=1 (boot_verbose, like "boot -v": diagnostics and self-test
 # results), SELFTEST=pf|stack (a fatal kernel page fault or stack overflow
 # on purpose, to check that traps are caught and reported), INIT=program
-# (preloaded as /sbin/init, which Nova executes as process 1; there is no
-# root file system yet).
+# (preloaded as /sbin/init, which Nova executes as process 1, when there
+# is no root file system), ROOTFS=1 (a UFS root file system holding the
+# host's /rescue, loaded as the memory disk md0, with INIT_PATH, default
+# /rescue/sh, as init; INIT is then not used).
 #
 # Nova halts like FreeBSD: "Please press any key to reboot." Press a key
 # (or wait for the panic countdown) and bhyve exits.
@@ -36,6 +38,8 @@ SELFTEST=${SELFTEST:-}
 VERBOSE=${VERBOSE:-}
 INIT=${INIT:-}
 INIT_NAME=${INIT_NAME:-}
+ROOTFS=${ROOTFS:-}
+INIT_PATH=${INIT_PATH:-}
 
 if [ "$(uname -s)" != FreeBSD ]; then
 	echo "run.sh: bhyve needs a FreeBSD host" >&2
@@ -74,7 +78,7 @@ EOF
 if [ -n "$VERBOSE" ]; then
 	echo 'boot_verbose="YES"' >> "$ROOT/boot/loader.conf"
 fi
-if [ -n "$INIT" ]; then
+if [ -n "$INIT" ] && [ -z "$ROOTFS" ]; then
 	# INIT_NAME: the path init is loaded as, and so its argv[0] (crunched
 	# binaries such as /rescue/rescue choose the program by it).
 	INIT_NAME=${INIT_NAME:-/sbin/init}
@@ -85,6 +89,28 @@ nova_init_load="YES"
 nova_init_type="nova_exec"
 nova_init_name="$INIT_NAME"
 init_path="$INIT_NAME"
+EOF
+fi
+if [ -n "$ROOTFS" ]; then
+	# The root file system: /rescue as FreeBSD installs it (one crunched
+	# binary, hard-linked under every name), /bin and /sbin pointing to
+	# it, and the usual empty directories.
+	MFS=$ROOT/mfsroot
+	mkdir -p "$MFS/rescue" "$MFS/dev" "$MFS/etc" "$MFS/tmp" "$MFS/root"
+	cp /rescue/rescue "$MFS/rescue/rescue"
+	for f in $(ls /rescue); do
+		[ "$f" = rescue ] || ln "$MFS/rescue/rescue" "$MFS/rescue/$f"
+	done
+	ln -s rescue "$MFS/bin"
+	ln -s rescue "$MFS/sbin"
+	echo "Nova root file system (UFS2 on md0)" > "$MFS/etc/motd"
+	makefs -t ffs -o version=2 -f 64 -b 10% "$ROOT/boot/mfsroot" "$MFS" >/dev/null
+	cat >> "$ROOT/boot/loader.conf" <<EOF
+mfsroot_load="YES"
+mfsroot_type="md_image"
+mfsroot_name="/boot/mfsroot"
+vfs.root.mountfrom="ufs:/dev/md0"
+init_path="${INIT_PATH:-/rescue/sh}"
 EOF
 fi
 if [ -n "$SELFTEST" ]; then

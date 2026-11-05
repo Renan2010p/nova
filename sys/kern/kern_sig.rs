@@ -20,13 +20,17 @@
 //! Masks and actions are kept (`sigprocmask`, `sigaction`); delivering a
 //! caught signal needs a signal frame, which is the ABI's (`sv_sendsig`).
 //!
-//! TODO(signal): delivery to handlers, `kill`, pending signals, core dumps.
+//! `kill` kills a process whose action for the signal is to die; it does
+//! so when the process next returns to user mode.
+//!
+//! TODO(signal): delivery to handlers, pending signals, core dumps, waking
+//! a process asleep in the kernel.
 
 use sys::errno::{Errno, KResult};
 use sys::signal::{SigAction, SigDefault, SigHandler, SigSet, Signal};
 
 use crate::kern_exit::ExitStatus;
-use crate::kern_proc::Proc;
+use crate::kern_proc::{PID_INIT, Proc, foreach_proc};
 
 /// Log processes killed by signals (`kern.logsigexit`).
 const KERN_LOGSIGEXIT: bool = true;
@@ -41,7 +45,7 @@ pub fn sigexit(p: &Proc, sig: Signal) -> ExitStatus {
             p.comm(),
             p.jid,
             p.uid,
-            p.abi.signal_number(sig),
+            p.abi().signal_number(sig),
             if err.is_some() { "no core dump - " } else { "core dumped" },
             err.unwrap_or("")
         );
@@ -130,4 +134,52 @@ pub fn kern_sigself(p: &Proc, sig: Signal) -> SelfSignal {
             SigDefault::Stop | SigDefault::Continue => SelfSignal::StopOrContinue,
         },
     }
+}
+
+/// What `sig` does to `p` now, as [`kern_sigself`] says it for oneself.
+fn sig_effect(p: &Proc, sig: Signal) -> SelfSignal {
+    kern_sigself(p, sig)
+}
+
+/// Which processes `kill` sends to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KillWho {
+    /// This process.
+    Pid(u32),
+    /// The caller's process group.
+    OwnGroup,
+    /// This process group.
+    Group(u32),
+    /// Every process but init and the caller (`kill(-1, ...)`).
+    All,
+}
+
+/// Sends `sig` (`None`: only check) to `who` (`kern_kill`). Returns what
+/// it does to the caller, if the caller is among them, so that the ABI
+/// can end it at once. `ESRCH` if no process matched.
+pub fn kern_kill(p: &Proc, who: KillWho, sig: Option<Signal>) -> KResult<SelfSignal> {
+    let own = p.pgid();
+    let mut found = false;
+    let mut to_self = SelfSignal::Nothing;
+    foreach_proc(|q| {
+        let hit = match who {
+            KillWho::Pid(pid) => q.pid == pid,
+            KillWho::OwnGroup => q.pgid() == own,
+            KillWho::Group(g) => q.pgid() == g,
+            KillWho::All => q.pid != PID_INIT && q.pid != p.pid,
+        };
+        if !hit || q.exit_status().is_some() {
+            return;
+        }
+        found = true;
+        let Some(sig) = sig else { return };
+        if q.pid == p.pid {
+            to_self = kern_sigself(p, sig);
+        } else if let SelfSignal::Kill(s) = sig_effect(q, sig) {
+            *q.killed.lock() = Some(s);
+        } else if crate::init_main::bootverbose() {
+            crate::printf!("pid {} comm {}: signal {:?} to pid {}: not delivered (not implemented yet)\n", p.pid, p.comm(), sig, q.pid);
+        }
+    });
+    if found { Ok(to_self) } else { Err(Errno::ESRCH) }
 }

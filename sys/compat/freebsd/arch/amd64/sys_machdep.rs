@@ -30,12 +30,12 @@ const AMD64_DISABLE_TLSBASE: i32 = 137;
 pub(crate) fn sysarch(p: &Proc, regs: &mut UserRegs, op: i32, parms: u64) -> KResult<[u64; 2]> {
     match op {
         AMD64_GET_FSBASE => {
-            p.vm.copyout(parms, &regs.fsbase.to_le_bytes()).map_err(vm_errno)?;
+            p.vm().copyout(parms, &regs.fsbase.to_le_bytes()).map_err(vm_errno)?;
             Ok([0, 0])
         }
         AMD64_SET_FSBASE | AMD64_SET_TLSBASE => {
             let mut b = [0u8; 8];
-            p.vm.copyin(parms, &mut b).map_err(vm_errno)?;
+            p.vm().copyin(parms, &mut b).map_err(vm_errno)?;
             let base = u64::from_le_bytes(b);
             if base >= VM_MAXUSER_ADDRESS {
                 return Err(Errno::EINVAL);
@@ -51,7 +51,7 @@ pub(crate) fn sysarch(p: &Proc, regs: &mut UserRegs, op: i32, parms: u64) -> KRe
             if !regs.tlsbase_set {
                 return Err(Errno::ESRCH);
             }
-            p.vm.copyout(parms, &regs.tlsbase.to_le_bytes()).map_err(vm_errno)?;
+            p.vm().copyout(parms, &regs.tlsbase.to_le_bytes()).map_err(vm_errno)?;
             Ok([0, 0])
         }
         AMD64_DISABLE_TLSBASE => {

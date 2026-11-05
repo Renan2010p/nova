@@ -479,6 +479,48 @@ impl VmSpace {
         Ok(())
     }
 
+    /// A copy of this space for a child process (`vmspace_fork`): each
+    /// region as its inheritance says (`minherit`): copied, left out, or
+    /// fresh zeroed memory. May sleep.
+    ///
+    /// TODO(vm): copy-on-write, and `Share` really shared (it is copied).
+    pub fn fork(&self) -> Result<KArc<VmSpace>, VmError> {
+        let child = VmSpace::new()?;
+        {
+            let map = self.map.lock();
+            let mut cmap = child.map.lock();
+            for r in map.regions.iter().filter(|r| r.inherit != Inherit::None) {
+                cmap.regions.push(*r, M_WAITOK)?;
+            }
+            let mut buf = [0u8; 512];
+            for page in map.pages.iter() {
+                let Some(r) = map.region(page.va) else { continue };
+                if !matches!(r.inherit, Inherit::Copy | Inherit::Share) {
+                    continue;
+                }
+                cmap.pages.reserve(1, M_WAITOK)?;
+                let mut frame = Frame::alloc().ok_or(VmError::NoMemory)?;
+                for off in (0..PAGE_SIZE).step_by(buf.len()) {
+                    page.frame.read_bytes(off, &mut buf);
+                    frame.write_bytes(off, &buf);
+                }
+                // As the parent's page: unmapped while its region may not
+                // be read.
+                let mapped = page.mapped;
+                // SAFETY: `child.root` is live (we own it); `page.va` is
+                // aligned, in user space and not mapped in the child (pages
+                // are copied once each, in order), under the child's map
+                // lock; the frame stays in `pages` as long as it is mapped.
+                if mapped && !unsafe { Md::pmap_enter_user(child.root, page.va, frame.paddr(), r.prot, &mut pt_alloc) } {
+                    return Err(VmError::NoMemory);
+                }
+                // Room was reserved, and pages come in address order.
+                cmap.pages.push(Page { va: page.va, frame, mapped }, M_WAITOK)?;
+            }
+        }
+        Ok(child)
+    }
+
     /// Copies user memory at `va` into `buf` (`copyin`).
     pub fn copyin(&self, va: u64, buf: &mut [u8]) -> Result<(), VmError> {
         let mut map = self.map.lock();

@@ -34,8 +34,9 @@
 //! ```
 //!
 //! Diagnostics FreeBSD only shows with `boot -v` are only shown with
-//! `boot -v` here too. There is no userland yet, so the kernel halts at
-//! the point where FreeBSD would start `init(8)`.
+//! `boot -v` here too. The root file system is mounted from the memory
+//! disk the loader preloaded, if any, and `init` started from it (or from
+//! a file the loader preloaded).
 
 use libkern::conv::u64_from_usize;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +48,7 @@ use sys::reboot::{RB_SINGLE, RB_VERBOSE};
 use crate::kern_environment::StaticEnv;
 use crate::subr_prf::Cons;
 use crate::vers::{COMPILER, KERN_IDENT, OSRELEASE, VCS};
-use crate::kern_proc::Proc;
+use crate::kern_proc::{Proc, proc_register};
 use crate::{
     kern_clock, kern_exec, kern_kthread, kern_linker, kern_random, kern_shutdown, kern_synch, printf,
     sched_4bsd, subr_param, subr_selftest, subr_trap,
@@ -93,7 +94,7 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     subr_selftest::run(bootverbose, param.hz);
     subr_selftest::trap_selftest(&kenv);
 
-    // This is where FreeBSD would start init(8).
+    crate::vfs_mount::vfs_mountroot(boot, &kenv);
     start_init(boot, &kenv, bootverbose);
     swapper(param.hz)
 }
@@ -101,26 +102,41 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
 /// Paths tried for `init`, unless `init_path` is set (FreeBSD's default).
 const INIT_PATH: &str = "/sbin/init:/sbin/oinit:/sbin/init.bak:/rescue/init";
 
-/// Starts the initial user process: execs the first file of `init_path`
-/// that the loader preloaded (`start_init`; there is no root file system
-/// yet, so "found" means preloaded, e.g. with `init_load="YES"`,
-/// `init_type="nova_exec"` and `init_name="/sbin/init"` in loader.conf).
+/// Starts the initial user process (`start_init`): execs the first file
+/// of `init_path` found on the root file system, or else preloaded by the
+/// loader (e.g. with `init_load="YES"`, `init_type="nova_exec"` and
+/// `init_name="/sbin/init"` in loader.conf).
 fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
     let init_path = kenv.getenv("init_path").unwrap_or(INIT_PATH);
     for path in init_path.split(':') {
         if bootverbose {
             printf!("start_init: trying {}\n", path);
         }
-        let Some(file) = kern_linker::preload_file(boot, path) else {
-            continue; // ENOENT
-        };
         // `init` gets its path and, in single-user mode, `-s`.
         let args = [path, "-s"];
         let argc = if boot.howto & RB_SINGLE != 0 { 2 } else { 1 };
         let argv = args.get(..argc).unwrap_or(&args);
-        match kern_exec::kern_execve(file, path, argv, &[]) {
+        let image = match crate::vfs_mount::rootvnode() {
+            // On the root file system, through a process with no image yet
+            // only for the lookup: the root is its directory.
+            Some(root) => match crate::vfs_lookup::namei(root, root, path.as_bytes(), true) {
+                Ok(vp) => kern_exec::kern_execve(&vp, path, argv, &[]),
+                Err(e) => {
+                    if bootverbose {
+                        printf!("start_init: {}: {:?}\n", path, e);
+                    }
+                    continue;
+                }
+            },
+            None => match kern_linker::preload_file(boot, path) {
+                Some(file) => kern_exec::kern_execve(&kern_exec::MemFile(file), path, argv, &[]),
+                None => continue, // ENOENT
+            },
+        };
+        match image {
             Ok(image) => {
-                let p = match Proc::new(path, image.vm, image.abi) {
+                let p = Proc::new(path, image.vm, image.abi).and_then(proc_register);
+                let p = match p {
                     Ok(p) => p,
                     Err(e) => panic!("start_init: cannot create init: {e:?}"),
                 };

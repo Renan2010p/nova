@@ -72,6 +72,7 @@ impl SysEntVec for FreebsdSysvec {
             SyscallResult::Err(e) => cpu_set_syscall_retval(regs, Err(freebsd_errno::errno(e))),
             SyscallResult::Exit(rv) => return SyscallOutcome::Exit(rv),
             SyscallResult::Signal(sig) => return SyscallOutcome::Signal(sig),
+            SyscallResult::JustReturn => {}
         }
         SyscallOutcome::Return
     }

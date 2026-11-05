@@ -213,5 +213,7 @@ pub(crate) fn stat_out(s: &Stat) -> [u8; STAT_SIZE] {
     put(112, &s.size.to_le_bytes());
     put(120, &s.blocks.to_le_bytes());
     put(128, &s.blksize.to_le_bytes());
+    put(132, &s.flags.to_le_bytes());
+    put(136, &u64::from(s.generation).to_le_bytes());
     b
 }

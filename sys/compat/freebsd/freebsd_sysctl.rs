@@ -137,7 +137,7 @@ fn access(p: &Proc, node: &Node, old: u64, oldlenp: u64, new: u64, newlen: u64) 
             Value::Hostname => {
                 let n = usize_from_u64(newlen).min(MAXHOSTNAMELEN + 1);
                 let mut b = [0u8; MAXHOSTNAMELEN + 1];
-                p.vm.copyin(new, &mut b[..n]).map_err(vm_errno)?;
+                p.vm().copyin(new, &mut b[..n]).map_err(vm_errno)?;
                 let len = b[..n].iter().position(|&c| c == 0).unwrap_or(n);
                 set_hostname(&b[..len])?;
             }
@@ -148,7 +148,7 @@ fn access(p: &Proc, node: &Node, old: u64, oldlenp: u64, new: u64, newlen: u64) 
         return Ok([0, 0]);
     }
     let mut lenb = [0u8; 8];
-    p.vm.copyin(oldlenp, &mut lenb).map_err(vm_errno)?;
+    p.vm().copyin(oldlenp, &mut lenb).map_err(vm_errno)?;
     let room = usize_from_u64(u64::from_le_bytes(lenb));
     let want = if let Value::Arandom = node.value {
         // As much randomness as asked, up to the buffer FreeBSD uses.
@@ -162,11 +162,11 @@ fn access(p: &Proc, node: &Node, old: u64, oldlenp: u64, new: u64, newlen: u64) 
         Ok([0, 0])
     } else {
         let n = want.min(room);
-        p.vm.copyout(old, &val[..n]).map_err(vm_errno)?;
+        p.vm().copyout(old, &val[..n]).map_err(vm_errno)?;
         if n < want { Err(Errno::ENOMEM) } else { Ok([0, 0]) }
     };
     let reported = if old == 0 { want } else { want.min(room) };
-    p.vm.copyout(oldlenp, &u64_from_usize(reported).to_le_bytes()).map_err(vm_errno)?;
+    p.vm().copyout(oldlenp, &u64_from_usize(reported).to_le_bytes()).map_err(vm_errno)?;
     result
 }
 
@@ -175,16 +175,16 @@ fn access(p: &Proc, node: &Node, old: u64, oldlenp: u64, new: u64, newlen: u64) 
 fn name2oid(p: &Proc, old: u64, oldlenp: u64, new: u64, newlen: u64) -> KResult<[u64; 2]> {
     let mut name = [0u8; 256];
     let n = usize_from_u64(newlen).min(name.len());
-    p.vm.copyin(new, &mut name[..n]).map_err(vm_errno)?;
+    p.vm().copyin(new, &mut name[..n]).map_err(vm_errno)?;
     let node = find_name(&name[..n]).ok_or(Errno::ENOENT)?;
     let mut out = [0u8; 4 * CTL_MAXNAME];
     for (i, x) in node.mib.iter().enumerate() {
         out[4 * i..4 * i + 4].copy_from_slice(&x.to_le_bytes());
     }
     let len = 4 * node.mib.len();
-    p.vm.copyout(old, &out[..len]).map_err(vm_errno)?;
+    p.vm().copyout(old, &out[..len]).map_err(vm_errno)?;
     if oldlenp != 0 {
-        p.vm.copyout(oldlenp, &u64_from_usize(len).to_le_bytes()).map_err(vm_errno)?;
+        p.vm().copyout(oldlenp, &u64_from_usize(len).to_le_bytes()).map_err(vm_errno)?;
     }
     Ok([0, 0])
 }
@@ -197,6 +197,7 @@ fn unknown(p: &Proc, what: core::fmt::Arguments<'_>) -> Errno {
 }
 
 /// `__sysctl(name, namelen, old, oldlenp, new, newlen)`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
 pub(crate) fn sys_sysctl(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     let (name, namelen) = (args[0], usize_from_u64(u64::from(trunc_u32(args[1]))));
     if !(2..=CTL_MAXNAME).contains(&namelen) {
@@ -204,7 +205,7 @@ pub(crate) fn sys_sysctl(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     }
     let mut mib = [0i32; CTL_MAXNAME];
     let mut b = [0u8; 4 * CTL_MAXNAME];
-    p.vm.copyin(name, &mut b[..4 * namelen]).map_err(vm_errno)?;
+    p.vm().copyin(name, &mut b[..4 * namelen]).map_err(vm_errno)?;
     for (i, m) in mib.iter_mut().enumerate().take(namelen) {
         *m = i32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
     }
@@ -212,15 +213,49 @@ pub(crate) fn sys_sysctl(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     if mib == [0, 3] {
         return name2oid(p, args[2], args[3], args[4], args[5]);
     }
+    // `kern.proc.pathname.<pid>` (`-1`: the caller).
+    if let [1, 14, 12, pid] = *mib {
+        return proc_pathname(p, pid, args[2], args[3]);
+    }
     let node = find_mib(mib).ok_or_else(|| unknown(p, format_args!("{mib:?}")))?;
     access(p, node, args[2], args[3], args[4], args[5])
 }
 
+/// `kern.proc.pathname`: the path a process executed, with its NUL.
+fn proc_pathname(p: &Proc, pid: i32, old: u64, oldlenp: u64) -> KResult<[u64; 2]> {
+    let target = if pid == -1 || u32::try_from(pid).is_ok_and(|n| n == p.pid) {
+        None
+    } else {
+        let pid = u32::try_from(pid).map_err(|_| Errno::EINVAL)?;
+        Some(kern::kern_proc::pfind(pid).ok_or(Errno::ESRCH)?)
+    };
+    let q: &Proc = target.as_deref().unwrap_or(p);
+    let mut val = [0u8; 1024];
+    let len = q.with_execpath(|path| {
+        let n = path.len().min(val.len() - 1);
+        val[..n].copy_from_slice(&path[..n]);
+        n + 1
+    });
+    let vm = p.vm();
+    let mut lenb = [0u8; 8];
+    vm.copyin(oldlenp, &mut lenb).map_err(vm_errno)?;
+    let room = usize_from_u64(u64::from_le_bytes(lenb));
+    if old != 0 {
+        if room < len {
+            return Err(Errno::ENOMEM);
+        }
+        vm.copyout(old, &val[..len]).map_err(vm_errno)?;
+    }
+    vm.copyout(oldlenp, &u64_from_usize(len).to_le_bytes()).map_err(vm_errno)?;
+    Ok([0, 0])
+}
+
 /// `__sysctlbyname(name, namelen, old, oldlenp, new, newlen)`.
+#[inline(never)] // its buffers stay out of `syscall`'s frame
 pub(crate) fn sys_sysctlbyname(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     let mut name = [0u8; 256];
     let n = usize_from_u64(args[1]).min(name.len());
-    p.vm.copyin(args[0], &mut name[..n]).map_err(vm_errno)?;
+    p.vm().copyin(args[0], &mut name[..n]).map_err(vm_errno)?;
     let name = &name[..n];
     let node = find_name(name).ok_or_else(|| {
         unknown(p, format_args!("{}", core::str::from_utf8(name).unwrap_or("?")))

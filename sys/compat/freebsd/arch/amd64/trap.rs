@@ -38,7 +38,7 @@ pub(crate) fn cpu_fetch_syscall_args(regs: &UserRegs) -> (u64, [u64; 6]) {
 /// prints it on a verbose boot.
 pub(crate) fn trap_uprintf_signal(p: &Proc, regs: &UserRegs, fault: &UserFault, signo: i32) {
     let mut code = [0u8; 8];
-    let shown = p.vm.copyin(regs.rip, &mut code).is_ok();
+    let shown = p.vm().copyin(regs.rip, &mut code).is_ok();
     printf!(
         "pid {} comm {}: signal {} err {:#x} code {} type {} addr {:#x} rsp {:#x} rip {:#x} rax {:#x} fsb {:#x} gsb {:#x} ",
         p.pid,

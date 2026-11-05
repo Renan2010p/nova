@@ -26,7 +26,7 @@ pub fn kern_getpid(p: &Proc) -> u32 {
 
 /// The parent's pid (`getppid`).
 pub fn kern_getppid(p: &Proc) -> u32 {
-    p.ppid
+    p.ppid()
 }
 
 /// Real and effective user and group ids (`getuid`, `geteuid`, `getgid`,

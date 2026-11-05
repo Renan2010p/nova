@@ -16,7 +16,9 @@
 #
 # Environment: MEM (default 512M), CPUS (default 2), VERBOSE=1 (boot -v),
 # SELFTEST=pf|stack, INIT=program (preloaded as /sbin/init, or as
-# INIT_NAME), TIMEOUT=secs
+# INIT_NAME), ROOTFS=1 (a UFS root file system with the host's /rescue,
+# loaded as the memory disk md0, with INIT_PATH, default /rescue/sh, as
+# init; INIT is then not used), TIMEOUT=secs
 # (stop QEMU after that long; default none), CPU (QEMU CPU model, default
 # max), UEFI=1 (boot with QEMU's edk2 firmware and the host's loader.efi
 # from an EFI system partition; the console is then the screen, mirrored
@@ -40,6 +42,8 @@ CPUS=${CPUS:-2}
 VERBOSE=${VERBOSE:-}
 SELFTEST=${SELFTEST:-}
 INIT=${INIT:-}
+ROOTFS=${ROOTFS:-}
+INIT_PATH=${INIT_PATH:-}
 TIMEOUT=${TIMEOUT:-}
 CPU=${CPU:-max}
 WORK=${WORK:-sys/target/qemu}
@@ -88,7 +92,7 @@ fi
 if [ -n "$SELFTEST" ]; then
 	echo "debug.nova.selftest=\"$SELFTEST\"" >> "$ROOT/boot/loader.conf"
 fi
-if [ -n "$INIT" ]; then
+if [ -n "$INIT" ] && [ -z "$ROOTFS" ]; then
 	# INIT_NAME: the path init is loaded as, and so its argv[0] (crunched
 	# binaries such as /rescue/rescue choose the program by it).
 	INIT_NAME=${INIT_NAME:-/sbin/init}
@@ -102,7 +106,30 @@ init_path="$INIT_NAME"
 CONF
 fi
 
-makefs -t ffs -o version=2 -s 64m "$WORK/root.ufs" "$ROOT" >/dev/null
+if [ -n "$ROOTFS" ]; then
+	# The root file system: /rescue as FreeBSD installs it (one crunched
+	# binary, hard-linked under every name), /bin and /sbin pointing to
+	# it, and the usual empty directories.
+	MFS=$WORK/mfsroot
+	mkdir -p "$MFS/rescue" "$MFS/dev" "$MFS/etc" "$MFS/tmp" "$MFS/root"
+	cp /rescue/rescue "$MFS/rescue/rescue"
+	for f in $(ls /rescue); do
+		[ "$f" = rescue ] || ln "$MFS/rescue/rescue" "$MFS/rescue/$f"
+	done
+	ln -s rescue "$MFS/bin"
+	ln -s rescue "$MFS/sbin"
+	echo "Nova root file system (UFS2 on md0)" > "$MFS/etc/motd"
+	makefs -t ffs -o version=2 -f 64 -b 10% "$ROOT/boot/mfsroot" "$MFS" >/dev/null
+	cat >> "$ROOT/boot/loader.conf" <<CONF
+mfsroot_load="YES"
+mfsroot_type="md_image"
+mfsroot_name="/boot/mfsroot"
+vfs.root.mountfrom="ufs:/dev/md0"
+CONF
+	echo "init_path=\"${INIT_PATH:-/rescue/sh}\"" >> "$ROOT/boot/loader.conf"
+fi
+
+makefs -t ffs -o version=2 -s 128m "$WORK/root.ufs" "$ROOT" >/dev/null
 # An EFI system partition with a loader.efi as the default boot program.
 # The host's finds /boot on the UFS partition; the Nova stand's reads the
 # EFI partition itself (it has no UFS yet), so /boot goes there too.

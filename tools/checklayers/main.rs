@@ -43,7 +43,11 @@
 //!   root documents what it offers (`//!`);
 //! * R15 no ABI vocabulary (`freebsd`, `linux`, ...) in identifiers
 //!   outside the personalities (`compat/*`) and `conf`: the kernel knows
-//!   no ABI, so running another one only takes a new `sys/compat/<abi>`.
+//!   no ABI, so running another one only takes a new `sys/compat/<abi>`;
+//! * R19 no file system vocabulary (`ufs`, `zfs`, `ext4`, `msdosfs`, ...)
+//!   in identifiers outside the personalities and `conf`: the kernel's VFS
+//!   knows no file system; each is a crate under `sys/compat/<abi>/fs/`,
+//!   registered by `conf` behind `kern::vnode::VfsOps`.
 //!
 //! It is deliberately dependency-free and parses only the subset of TOML
 //! that sys/ uses. Source checks run on code with comments and string
@@ -358,6 +362,21 @@ fn check_sources(sys: &Path, c: &Crate, report: &mut Report) -> Result<(), Strin
                     }
                 }
             }
+            if !c.path.starts_with("compat/") && c.layer != Layer::Conf {
+                for ident in identifiers(line) {
+                    if let Some(word) = fs_word(ident) {
+                        report.err(
+                            file,
+                            n,
+                            format!(
+                                "R19: `{ident}` names the `{word}` file system outside sys/compat; \
+                                 the kernel knows no file system: put it in \
+                                 sys/compat/<abi>/fs/, behind `kern::vnode::VfsOps`"
+                            ),
+                        );
+                    }
+                }
+            }
             if line.contains("extern crate alloc") || line.contains("global_allocator") {
                 report.err(
                     file,
@@ -405,6 +424,14 @@ const ABI_WORDS: &[&str] = &[
     "darwin", "macos", "xnu", "svr4", "ibcs2", "cloudabi", "haiku", "redox",
 ];
 
+/// Words that name a file system (R19). As for ABI words, only
+/// personalities and `conf` may contain them in identifiers.
+const FS_WORDS: &[&str] = &[
+    "ufs", "ffs", "zfs", "ext2", "ext2fs", "ext3", "ext4", "msdosfs", "fat", "fat16", "fat32",
+    "vfat", "exfat", "ntfs", "cd9660", "iso9660", "udf", "nfs", "smbfs", "btrfs", "xfs", "hfs",
+    "apfs", "tmpfs", "fusefs",
+];
+
 /// The identifiers of a line of (comment- and string-free) code.
 fn identifiers(line: &str) -> impl Iterator<Item = &str> {
     line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -425,6 +452,11 @@ fn md_word(ident: &str) -> Option<&'static str> {
 /// `ELF64_FREEBSD_SYSVEC` both contain `freebsd`).
 fn abi_word(ident: &str) -> Option<&'static str> {
     word_in(ident, ABI_WORDS)
+}
+
+/// The first file system word an identifier is made of (R19).
+fn fs_word(ident: &str) -> Option<&'static str> {
+    word_in(ident, FS_WORDS)
 }
 
 /// The first word of `list` an identifier is made of, splitting
@@ -637,6 +669,14 @@ mod tests {
             !out.contains("target_arch") && !out.contains("asm!") && !out.contains("static mut")
         );
         assert!(out.contains('a') && out.contains('c') && out.contains('d'));
+    }
+
+    #[test]
+    fn fs_words_are_found_in_identifiers() {
+        assert_eq!(fs_word("ufs_lookup"), Some("ufs"));
+        assert_eq!(fs_word("UfsMount"), Some("ufs"));
+        assert_eq!(fs_word("vfs_lookup"), None);
+        assert_eq!(fs_word("buffer"), None);
     }
 
     #[test]
