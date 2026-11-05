@@ -1,5 +1,7 @@
 # Nova Project
 
+[![CI](https://github.com/Renan2010p/nova/actions/workflows/ci.yml/badge.svg)](https://github.com/Renan2010p/nova/actions/workflows/ci.yml)
+
 **The kernel of the Renux "Nova" Project.**
 
 Nova is a kernel written 100% in Rust, licensed under the MPL-2.0, that

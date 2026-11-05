@@ -1,0 +1,176 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# Nova CI.
+#
+# Every push and pull request builds the kernel for amd64 and riscv64,
+# runs the host unit tests, the layering rules and clippy.  The boot job
+# is manual (Actions -> CI -> Run workflow): it builds the Nova stand,
+# makes a small EFI system partition with the kernel and stand.conf,
+# and boots the kernel under QEMU with OVMF, checking the console.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: build, test, lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: clippy
+          targets: x86_64-unknown-none,riscv64gc-unknown-none-elf,x86_64-unknown-uefi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sys -> target
+            tools -> target
+            stand -> target
+
+      - name: Layering rules and every port
+        run: make check
+
+      - name: Host unit tests
+        run: make test
+
+      - name: Clippy
+        run: make clippy
+
+      - name: Release kernel and Nova stand
+        run: make kernel stand
+
+      - name: Upload the kernel and stand
+        uses: actions/upload-artifact@v4
+        with:
+          name: nova-kernel-stand
+          if-no-files-found: error
+          path: |
+            sys/target/x86_64-unknown-none/release/kernel
+            stand/target/x86_64-unknown-uefi/release/stand.efi
+
+  boot:
+    name: boot under QEMU (manual)
+    needs: check
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sys -> target
+            stand -> target
+
+      - name: Install QEMU, OVMF and disk tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 ovmf gdisk dosfstools
+
+      - name: Build the kernel and the stand
+        run: |
+          (cd sys && cargo build --profile release)
+          make stand
+
+      - name: Build a small EFI system partition
+        run: |
+          set -eu
+          esp="$RUNNER_TEMP/esp"
+          disk="$RUNNER_TEMP/disk.img"
+          mkdir -p "$esp/EFI/BOOT" "$esp/boot/kernel"
+          cp stand/target/x86_64-unknown-uefi/release/stand.efi \
+             "$esp/EFI/BOOT/BOOTX64.EFI"
+          cp sys/target/x86_64-unknown-none/release/kernel \
+             "$esp/boot/kernel/kernel"
+
+          cat > "$esp/boot/stand.conf" <<'EOF'
+          timeout: 0
+          default_entry: 1
+
+          /Nova
+              protocol: freebsd
+              path: boot():/boot/kernel/kernel
+              cmdline: -v
+          EOF
+
+          cat > "$esp/boot/loader.conf" <<'EOF'
+          console="comconsole"
+          boot_mute="NO"
+          EOF
+
+          truncate -s 128M "$disk"
+          sgdisk -n 1:2048:+64M -t 1:ef00 "$disk"
+          loop=$(sudo losetup --find --show --partscan "$disk")
+          trap 'sudo umount /mnt/nova 2>/dev/null || true; sudo losetup -d "$loop" 2>/dev/null || true' EXIT
+          sudo partprobe "$loop" 2>/dev/null || true
+          sudo udevadm settle 2>/dev/null || true
+          sudo mkfs.vfat -F 32 -n NOVA "${loop}p1"
+          sudo mkdir -p /mnt/nova
+          sudo mount "${loop}p1" /mnt/nova
+          sudo cp -R "$esp"/. /mnt/nova/
+          sudo umount /mnt/nova
+          sudo losetup -d "$loop"
+          trap - EXIT
+
+      - name: Boot and check the console
+        run: |
+          set -eu
+          cp /usr/share/OVMF/OVMF_VARS.fd "$RUNNER_TEMP/vars.fd"
+          set +e
+          timeout 90 qemu-system-x86_64 \
+            -machine q35 -cpu max -smp 2 -m 512M \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+            -drive if=pflash,format=raw,file="$RUNNER_TEMP/vars.fd" \
+            -drive file="$RUNNER_TEMP/disk.img",format=raw,if=ide \
+            -display none -serial stdio -no-reboot 2>&1 | tee boot.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "qemu exit: $rc"
+
+          for text in "Nova 0.1.0-CURRENT" "real memory" "Timecounters tick"; do
+            if ! grep -q "$text" boot.log; then
+              echo "::error::boot log is missing: $text"
+              cat boot.log
+              exit 1
+            fi
+          done
+
+          echo "boot: the kernel reached the clock; console output is above"
+
+      - name: Keep the boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log
+          if-no-files-found: ignore
+          path: boot.log
