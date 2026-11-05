@@ -300,7 +300,7 @@ impl Proc {
             fd: Filedesc::console()?,
             cwd: MtxSpin::new(crate::vfs_mount::rootvnode()),
             umask: AtomicU32::new(0o022),
-            rlimits: MtxSpin::new(crate::kern_resource::DEFAULT_LIMITS),
+            rlimits: MtxSpin::new(crate::policy::policy().default_limits()),
             nice: core::sync::atomic::AtomicI32::new(0),
             itimer: MtxSpin::new(crate::kern_resource::Itimer { deadline: 0, interval: 0 }),
             loginclass: MtxSpin::new(Comm::from_path("default")),

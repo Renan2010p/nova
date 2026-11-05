@@ -65,7 +65,7 @@ mod freebsd_types;
 mod freebsd_vfs;
 
 
-pub use freebsd_init::FREEBSD_INIT;
+pub use freebsd_init::FREEBSD_POLICY;
 pub use freebsd_sysvec::ELF64_FREEBSD_SYSVEC;
 
 /// `__FreeBSD_version` of the ABI this personality implements

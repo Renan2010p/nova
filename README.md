@@ -93,6 +93,7 @@ See [docs/BOOT.md](docs/BOOT.md) for the boot protocol and testing.
 | [docs/DRIVERS.md](docs/DRIVERS.md) | proposal: native, FreeBSD and Linux drivers, KPI shims, userspace host |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | overview, the `sys/` tree, framekernel, MD/MI, SMP |
 | [docs/LAYERING.md](docs/LAYERING.md) | the layering rules and how they are enforced |
+| [docs/LOCKING.md](docs/LOCKING.md) | the locks, their order, and the lock order checker |
 | [docs/BOOT.md](docs/BOOT.md) | the contract with `loader(8)` and how to test under bhyve |
 | [docs/STYLE.md](docs/STYLE.md) | license header, naming, comments, `unsafe` |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | milestones |

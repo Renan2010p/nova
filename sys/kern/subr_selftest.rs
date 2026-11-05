@@ -40,6 +40,7 @@ pub fn run(verbose: bool, hz: u32) {
     kmem(verbose);
     kthreads(verbose);
     mutex(verbose);
+    smp(verbose);
     preemption(verbose, hz);
 }
 
@@ -185,6 +186,142 @@ fn mutex(verbose: bool) {
     }
 }
 
+/// Producers and consumers on every CPU through a small ring under a spin
+/// mutex, sleeping on wait queues when it is full or empty, while others
+/// hammer a sleep mutex: nothing may be lost, duplicated or deadlocked
+/// (the races of `WaitQueue::wait_until` against `wake_*` across CPUs).
+fn smp(verbose: bool) {
+    use framework::sync::MtxSpin;
+    const PRODUCERS: u64 = 2;
+    const CONSUMERS: u64 = 2;
+    const ITEMS: u64 = 2000;
+    const SLOTS: usize = 8;
+    struct Ring {
+        buf: [u64; SLOTS],
+        head: usize,
+        len: usize,
+    }
+    struct Shared {
+        ring: MtxSpin<Ring>,
+        len: AtomicU64,
+        not_empty: WaitQueue,
+        not_full: WaitQueue,
+        sum: AtomicU64,
+        taken: AtomicU64,
+        counter: Mutex<u64>,
+    }
+    let sh = must(
+        KArc::new(
+            Shared {
+                ring: MtxSpin::new(Ring { buf: [0; SLOTS], head: 0, len: 0 }),
+                len: AtomicU64::new(0),
+                not_empty: WaitQueue::new(),
+                not_full: WaitQueue::new(),
+                sum: AtomicU64::new(0),
+                taken: AtomicU64::new(0),
+                counter: Mutex::new(0),
+            },
+            &M_SELFTEST,
+            M_WAITOK,
+        ),
+        "the ring",
+    );
+    let total = PRODUCERS * ITEMS;
+    let mut threads: KVec<KArc<Task>> = KVec::new(&M_SELFTEST);
+    for p in 0..PRODUCERS {
+        let sh = sh.clone();
+        let t = spawn("producer", move || {
+            for i in 1..=ITEMS {
+                loop {
+                    sh.not_full.wait_until(|| sh.len.load(Ordering::Acquire) < libkern::conv::u64_from_usize(SLOTS));
+                    let mut r = sh.ring.lock();
+                    if r.len < SLOTS {
+                        let at = (r.head + r.len) % SLOTS;
+                        r.buf[at] = p * ITEMS + i;
+                        r.len += 1;
+                        sh.len.store(libkern::conv::u64_from_usize(r.len), Ordering::Release);
+                        break;
+                    }
+                }
+                sh.not_empty.wake_one();
+                *sh.counter.lock() += 1;
+            }
+        });
+        must(threads.push(t, M_WAITOK), "a thread");
+    }
+    for _ in 0..CONSUMERS {
+        let sh = sh.clone();
+        let t = spawn("consumer", move || loop {
+            sh.not_empty.wait_until(|| {
+                sh.len.load(Ordering::Acquire) > 0 || sh.taken.load(Ordering::Acquire) >= total
+            });
+            let item = {
+                let mut r = sh.ring.lock();
+                if r.len == 0 {
+                    None
+                } else {
+                    let v = r.buf[r.head];
+                    r.head = (r.head + 1) % SLOTS;
+                    r.len -= 1;
+                    sh.len.store(libkern::conv::u64_from_usize(r.len), Ordering::Release);
+                    Some(v)
+                }
+            };
+            if let Some(v) = item {
+                sh.sum.fetch_add(v, Ordering::AcqRel);
+                sh.not_full.wake_one();
+                if sh.taken.fetch_add(1, Ordering::AcqRel) + 1 >= total {
+                    // The last item: let the other consumers see it.
+                    sh.not_empty.wake_all();
+                }
+            }
+            if sh.taken.load(Ordering::Acquire) >= total {
+                break;
+            }
+        });
+        must(threads.push(t, M_WAITOK), "a thread");
+    }
+    threads.iter().for_each(join);
+    // Every item, once: the sum of 1..=ITEMS shifted for each producer.
+    let expected: u64 = (0..PRODUCERS).map(|p| p * ITEMS * ITEMS + ITEMS * (ITEMS + 1) / 2).sum();
+    let got = sh.sum.load(Ordering::Acquire);
+    assert_eq!(got, expected, "selftest: smp: items lost or duplicated");
+    assert_eq!(*sh.counter.lock(), total, "selftest: smp: lost updates under the sleep mutex");
+    if verbose {
+        let (classes, edges) = framework::sync::witness::stats();
+        printf!(
+            "selftest: smp: {} producers and {} consumers passed {} items on {} CPU(s); witness: {} lock classes, {} orders, {} reversals\n",
+            PRODUCERS,
+            CONSUMERS,
+            total,
+            framework::cpu::mp_ncpus(),
+            classes,
+            edges,
+            framework::sync::witness::reversals()
+        );
+    }
+}
+
+/// `debug.nova.selftest=witness`: two locks taken in both orders, on
+/// purpose; the lock order checker must report it.
+fn witness_selftest() {
+    let a = must(KArc::new(Mutex::new(()), &M_SELFTEST, M_WAITOK), "lock a");
+    let b = must(KArc::new(Mutex::new(()), &M_SELFTEST, M_WAITOK), "lock b");
+    let before = framework::sync::witness::reversals();
+    printf!("selftest: witness: taking two locks in both orders on purpose\n");
+    {
+        let _a = a.lock();
+        let _b = b.lock();
+    }
+    {
+        let _b = b.lock();
+        let _a = a.lock();
+    }
+    let found = framework::sync::witness::reversals() - before;
+    assert!(found == 1, "selftest: witness: the reversal was not found");
+    printf!("selftest: witness: the reversal was found\n");
+}
+
 /// Threads that never yield must still be preempted by the clock. There
 /// are more spinners than CPUs, and a spinner never gives its CPU up: if
 /// every one of them gets to run, the clock took CPUs away from some.
@@ -239,13 +376,15 @@ fn preemption(verbose: bool, hz: u32) {
     }
 }
 
-/// `debug.nova.selftest=pf` or `=stack`: a fatal trap on purpose.
+/// `debug.nova.selftest=pf` or `=stack`: a fatal trap on purpose;
+/// `=witness`: a lock order reversal on purpose.
 pub fn trap_selftest(kenv: &StaticEnv<'_>) {
     match kenv.getenv("debug.nova.selftest") {
         Some("pf") => {
             printf!("selftest: taking a page fault on purpose\n");
             framework::cpu::cpu_selftest_fault();
         }
+        Some("witness") => witness_selftest(),
         Some("stack") => {
             printf!("selftest: overflowing a kernel stack on purpose\n");
             spawn("overflow", || {

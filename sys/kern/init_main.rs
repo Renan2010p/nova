@@ -41,7 +41,6 @@
 use libkern::conv::u64_from_usize;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use framework::sync::OnceLock;
 use framework::{BootInfo, PAGE_SIZE};
 use sys::copyright::{COPYRIGHT, OSTYPE};
 use sys::reboot::{RB_SINGLE, RB_VERBOSE};
@@ -68,11 +67,12 @@ pub fn bootverbose() -> bool {
 /// on the boot CPU, with interrupts disabled; the framework (page
 /// allocator, heap, thread 0) is already initialized, and `sys/conf` has
 /// registered the ABIs, image activators, file systems and the
-/// [`InitPolicy`].
+/// [`crate::policy::SystemPolicy`].
 pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     // The video console first, as FreeBSD's `cninit`: everything printed
     // from here on shows on the screen too.
     vt::vt_init(boot);
+    framework::sync::witness::set_reporter(witness_report);
     let kenv = StaticEnv::new(boot.envp);
     if let Err(e) = crate::kern_environment::kenv_init(boot.envp) {
         panic!("cannot keep the kernel environment: {e:?}");
@@ -112,45 +112,12 @@ pub fn mi_startup(boot: &BootInfo<'_>) -> ! {
     swapper(param.hz)
 }
 
-/// How the first user program is named and started. A personality
-/// supplies it, so the kernel core does not hardcode another system's
-/// userland conventions. `sys/conf` registers it before `mi_startup`.
-pub trait InitPolicy: Sync {
-    /// The paths tried for `init` when the environment has no
-    /// `init_path` (FreeBSD's default is `/sbin/init:...`).
-    fn init_path(&self) -> &'static str;
-
-    /// The argument single-user mode adds after the program name
-    /// (`-s` for FreeBSD). `None` for a personality that has no such
-    /// mode or spells it differently.
-    fn single_user_arg(&self) -> Option<&'static str> {
-        Some("-s")
-    }
-}
-
-static INIT_POLICY: OnceLock<&'static dyn InitPolicy> = OnceLock::new();
-
-/// Registers the init policy. Called by the kernel binary before
-/// `mi_startup`.
-///
-/// # Panics
-///
-/// If called more than once, or if no policy is registered when
-/// `mi_startup` reaches `init`.
-pub fn set_init_policy(policy: &'static dyn InitPolicy) {
-    assert!(INIT_POLICY.set(policy).is_ok(), "init policy set twice");
-}
-
-fn init_policy() -> &'static dyn InitPolicy {
-    *INIT_POLICY.get().expect("init_main: no init policy registered")
-}
-
 /// Starts the initial user process (`start_init`): execs the first file
 /// of `init_path` found on the root file system, or else preloaded by the
 /// loader (e.g. with `init_load="YES"`, `init_type="nova_exec"` and
 /// `init_name="/sbin/init"` in loader.conf).
 fn start_init(boot: &BootInfo<'_>, kenv: &StaticEnv<'_>, bootverbose: bool) {
-    let policy = init_policy();
+    let policy = crate::policy::policy();
     let init_path = kenv.getenv("init_path").unwrap_or(policy.init_path());
     for path in init_path.split(':') {
         if bootverbose {
@@ -328,4 +295,19 @@ fn linker_preload(boot: &BootInfo<'_>) {
             m.addr().unwrap_or(0)
         );
     }
+}
+
+/// Reports a lock order reversal (FreeBSD's `witness_checkorder`
+/// message): the lock held, the one being taken, where they were made.
+fn witness_report(held: &'static core::panic::Location<'static>, taking: &'static core::panic::Location<'static>) {
+    printf!(
+        "lock order reversal:\n 1st {}:{}:{} (held)\n 2nd {}:{}:{} (being taken)\n 2nd was taken before 1st elsewhere\n",
+        held.file(),
+        held.line(),
+        held.column(),
+        taking.file(),
+        taking.line(),
+        taking.column()
+    );
+    crate::kern_shutdown::kdb_backtrace();
 }

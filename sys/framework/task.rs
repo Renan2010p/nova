@@ -145,6 +145,8 @@ pub struct Task {
     link: MtxSpin<Option<KArc<Task>>>,
     /// True while on a [`TaskQueue`].
     queued: AtomicBool,
+    /// Sleep mutexes it holds, for lock order checking.
+    witness: crate::sync::witness::Held,
 }
 
 // SAFETY: every field but `pcb` is Sync. `pcb` is written only by
@@ -188,6 +190,7 @@ impl Task {
             vmspace: MtxSpin::new(None),
             link: MtxSpin::new(None),
             queued: AtomicBool::new(false),
+            witness: crate::sync::witness::Held::new(),
         })
     }
 
@@ -328,6 +331,7 @@ pub(crate) fn init() {
         vmspace: MtxSpin::new(None),
         link: MtxSpin::new(None),
         queued: AtomicBool::new(false),
+        witness: crate::sync::witness::Held::new(),
     };
     let thread0 =
         KArc::new(thread0, &M_THREAD, M_WAITOK).expect("task::init: no memory for thread 0");
@@ -364,6 +368,17 @@ pub fn current() -> KArc<Task> {
         .borrow()
         .clone()
         .expect("current: no thread")
+}
+
+/// Calls `f` with the sleep mutexes the current thread holds, if there is
+/// a current thread (for lock order checking).
+pub(crate) fn with_current_witness(f: impl FnOnce(&crate::sync::witness::Held)) {
+    let g = intr_guard();
+    let cur = PCPU.get(&g).current.borrow().clone();
+    drop(g);
+    if let Some(t) = cur {
+        f(&t.witness);
+    }
 }
 
 /// Lets other runnable threads run (`kern_yield`).

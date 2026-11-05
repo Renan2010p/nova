@@ -19,7 +19,8 @@
 //! * [`WaitQueue`]: the mechanism to block until a condition holds and to
 //!   wake blocked threads, on which sleep locks and `pause`/`tsleep` are
 //!   built;
-//! * [`OnceLock`]: a value set once and then read without locking.
+//! * [`OnceLock`]: a value set once and then read without locking;
+//! * [`witness`]: lock order verification over all of them.
 //!
 //! Locks that protect data must hand out references to it, which takes
 //! `unsafe`, so they live here, in the framework. Services build waiting
@@ -37,6 +38,7 @@ use crate::sealed;
 mod mutex;
 mod once;
 mod wait;
+pub mod witness;
 
 pub use mutex::{Mutex, MutexGuard};
 pub use once::OnceLock;
@@ -45,13 +47,18 @@ pub use wait::WaitQueue;
 /// A spin mutex that disables interrupts on this CPU while held, so it is
 /// safe to take from interrupt handlers and on any number of CPUs.
 pub struct MtxSpin<T: ?Sized> {
+    /// Where it was created: its class for [`witness`].
+    class: &'static core::panic::Location<'static>,
     lock: SpinLock<T>,
 }
 
 impl<T> MtxSpin<T> {
-    /// Creates an unlocked mutex.
+    /// Creates an unlocked mutex. Its lock-order class is where this is
+    /// called.
+    #[track_caller]
     pub const fn new(data: T) -> Self {
         Self {
+            class: core::panic::Location::caller(),
             lock: SpinLock::new(data),
         }
     }
@@ -62,8 +69,10 @@ impl<T: ?Sized> MtxSpin<T> {
     /// (`mtx_lock_spin`).
     pub fn lock(&self) -> MtxSpinGuard<'_, T> {
         let intr = intr_guard();
+        let class = witness::spin_acquire(self.class, &intr);
         MtxSpinGuard {
             inner: self.lock.lock(),
+            class,
             _intr: intr,
         }
     }
@@ -73,7 +82,9 @@ impl<T: ?Sized> MtxSpin<T> {
     pub fn try_lock(&self) -> Option<MtxSpinGuard<'_, T>> {
         let intr = intr_guard();
         let inner = self.lock.try_lock()?;
-        Some(MtxSpinGuard { inner, _intr: intr })
+        // A try-lock cannot deadlock: it is recorded, not checked.
+        let class = witness::spin_acquire(self.class, &intr);
+        Some(MtxSpinGuard { inner, class, _intr: intr })
     }
 }
 
@@ -83,7 +94,15 @@ pub struct MtxSpinGuard<'a, T: ?Sized> {
     // Field order matters: fields drop in declaration order, so the lock
     // is released before interrupts are re-enabled.
     inner: SpinLockGuard<'a, T>,
+    /// Its class, for [`witness`].
+    class: Option<u8>,
     _intr: IntrGuard,
+}
+
+impl<T: ?Sized> Drop for MtxSpinGuard<'_, T> {
+    fn drop(&mut self) {
+        witness::spin_release(self.class, &self._intr);
+    }
 }
 
 impl<T: ?Sized> Deref for MtxSpinGuard<'_, T> {

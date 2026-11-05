@@ -15,7 +15,8 @@
 //! Resource limits, priorities and interval timers (FreeBSD's
 //! `kern/kern_resource.c` and the `itimer` half of `kern/kern_time.c`).
 //!
-//! Limits are kept per process and inherited; the kernel enforces the
+//! Limits are kept per process and inherited (the first process gets
+//! the system policy's defaults); the kernel enforces the
 //! number of open files (its own table's size bounds it anyway) and
 //! nothing else yet. Priorities are kept for `getpriority`; the 4BSD
 //! scheduler does not weigh them yet.
@@ -110,17 +111,15 @@ pub struct Rlimit {
 
 const INF: Rlimit = Rlimit { cur: RLIM_INFINITY, max: RLIM_INFINITY };
 
-/// The limits a process starts with (FreeBSD amd64's defaults: `maxdsiz`
-/// 32 GiB, `maxssiz` 512 MiB, files as the descriptor table allows).
-pub const DEFAULT_LIMITS: [Rlimit; NRESOURCES] = {
+/// No limit on anything but the descriptor table's size: what a process
+/// starts with unless the system's policy says otherwise
+/// (`SystemPolicy::default_limits`).
+pub const fn unlimited() -> [Rlimit; NRESOURCES] {
     let mut l = [INF; NRESOURCES];
-    l[Resource::Data.index()] = Rlimit { cur: 32 << 30, max: 32 << 30 };
-    l[Resource::Stack.index()] = Rlimit { cur: 512 << 20, max: 512 << 20 };
     let files = libkern::conv::u64_from_usize(crate::kern_descrip::MAXFILES);
     l[Resource::NoFile.index()] = Rlimit { cur: files, max: files };
-    l[Resource::MemLock.index()] = Rlimit { cur: 64 << 10, max: 64 << 10 };
     l
-};
+}
 
 /// A limit of `p` (`kern_getrlimit`).
 pub fn kern_getrlimit(p: &Proc, r: Resource) -> Rlimit {

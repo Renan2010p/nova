@@ -16,7 +16,6 @@ framework = { workspace = true }
 kern = { workspace = true }
 libkern = { workspace = true }
 sys = { workspace = true }
-vm = { workspace = true }
 
 [lints]
 workspace = true

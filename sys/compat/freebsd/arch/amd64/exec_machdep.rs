@@ -19,6 +19,16 @@ use framework::user::UserRegs;
 /// `USRSTACK_LA48`: the top of the user stack, below the shared page.
 pub(crate) const USRSTACK: u64 = 0x0000_8000_0000_0000 - 4096;
 
+/// `MAXDSIZ`: the largest data segment, and where `mmap` starts placing
+/// what has no address (`vm_daddr + maxdsiz`, the program being low).
+pub(crate) const MAXDSIZ: u64 = 32 << 30;
+/// `MAXSSIZ`: the largest stack.
+pub(crate) const MAXSSIZ: u64 = 512 << 20;
+/// Where mappings go by default (see [`MAXDSIZ`]).
+pub(crate) const MMAP_BASE: u64 = MAXDSIZ;
+/// `ET_DYN_LOAD_ADDR`: where a position-independent executable loads.
+pub(crate) const ET_DYN_LOAD_ADDR: u64 = 0x0102_1000;
+
 /// `pagesizes[]` (`MAXPAGESIZES` entries): 4 KiB, 2 MiB, 1 GiB.
 pub(crate) const PAGESIZES: [u64; 3] = [4096, 2 << 20, 1 << 30];
 

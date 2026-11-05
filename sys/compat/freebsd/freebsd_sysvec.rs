@@ -67,6 +67,14 @@ impl ExecAbi for FreebsdSysvec {
         USRSTACK
     }
 
+    fn mmap_base(&self) -> u64 {
+        crate::arch::MMAP_BASE
+    }
+
+    fn pie_base(&self) -> u64 {
+        crate::arch::ET_DYN_LOAD_ADDR
+    }
+
     fn exec_setregs(&self, vm: &VmSpace, image: &ImageParams<'_>, regs: &mut UserRegs) -> KResult<()> {
         map_sigcode(vm)?;
         let stack = freebsd_exec::copyout_strings(vm, image)?;

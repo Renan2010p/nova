@@ -89,7 +89,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
 /// frame, and `--- trap 0xc, rip = ..., rsp = ..., rbp = ... ---` where a
 /// trap or interrupt was taken.
 #[inline(never)]
-fn kdb_backtrace() {
+pub(crate) fn kdb_backtrace() {
     vprintf_unlocked(format_args!("KDB: stack backtrace:\n"));
     let mut frame = 0;
     framework::cpu::stack_trace(&mut |f| {

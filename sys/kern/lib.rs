@@ -57,6 +57,7 @@ pub mod kern_shutdown;
 pub mod kern_sig;
 pub mod kern_synch;
 pub mod kern_thr;
+pub mod policy;
 pub mod sched_4bsd;
 pub mod subr_param;
 pub mod subr_prf;

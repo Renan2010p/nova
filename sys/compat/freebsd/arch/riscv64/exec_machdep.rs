@@ -19,6 +19,15 @@ use framework::user::UserRegs;
 /// `USRSTACK` for Sv39: below the shared page at the top of user space.
 pub(crate) const USRSTACK: u64 = 0x0000_0040_0000_0000 - 4096;
 
+/// `MAXDSIZ`, `MAXSSIZ` (FreeBSD/riscv's).
+pub(crate) const MAXDSIZ: u64 = 1 << 30;
+/// See [`MAXDSIZ`].
+pub(crate) const MAXSSIZ: u64 = 1 << 30;
+/// Where mappings go by default.
+pub(crate) const MMAP_BASE: u64 = MAXDSIZ;
+/// `ET_DYN_LOAD_ADDR` (FreeBSD/riscv's).
+pub(crate) const ET_DYN_LOAD_ADDR: u64 = 0x0010_0000;
+
 /// `pagesizes[]`: 4 KiB, 2 MiB, 1 GiB.
 pub(crate) const PAGESIZES: [u64; 3] = [4096, 2 << 20, 1 << 30];
 

@@ -119,6 +119,15 @@ pub trait ExecAbi: Sync {
     /// below it.
     fn usrstack(&self) -> u64;
 
+    /// Where mappings go when a program does not say (above its data and
+    /// room for it to grow; FreeBSD's `vm_daddr + maxdsiz`); the
+    /// interpreter of a dynamic program is loaded there too.
+    fn mmap_base(&self) -> u64;
+
+    /// Where a position-independent executable is loaded (FreeBSD's
+    /// `ET_DYN_LOAD_ADDR`), without address space randomization.
+    fn pie_base(&self) -> u64;
+
     /// Writes the new image's strings, argument vectors and auxiliary
     /// vector below `usrstack` in `vm`, and sets the registers the program
     /// starts with (`sv_copyout_strings` and `sv_setregs`).

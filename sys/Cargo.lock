@@ -31,7 +31,6 @@ dependencies = [
  "kern",
  "libkern",
  "sys",
- "vm",
 ]
 
 [[package]]

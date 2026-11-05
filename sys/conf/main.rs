@@ -23,7 +23,7 @@
 #![no_main]
 #![deny(unsafe_code)]
 
-/// Registers the ABIs, executable formats, file systems and the init
+/// Registers the ABIs, executable formats, file systems and the system
 /// policy this kernel is built with, then starts the kernel. This is the
 /// only place that names them (rules R9, R15, R19 and R20).
 fn mi_startup(boot: &framework::BootInfo<'_>) -> ! {
@@ -31,7 +31,7 @@ fn mi_startup(boot: &framework::BootInfo<'_>) -> ! {
     kern::kern_exec::register(&exec_elf::ELF64_ACTIVATOR);
     kern::vfs_mount::vfs_register(&ufs::UFS_VFSCONF);
     kern::vfs_mount::vfs_register(&tmpfs::TMPFS_VFSCONF);
-    kern::init_main::set_init_policy(&compat_freebsd::FREEBSD_INIT);
+    kern::policy::set_system_policy(&compat_freebsd::FREEBSD_POLICY);
     kern::init_main::mi_startup(boot)
 }
 

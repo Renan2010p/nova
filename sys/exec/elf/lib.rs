@@ -29,9 +29,9 @@
 //! change.
 //!
 //! Executables (`ET_EXEC`) load where they are linked; position-
-//! independent ones (`ET_DYN`) at [`ET_DYN_LOAD_ADDR`]. An image naming
-//! an interpreter (`PT_INTERP`, the dynamic linker) gets it loaded too,
-//! above the program's data, where `mmap` puts things; the program starts
+//! independent ones (`ET_DYN`) where their ABI says (`pie_base`). An
+//! image naming an interpreter (`PT_INTERP`, the dynamic linker) gets it
+//! loaded too, where `mmap` puts things (`mmap_base`); the program starts
 //! in the interpreter, which finds the program through `AT_BASE`,
 //! `AT_ENTRY` and `AT_PHDR`.
 //!
@@ -52,10 +52,6 @@ use sys::elf::{
     AT_BASE, AT_ENTRY, AT_PHDR, AT_PHENT, AT_PHNUM, ET_DYN, ET_EXEC, Ehdr, PF_W, PF_X, PT_INTERP, PT_LOAD, phdrs,
 };
 use sys::errno::{Errno, KResult};
-
-/// Where a position-independent executable is loaded (FreeBSD amd64's
-/// `ET_DYN_LOAD_ADDR`, without ASLR).
-pub const ET_DYN_LOAD_ADDR: u64 = 0x0102_1000;
 
 /// Longest interpreter path.
 const INTERP_MAX: usize = 1024;
@@ -167,7 +163,7 @@ fn span(head: &[u8], ehdr: &Ehdr) -> KResult<(u64, u64)> {
 
 /// Loads the interpreter at `path` (`__elfN(load_file)`) where `mmap`
 /// would put it; returns its base (`AT_BASE`) and entry point.
-fn load_interp(vm: &VmSpace, path: &[u8]) -> KResult<(u64, u64)> {
+fn load_interp(vm: &VmSpace, path: &[u8], base_hint: u64) -> KResult<(u64, u64)> {
     let vp = image_open(path)?;
     let head = image_head(&vp)?;
     let ehdr = Ehdr::parse(&head).ok_or(Errno::ENOEXEC)?;
@@ -178,7 +174,7 @@ fn load_interp(vm: &VmSpace, path: &[u8]) -> KResult<(u64, u64)> {
     // A free range, found as `mmap` would find one, then released for the
     // segments.
     let none = Prot { read: false, write: false, exec: false };
-    let base = vm.map_anon(vm::vm_mmap::MMAP_BASE, high - low, none, MapPlace::Hint { align_shift: 21 }).map_err(vm_errno)?;
+    let base = vm.map_anon(base_hint, high - low, none, MapPlace::Hint { align_shift: 21 }).map_err(vm_errno)?;
     vm.unmap(base, high - low).map_err(vm_errno)?;
     let loaded = load_segments(vm, &head, &ehdr, &vp, base - low)?;
     Ok((base, loaded.entry))
@@ -201,18 +197,18 @@ fn interp_path<'a>(head: &[u8], ehdr: &Ehdr, file: &dyn ImageFile, buf: &'a mut 
 /// Loads the ELF image in `head`/`file` (`kern_execve` for ELF).
 fn load(head: &[u8], file: &dyn ImageFile, args: &ExecArgs<'_>) -> KResult<Image> {
     let ehdr = Ehdr::parse(head).ok_or(Errno::ENOEXEC)?;
+    let abi = kern_abi::abi_select(&ExecImage::new(head)).ok_or(Errno::ENOEXEC)?;
     let bias = match ehdr.kind {
         ET_EXEC => 0,
-        ET_DYN => ET_DYN_LOAD_ADDR - span(head, &ehdr)?.0,
+        ET_DYN => abi.pie_base() - span(head, &ehdr)?.0,
         _ => return Err(Errno::ENOEXEC),
     };
-    let abi = kern_abi::abi_select(&ExecImage::new(head)).ok_or(Errno::ENOEXEC)?;
     let vm = VmSpace::new()?;
     let prog = load_segments(&vm, head, &ehdr, file, bias)?;
 
     let mut ibuf = [0u8; INTERP_MAX];
     let interp = match interp_path(head, &ehdr, file, &mut ibuf)? {
-        Some(path) => Some(load_interp(&vm, path)?),
+        Some(path) => Some(load_interp(&vm, path, abi.mmap_base())?),
         None => None,
     };
 

@@ -373,7 +373,8 @@ fn sys_mmap(p: &Proc, args: &[u64; 6]) -> KResult<[u64; 2]> {
     let at = match (flags & MAP_FIXED != 0, flags & MAP_EXCL != 0) {
         (true, false) => MmapAt::Fixed(addr),
         (true, true) => MmapAt::FixedNoReplace(addr),
-        (false, _) => MmapAt::Hint { addr, align_shift },
+        // No address: FreeBSD's default place (`vm_daddr + maxdsiz`).
+        (false, _) => MmapAt::Hint { addr: if addr == 0 { crate::arch::MMAP_BASE } else { addr }, align_shift },
     };
     if file {
         let shared = flags & MAP_SHARED != 0;

@@ -17,8 +17,9 @@
 //! disk but the kernel's own names for its devices, so the kernel has it
 //! (as Linux has `devtmpfs`).
 //!
-//! The devices: `console`, the console terminal (also as `ttyu0` and
-//! `ttyv0`); `tty`, the caller's controlling terminal; `null` and `zero`.
+//! The devices: `console`, the console terminal (also under the names
+//! the system policy gives it, FreeBSD's `ttyu0` and `ttyv0`); `tty`, the
+//! caller's controlling terminal; `null` and `zero`.
 //!
 //! TODO(devfs): disks, `fd/` (`fdescfs`), `stdin`/`stdout`/`stderr`,
 //! permissions and `devfs.rules`, devices that come and go.
@@ -49,14 +50,22 @@ const DEVICES: &[(&[u8], u64, Cdev, u16)] = &[
     (b"null", 4, Cdev::Null, 0o666),
     (b"tty", 5, Cdev::Tty, 0o666),
     (b"zero", 6, Cdev::Zero, 0o666),
-    // The console under the names `/etc/ttys` uses: the serial line's
-    // and the first virtual terminal's (one terminal for now).
-    (b"ttyu0", 7, Cdev::Console, 0o600),
-    (b"ttyv0", 8, Cdev::Console, 0o600),
 ];
 
+/// The first file number of the console's other names, which the system
+/// policy gives (FreeBSD's `ttyu0`, `ttyv0`).
+const ALIAS_BASE: u64 = 7;
+
+/// Every device: the kernel's, then the console's other names.
+fn devices() -> impl Iterator<Item = (&'static [u8], u64, Cdev, u16)> {
+    let aliases = crate::policy::policy().console_aliases();
+    DEVICES.iter().copied().chain(
+        aliases.iter().zip(ALIAS_BASE..).map(|(&name, ino)| (name, ino, Cdev::Console, 0o600)),
+    )
+}
+
 fn device(ino: u64) -> Option<(&'static [u8], Cdev, u16)> {
-    DEVICES.iter().find(|d| d.1 == ino).map(|&(n, _, c, m)| (n, c, m))
+    devices().find(|d| d.1 == ino).map(|(n, _, c, m)| (n, c, m))
 }
 
 /// The device file system.
@@ -105,7 +114,7 @@ impl VfsOps for Devfs {
         if name == b"." || name == b".." {
             return Ok(ROOT);
         }
-        DEVICES.iter().find(|d| d.0 == name).map(|d| d.1).ok_or(Errno::ENOENT)
+        devices().find(|d| d.0 == name).map(|d| d.1).ok_or(Errno::ENOENT)
     }
 
     fn read(&self, _ino: u64, _off: u64, _buf: &mut [u8]) -> KResult<usize> {
@@ -128,7 +137,7 @@ impl VfsOps for Devfs {
                 0 => DirEnt { ino: ROOT, kind: Some(VType::Dir), name: b".", next: 1 },
                 1 => DirEnt { ino: ROOT, kind: Some(VType::Dir), name: b"..", next: 2 },
                 n => {
-                    let Some(&(name, ino, _, _)) = usize::try_from(n - 2).ok().and_then(|k| DEVICES.get(k)) else {
+                    let Some((name, ino, _, _)) = usize::try_from(n - 2).ok().and_then(|k| devices().nth(k)) else {
                         return Ok(i);
                     };
                     DirEnt { ino, kind: Some(VType::Chr), name, next: n + 1 }

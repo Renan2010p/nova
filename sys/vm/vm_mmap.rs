@@ -19,11 +19,6 @@
 use framework::user::{Inherit, MapPlace, Prot, VmError, VmSpace};
 use sys::errno::{Errno, KResult};
 
-/// Where mappings without an address go, by default: above the program's
-/// data and its room to grow (FreeBSD starts after `vm_daddr + maxdsiz`;
-/// Nova uses a fixed base until it has resource limits).
-pub const MMAP_BASE: u64 = 0x0000_0008_0000_0000;
-
 /// What to map (`mmap` flags, by name).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MmapAt {
@@ -57,7 +52,8 @@ pub fn kern_mmap_anon(vm: &VmSpace, at: MmapAt, len: u64, prot: Prot) -> KResult
     }
     let r = match at {
         MmapAt::Hint { addr, align_shift } => {
-            let hint = if addr == 0 { MMAP_BASE } else { addr & !0xfff };
+            // The ABI chose the hint (its `mmap_base` for none).
+            let hint = addr & !0xfff;
             vm.map_anon(hint, len, prot, MapPlace::Hint { align_shift })
         }
         MmapAt::Fixed(addr) => vm.map_anon(addr, len, prot, MapPlace::Fixed),

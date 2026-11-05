@@ -24,6 +24,8 @@ use crate::cpu::assert_no_guard;
 
 /// A mutual exclusion lock whose waiters sleep.
 pub struct Mutex<T: ?Sized> {
+    /// Where it was created: its class for [`super::witness`].
+    class: &'static core::panic::Location<'static>,
     locked: AtomicBool,
     waiters: WaitQueue,
     data: UnsafeCell<T>,
@@ -37,9 +39,11 @@ unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
 
 impl<T> Mutex<T> {
-    /// An unlocked mutex.
+    /// An unlocked mutex. Its lock-order class is where this is called.
+    #[track_caller]
     pub const fn new(data: T) -> Self {
         Self {
+            class: core::panic::Location::caller(),
             locked: AtomicBool::new(false),
             waiters: WaitQueue::new(),
             data: UnsafeCell::new(data),
@@ -57,8 +61,9 @@ impl<T: ?Sized> Mutex<T> {
     /// to sleep (FreeBSD's WITNESS reports the same mistake).
     pub fn lock(&self) -> MutexGuard<'_, T> {
         assert_no_guard("acquiring blockable sleep lock with spinlock or critical section held");
+        let class = super::witness::sleep_check(self.class);
         loop {
-            if let Some(g) = self.try_lock() {
+            if let Some(g) = self.try_take(class) {
                 return g;
             }
             self.waiters
@@ -68,19 +73,21 @@ impl<T: ?Sized> Mutex<T> {
 
     /// Acquires the mutex only if it is free (`mtx_trylock`).
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        self.locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| MutexGuard {
-                mutex: self,
-                _not_send: PhantomData,
-            })
+        // A try-lock cannot deadlock: recorded, not checked.
+        self.try_take(super::witness::sleep_class(self.class))
+    }
+
+    fn try_take(&self, class: Option<u8>) -> Option<MutexGuard<'_, T>> {
+        self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).ok()?;
+        super::witness::sleep_acquired(class);
+        Some(MutexGuard { mutex: self, class, _not_send: PhantomData })
     }
 }
 
 /// Proof that a [`Mutex`] is held; releases it (`mtx_unlock`) on drop.
 pub struct MutexGuard<'a, T: ?Sized> {
     mutex: &'a Mutex<T>,
+    class: Option<u8>,
     _not_send: PhantomData<*const ()>,
 }
 
@@ -102,6 +109,7 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
+        super::witness::sleep_release(self.class);
         self.mutex.locked.store(false, Ordering::Release);
         self.mutex.waiters.wake_one();
     }
