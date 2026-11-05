@@ -22,7 +22,10 @@
 # from an EFI system partition; the console is then the screen, mirrored
 # on the serial line), GUI=1 (show the screen in a window; needs a QEMU built
 # with a GUI, the "qemu" package, not "qemu-nox11"), VNC=1 (show it over
-# VNC on localhost:5900 instead), QEMUFLAGS (more QEMU options). QEMU exits
+# VNC on localhost:5900 instead), STAND=1 (boot with the Nova stand
+# instead, from a stand.conf written here), LINUX=vmlinuz and
+# LINUX_INITRD=initrd (with STAND=1: a Linux entry too), QEMUFLAGS (more
+# QEMU options). QEMU exits
 # when the guest reboots or halts.
 #
 # To watch the console on the screen:
@@ -41,6 +44,14 @@ TIMEOUT=${TIMEOUT:-}
 CPU=${CPU:-max}
 WORK=${WORK:-sys/target/qemu}
 UEFI=${UEFI:-}
+AUTOBOOT_DELAY=${AUTOBOOT_DELAY:-1}
+STAND=${STAND:-}
+LINUX=${LINUX:-}
+LINUX_INITRD=${LINUX_INITRD:-}
+STAND_EFI=${STAND_EFI:-stand/target/x86_64-unknown-uefi/release/stand.efi}
+if [ -n "$STAND" ]; then
+	UEFI=1
+fi
 GUI=${GUI:-}
 VNC=${VNC:-}
 EDK2=${EDK2:-/usr/local/share/qemu}
@@ -66,7 +77,7 @@ else
 	CONSOLE="comconsole"
 fi
 cat > "$ROOT/boot/loader.conf" <<CONF
-autoboot_delay="1"
+autoboot_delay="$AUTOBOOT_DELAY"
 beastie_disable="YES"
 console="$CONSOLE"
 boot_mute="NO"
@@ -92,11 +103,62 @@ CONF
 fi
 
 makefs -t ffs -o version=2 -s 64m "$WORK/root.ufs" "$ROOT" >/dev/null
-# An EFI system partition with the host's loader.efi as the default boot
-# program; it finds /boot on the UFS partition.
+# An EFI system partition with a loader.efi as the default boot program.
+# The host's finds /boot on the UFS partition; the Nova stand's reads the
+# EFI partition itself (it has no UFS yet), so /boot goes there too.
 mkdir -p "$WORK/esp/EFI/BOOT"
-cp /boot/loader.efi "$WORK/esp/EFI/BOOT/BOOTX64.EFI"
-makefs -t msdos -o fat_type=16 -s 32m "$WORK/esp.img" "$WORK/esp" >/dev/null
+if [ -n "$STAND" ]; then
+	cp "$STAND_EFI" "$WORK/esp/EFI/BOOT/BOOTX64.EFI"
+	cp -R "$ROOT/boot" "$WORK/esp/"
+	[ -f /boot/device.hints ] && cp /boot/device.hints "$WORK/esp/boot/"
+	# The stand knows no system: stand.conf says what to boot, and how.
+	# The last entry chainloads the host's loader.efi (it then boots
+	# Nova from the UFS partition).
+	cp /boot/loader.efi "$WORK/esp/boot/loader.efi"
+	cat > "$WORK/esp/boot/stand.conf" <<CONF
+timeout: $AUTOBOOT_DELAY
+
+/Renux Nova
+    protocol: freebsd
+    path: boot():/boot/kernel/kernel
+    comment: Boot the kernel with the settings of loader.conf
+
+/Renux Nova (single-user)
+    protocol: freebsd
+    path: boot():/boot/kernel/kernel
+    cmdline: -s
+    comment: Boot to a root shell, without starting services (boot -s)
+
+/Renux Nova (verbose)
+    protocol: freebsd
+    path: boot():/boot/kernel/kernel
+    cmdline: -v
+    comment: Boot with every kernel message shown (boot -v)
+
+/FreeBSD loader
+    protocol: efi
+    path: boot():/boot/loader.efi
+    comment: Chainload FreeBSD's loader.efi
+CONF
+	if [ -n "$LINUX" ]; then
+		cp "$LINUX" "$WORK/esp/boot/vmlinuz"
+		cat >> "$WORK/esp/boot/stand.conf" <<CONF
+
+/Linux
+    protocol: linux
+    path: boot():/boot/vmlinuz
+    cmdline: console=ttyS0 console=tty0
+    comment: Boot Linux through its EFI stub
+CONF
+		if [ -n "$LINUX_INITRD" ]; then
+			cp "$LINUX_INITRD" "$WORK/esp/boot/initrd"
+			echo "    module_path: boot():/boot/initrd" >> "$WORK/esp/boot/stand.conf"
+		fi
+	fi
+else
+	cp /boot/loader.efi "$WORK/esp/EFI/BOOT/BOOTX64.EFI"
+fi
+makefs -t msdos -o fat_type=16 -s 64m "$WORK/esp.img" "$WORK/esp" >/dev/null
 mkimg -s gpt -b /boot/pmbr \
 	-p efi:="$WORK/esp.img" \
 	-p freebsd-boot:=/boot/gptboot \

@@ -29,7 +29,8 @@
  */
 
 //! The "Terminus BSD Console" 8x16 font, FreeBSD's built-in console
-//! font (`vt_font_default`), in the layout of `sys::font`.
+//! font (`vt_font_default`), in the layout of `sys::font`. Shared by the
+//! kernel's console (`sys/dev/vt`) and the Nova stand's menu.
 
 /// Glyph width in pixels.
 pub const WIDTH: u32 = 8;

@@ -1,0 +1,22 @@
+[package]
+name = "freebsd_amd64_efi"
+description = "Nova stand: FreeBSD's boot protocol on amd64 from UEFI (FreeBSD's stand/efi/loader/arch/amd64)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+common = { workspace = true }
+efi = { workspace = true }
+freebsd = { workspace = true }
+libkern = { workspace = true }
+sys = { workspace = true }
+
+[lints]
+workspace = true

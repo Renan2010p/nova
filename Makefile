@@ -17,7 +17,7 @@ FREEBSD_SRC?=	/usr/src
 # Program preloaded as /sbin/init by `make bhyve`; INIT= for none.
 INIT?=		${USERLAND}/hello
 
-all: kernel userland
+all: kernel userland stand
 
 # Layering rules first: a kernel that violates MD/MI separation is not built.
 kernel: check
@@ -34,6 +34,12 @@ check:
 	    ${CARGO} check -q -p kernel --target $$t || exit 1; \
 	    echo "check: the kernel compiles for $$t"; \
 	done
+
+# The Nova stand: stand.efi, the UEFI boot loader (stand/).
+STAND_EFI=	stand/target/x86_64-unknown-uefi/${PROFILE}/stand.efi
+stand:
+	cd stand && ${CARGO} build --profile ${PROFILE} --target x86_64-unknown-uefi
+	@echo "==> ${STAND_EFI}"
 
 # Test programs for the FreeBSD ABI, built with the host's binutils (no
 # libc): ${USERLAND}/hello is the default init under bhyve.
@@ -63,10 +69,13 @@ abidump:
 	/usr/bin/clang -O2 -Wall -o sys/target/abidump tools/abidump/abidump.c
 	sys/target/abidump
 
-# Regenerates the built-in console font from FreeBSD's vt_font_default.c.
+# Regenerates the fonts: the console's (FreeBSD's vt_font_default.c) and
+# the PC's VGA font of the boot menu (share/vt/fonts/vgarom-8x16.hex).
 font:
 	cd tools && ${CARGO} run -q -p makefont -- \
-	    ${FREEBSD_SRC}/sys/dev/vt/font/vt_font_default.c ../sys/dev/vt/font/vt_font_default.rs
+	    ${FREEBSD_SRC}/sys/dev/vt/font/vt_font_default.c ../sys/sys/font_default.rs
+	cd tools && ${CARGO} run -q -p makefont -- --hex \
+	    ${FREEBSD_SRC}/share/vt/fonts/vgarom-8x16.hex ../sys/sys/font_vga.rs
 
 # Crates that are plain logic are unit-tested on the host.
 test:
@@ -117,15 +126,18 @@ bhyve:
 # loader(8) from a UFS disk image); no root needed. Same options as bhyve,
 # plus TIMEOUT=secs and UEFI=1 (edk2 firmware, loader.efi, and the kernel
 # console on the screen too); GUI=1 shows the screen in a window, VNC=1
-# over VNC.
+# over VNC; STAND=1 boots with the Nova stand's stand.efi instead of the
+# host's (implies UEFI=1); KERNEL_FILE= boots another kernel (for instance
+# /boot/kernel/kernel, FreeBSD's own).
+KERNEL_FILE?=	${KERNEL}
 qemu:
-	@test -f ${KERNEL} || { echo "qemu: ${KERNEL} not found; run make first" >&2; exit 1; }
+	@test -f ${KERNEL_FILE} || { echo "qemu: ${KERNEL_FILE} not found; run make first" >&2; exit 1; }
 	CPUS="${CPUS}" VERBOSE="${VERBOSE}" SELFTEST="${SELFTEST}" INIT="${INIT}" INIT_NAME="${INIT_NAME}" TIMEOUT="${TIMEOUT}" \
-	    UEFI="${UEFI}" GUI="${GUI}" VNC="${VNC}" \
-	    sh tools/qemu/run.sh ${KERNEL}
+	    UEFI="${UEFI}" GUI="${GUI}" VNC="${VNC}" STAND="${STAND}" STAND_EFI="${STAND_EFI}" \
+	    sh tools/qemu/run.sh ${KERNEL_FILE}
 
 clean:
 	cd sys && ${CARGO} clean
 	cd tools && ${CARGO} clean
 
-.PHONY: all kernel userland sysent font abidump check test clippy miri kani bhyve qemu clean
+.PHONY: all kernel stand userland sysent font abidump check test clippy miri kani bhyve qemu clean

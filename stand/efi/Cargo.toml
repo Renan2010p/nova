@@ -1,0 +1,18 @@
+[package]
+name = "efi"
+description = "Nova stand: the UEFI interface (the role of FreeBSD's stand/efi/libefi)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+libkern = { workspace = true }
+
+[lints]
+workspace = true

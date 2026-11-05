@@ -27,6 +27,15 @@ FreeBSD userland; real hardware comes after.
 | 8 | Network (virtio-net, TCP/IP) | `fetch` works | |
 | 9+ | FreeBSD test suite (`/usr/tests`, kyua) as the compatibility score; real hardware; Renux "Nova" | | |
 
+## The Nova stand (bootloader)
+
+| # | Milestone | Done when | Status |
+|---|---|---|---|
+| S1 | `stand.efi` in Rust (`stand/`), a loader that knows no system: `stand.conf` (Limine's syntax) and a menu laid out as Limine's; protocols `freebsd` (FreeBSD's `loader.efi`: environment, preload metadata, amd64 trampoline), `linux` (EFI stub, initrd), `efi` (chainload) | it boots FreeBSD 15.1's own kernel to `mountroot>`, the Nova kernel, Alpine Linux, and FreeBSD's `loader.efi` | **done** (QEMU with edk2) |
+| S2 | Modules for `freebsd` (`module_path`, `*_load`: Nova's init, FreeBSD's `.ko`), symbols for DDB, `loader.conf.d` | FreeBSD boots with modules; Nova's init loads | |
+| S3 | Other volumes and filesystems (UFS, shared with the kernel; ext4); sub-entries and the entry editor | boots from a FreeBSD disk | |
+| S4 | BIOS path (`gptboot`, `loader`) and `userboot` for bhyve | bhyve boots with the Nova stand | |
+
 Tools planned along the way:
 
 * `tools/makesyscalls`: generates `compat/freebsd/freebsd_syscalls.rs`

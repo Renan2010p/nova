@@ -143,6 +143,61 @@ fn parse(buf: &[u8], off: usize) -> Option<(Record<'_>, usize)> {
     Some((Record { kind, data }, roundup2(end, MD_ALIGN)?))
 }
 
+/// Writes preload metadata into a buffer (the loader's `md_copymodules`):
+/// records of a 32-bit type, a 32-bit size and the data, each padded to 8
+/// bytes, ended by `MODINFO_END`. The reader is [`Preload`]; one format,
+/// both sides of the boot protocol.
+pub struct PreloadWriter<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl<'a> PreloadWriter<'a> {
+    /// Writes into `buf`, from its start.
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, len: 0 }
+    }
+
+    /// Appends a record. Returns the offset of its data in the buffer (to
+    /// patch it later, e.g. `MODINFOMD_KERNEND`), or `None` if it does not
+    /// fit.
+    pub fn record(&mut self, kind: u32, data: &[u8]) -> Option<usize> {
+        let at = self.reserve(kind, data.len())?;
+        self.buf.get_mut(at..at + data.len())?.copy_from_slice(data);
+        Some(at)
+    }
+
+    /// Appends a record of `size` zero bytes, to be filled in later.
+    /// Returns the offset of its data.
+    pub fn reserve(&mut self, kind: u32, size: usize) -> Option<usize> {
+        let start = self.len;
+        let data = start.checked_add(HDR_SIZE)?;
+        let end = roundup2(data.checked_add(size)?, MD_ALIGN)?;
+        let rec = self.buf.get_mut(start..end)?;
+        rec.fill(0);
+        rec.get_mut(..4)?.copy_from_slice(&kind.to_ne_bytes());
+        rec.get_mut(4..8)?.copy_from_slice(&u32::try_from(size).ok()?.to_ne_bytes());
+        self.len = end;
+        Some(data)
+    }
+
+    /// A metadata record of the current module (`MODINFO_METADATA | md`).
+    pub fn metadata(&mut self, md: u32, data: &[u8]) -> Option<usize> {
+        self.record(MODINFO_METADATA | md, data)
+    }
+
+    /// The buffer, to patch reserved records.
+    pub fn buf_mut(&mut self) -> &mut [u8] {
+        self.buf
+    }
+
+    /// Ends the list (`MODINFO_END`) and returns its total size.
+    pub fn finish(mut self) -> Option<usize> {
+        self.reserve(MODINFO_END, 0)?;
+        Some(self.len)
+    }
+}
+
 /// Iterator over raw records. Stops at `MODINFO_END` or at the first
 /// malformed record.
 #[derive(Clone, Debug)]
@@ -304,6 +359,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn writer_round_trips() {
+        let mut buf = [0u8; 256];
+        let mut w = PreloadWriter::new(&mut buf);
+        w.record(MODINFO_NAME, b"/boot/kernel/kernel\0").unwrap();
+        w.record(MODINFO_TYPE, b"elf kernel\0").unwrap();
+        let at = w.metadata(MODINFOMD_KERNEND, &0u64.to_ne_bytes()).unwrap();
+        w.buf_mut()[at..at + 8].copy_from_slice(&0x1234u64.to_ne_bytes());
+        let len = w.finish().unwrap();
+        let p = Preload::new(&buf[..len]);
+        let k = p.kernel().unwrap();
+        assert_eq!(k.name(), Some("/boot/kernel/kernel"));
+        assert_eq!(k.md(MODINFOMD_KERNEND).and_then(|r| r.as_u64()), Some(0x1234));
+    }
+
     fn sample() -> Vec<u8> {
         let mut b = Vec::new();
         push(&mut b, MODINFO_NAME, b"/boot/nova/kernel\0");
@@ -346,9 +416,9 @@ mod tests {
         let p = Preload::new(&buf);
         let names: Vec<_> = p.modules().filter_map(|m| m.name()).collect();
         assert_eq!(names, ["/boot/nova/kernel", "/boot/kernel/zfs.ko"]);
-        let zfs = p.search_by_type("elf obj module").unwrap();
-        assert_eq!(zfs.md(MODINFOMD_HOWTO).and_then(|r| r.as_u32()), Some(0x2));
-        assert_eq!(zfs.records().count(), 3);
+        let module = p.search_by_type("elf obj module").unwrap();
+        assert_eq!(module.md(MODINFOMD_HOWTO).and_then(|r| r.as_u32()), Some(0x2));
+        assert_eq!(module.records().count(), 3);
     }
 
     #[test]

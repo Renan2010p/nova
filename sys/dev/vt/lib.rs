@@ -30,7 +30,6 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-mod font;
 mod vt_core;
 
 pub use vt_core::{Attr, vt_init, vt_putc};

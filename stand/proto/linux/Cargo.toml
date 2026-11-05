@@ -1,0 +1,20 @@
+[package]
+name = "linux"
+description = "Nova stand: Linux's boot protocol, through the kernel's EFI stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+common = { workspace = true }
+efi = { workspace = true }
+libkern = { workspace = true }
+
+[lints]
+workspace = true

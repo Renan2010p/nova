@@ -17,11 +17,10 @@
 use framework::fb::{Framebuffer, Glyph, Pixel, framebuffer};
 use framework::sync::MtxSpin;
 use framework::BootInfo;
-use sys::font::{Font, VFNT_MAPS};
+use sys::font::Font;
 use sys::linker::MODINFOMD_FONT;
 use sys::reboot::{RB_MULTIPLE, RB_SERIAL};
 
-use crate::font::vt_font_default as builtin;
 
 /// How text is drawn (FreeBSD's `TERMINAL_KERN_ATTR` and
 /// `TERMINAL_NORM_ATTR`).
@@ -69,14 +68,6 @@ fn loader_font(boot: &BootInfo<'_>) -> Option<Font<'static>> {
     Font::from_font_info(boot.loaded.get(off..)?)
 }
 
-/// The built-in font (`vt_font_default`).
-fn builtin_font() -> Option<Font<'static>> {
-    let mut maps: [&'static [u8]; VFNT_MAPS] = [&[]; VFNT_MAPS];
-    maps[sys::font::VFNT_MAP_NORMAL] = &builtin::MAP_NORMAL;
-    maps[sys::font::VFNT_MAP_BOLD] = &builtin::MAP_BOLD;
-    Font::new(builtin::WIDTH, builtin::HEIGHT, &builtin::BITMAP, maps)
-}
-
 /// `percent` of full intensity, as `vt_termcolors.c` computes it.
 const fn level(percent: u32) -> u8 {
     let v = percent * 255 / 100;
@@ -94,7 +85,7 @@ pub fn vt_init(boot: &BootInfo<'_>) {
         return;
     }
     let Some(fb) = framebuffer() else { return };
-    let Some(font) = loader_font(boot).or_else(builtin_font) else { return };
+    let Some(font) = loader_font(boot).or_else(sys::font::builtin) else { return };
     let cols = fb.width() / font.width;
     let rows = fb.height() / font.height;
     if cols == 0 || rows == 0 {

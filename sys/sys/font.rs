@@ -128,6 +128,23 @@ impl<'a> Font<'a> {
     }
 }
 
+/// The built-in console font (FreeBSD's `vt_font_default`).
+pub fn builtin() -> Option<Font<'static>> {
+    use crate::font_default as f;
+    let mut maps: [&'static [u8]; VFNT_MAPS] = [&[]; VFNT_MAPS];
+    maps[VFNT_MAP_NORMAL] = &f::MAP_NORMAL;
+    maps[VFNT_MAP_BOLD] = &f::MAP_BOLD;
+    Font::new(f::WIDTH, f::HEIGHT, &f::BITMAP, maps)
+}
+
+/// The PC's VGA 8x16 text-mode font (from FreeBSD's `vgarom-8x16`).
+pub fn vga() -> Option<Font<'static>> {
+    use crate::font_vga as f;
+    let mut maps: [&'static [u8]; VFNT_MAPS] = [&[]; VFNT_MAPS];
+    maps[VFNT_MAP_NORMAL] = &f::MAP_NORMAL;
+    Font::new(f::WIDTH, f::HEIGHT, &f::BITMAP, maps)
+}
+
 #[cfg(test)]
 #[allow(clippy::as_conversions, reason = "host test fixtures, not kernel code")]
 mod tests {
@@ -170,3 +187,4 @@ mod tests {
         assert!(Font::from_font_info(&b).is_none(), "a bad checksum is refused");
     }
 }
+

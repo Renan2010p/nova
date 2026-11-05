@@ -32,6 +32,8 @@ pub mod copyright;
 pub mod elf;
 pub mod errno;
 pub mod font;
+pub mod font_default;
+pub mod font_vga;
 pub mod kenv;
 pub mod linker;
 pub mod physmem;

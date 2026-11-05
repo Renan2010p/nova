@@ -1,0 +1,19 @@
+[package]
+name = "chainload"
+description = "Nova stand: chainloading another EFI program (Limine's efi protocol)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+common = { workspace = true }
+efi = { workspace = true }
+
+[lints]
+workspace = true

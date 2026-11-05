@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# Copyright (c) 2026 Renan Lucas Vieira Hilário
+#
+# This file is part of the Nova Project, the kernel of the
+# Renux "Nova" Project.
+#
+# The Nova stand: a bootloader that knows no operating system. Its core
+# reads stand.conf (Limine's syntax), shows the menu and talks to the
+# firmware; each boot protocol is a crate of its own under proto/ (as the
+# kernel's ABIs under compat/): FreeBSD's loader(8) protocol (the Nova
+# kernel, FreeBSD), Linux's EFI stub, and chainloading another EFI program
+# (Windows, other loaders). One binary in conf/ puts them together.
+
+[workspace]
+resolver = "3"
+members = [
+    # firmware interface: UEFI, the same on every architecture (trusted)
+    "efi",
+    # MI core: stand.conf, the menu, ELF (100% safe; no operating system)
+    "common",
+    # boot protocols, one crate each (MI), with their MD halves
+    "proto/freebsd",
+    "proto/freebsd/arch/amd64/efi",
+    "proto/linux",
+    "proto/chainload",
+    # the binary: stand.efi
+    "conf",
+]
+default-members = [
+    # firmware interface: UEFI, the same on every architecture (trusted)
+    "efi",
+    # MI core: stand.conf, the menu, ELF (100% safe; no operating system)
+    "common",
+    # boot protocols, one crate each (MI), with their MD halves
+    "proto/freebsd",
+    "proto/freebsd/arch/amd64/efi",
+    "proto/linux",
+    "proto/chainload",
+    # the binary: stand.efi
+    "conf",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+authors = ["Renan Lucas Vieira Hilário"]
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+efi = { path = "efi" }
+common = { path = "common" }
+freebsd = { path = "proto/freebsd" }
+freebsd_amd64_efi = { path = "proto/freebsd/arch/amd64/efi" }
+linux = { path = "proto/linux" }
+chainload = { path = "proto/chainload" }
+# Shared with the kernel: both sides of the FreeBSD boot protocol use one
+# definition of it (only proto/freebsd uses sys).
+sys = { path = "../sys/sys" }
+libkern = { path = "../sys/libkern" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+as_conversions = "deny"
+unwrap_used = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = true
+overflow-checks = true

@@ -1,0 +1,27 @@
+[package]
+name = "stand"
+description = "Nova stand: stand.efi, the UEFI boot loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The output is stand.efi; installed as /EFI/BOOT/BOOTX64.EFI or anywhere
+# the firmware is told to start it.
+[[bin]]
+name = "stand"
+path = "main.rs"
+test = false
+bench = false
+
+[dependencies]
+chainload = { workspace = true }
+common = { workspace = true }
+efi = { workspace = true }
+freebsd_amd64_efi = { workspace = true }
+linux = { workspace = true }
+
+[lints]
+workspace = true
