@@ -3,10 +3,11 @@
 # Nova CI.
 #
 # Every push and pull request builds the kernel for amd64 and riscv64,
-# runs the host unit tests, the layering rules and clippy.  The boot job
-# is manual (Actions -> CI -> Run workflow): it builds the Nova stand,
-# makes a small EFI system partition with the kernel and stand.conf,
-# and boots the kernel under QEMU with OVMF, checking the console.
+# runs the host unit tests, the layering rules and clippy.  On main (and
+# on demand: Actions -> CI -> Run workflow) a boot job also builds the
+# Nova stand, makes a small EFI system partition with the kernel and
+# stand.conf, and boots the kernel under QEMU with OVMF, checking the
+# console.
 
 name: CI
 
@@ -71,9 +72,9 @@ jobs:
             stand/target/x86_64-unknown-uefi/release/stand.efi
 
   boot:
-    name: boot under QEMU (manual)
+    name: boot under QEMU
     needs: check
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
